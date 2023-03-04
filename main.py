@@ -47,12 +47,12 @@ def test():
     debug_modules = [
         DecodeVAE(in_name='latent_image', out_name='decoded_image', vae=vae),
         DecodeVAE(in_name='latent_conditioning_image', out_name='decoded_conditioning_image', vae=vae),
-        SaveImage(image_in_name='decoded_image', original_path_in_name='image_path', postfix='', path='debug', in_range_min=-1, in_range_max=1),
-        SaveImage(image_in_name='mask', original_path_in_name='image_path', postfix='-mask', path='debug', in_range_min=0, in_range_max=1),
-        SaveImage(image_in_name='decoded_conditioning_image', original_path_in_name='image_path', postfix='-conditioning', path='debug', in_range_min=-1, in_range_max=1),
-        SaveImage(image_in_name='depth', original_path_in_name='image_path', postfix='-depth', path='debug', in_range_min=-1, in_range_max=1),
-        SaveImage(image_in_name='latent_mask', original_path_in_name='image_path', postfix='-latent-mask', path='debug', in_range_min=0, in_range_max=1),
-        SaveImage(image_in_name='latent_depth', original_path_in_name='image_path', postfix='-latent-depth', path='debug', in_range_min=-1, in_range_max=1),
+        SaveImage(image_in_name='decoded_image', original_path_in_name='image_path', path='debug', in_range_min=-1, in_range_max=1),
+        SaveImage(image_in_name='mask', original_path_in_name='image_path', path='debug', in_range_min=0, in_range_max=1),
+        SaveImage(image_in_name='decoded_conditioning_image', original_path_in_name='image_path', path='debug', in_range_min=-1, in_range_max=1),
+        SaveImage(image_in_name='depth', original_path_in_name='image_path', path='debug', in_range_min=-1, in_range_max=1),
+        SaveImage(image_in_name='latent_mask', original_path_in_name='image_path', path='debug', in_range_min=0, in_range_max=1),
+        SaveImage(image_in_name='latent_depth', original_path_in_name='image_path', path='debug', in_range_min=-1, in_range_max=1),
     ]
 
     output_modules = [
@@ -64,8 +64,10 @@ def test():
     ], [input_modules, debug_modules, output_modules])
     dl = TrainDataLoader(ds, batch_size=BATCH_SIZE)
 
-    for batch in tqdm(dl):
-        pass
+    for epoch in range(10):
+        ds.start_next_epoch()
+        for batch in tqdm(dl):
+            pass
 
 
 if __name__ == '__main__':

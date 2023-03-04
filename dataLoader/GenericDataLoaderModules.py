@@ -1,11 +1,11 @@
 import math
 import os
-import random
 
 import numpy as np
 import torch
 from PIL import Image
 from torchvision import transforms
+from torchvision.transforms import functional
 from tqdm import tqdm
 
 from dataLoader.TrainDataSet import PipelineModule
@@ -341,10 +341,17 @@ class RandomFlip(PipelineModule):
         return self.names
 
     def get_item(self, index: int) -> dict:
+        rand = self.get_rand(index)
         item = {}
 
+        check = rand.random()
+        flip = check < 0.5
+
         for name in self.names:
-            item[name] = self.get_previous_item(name, index)
+            previous_item = self.get_previous_item(name, index)
+            if flip:
+                previous_item = functional.hflip(previous_item)
+            item[name] = previous_item
 
         return item
 
@@ -478,17 +485,19 @@ class AspectBatchSorting(PipelineModule):
         self.index_list = self.shuffle()
 
     def shuffle(self) -> list[int]:
+        rand = self.get_rand()
+
         # generate a shuffled list of batches
         batches = []
         for bucket_key in self.bucket_dict.keys():
             batch_count = int(len(self.bucket_dict[bucket_key]) / self.batch_size)
             batches.extend((bucket_key, i) for i in range(batch_count))
-        random.shuffle(batches)
+        rand.shuffle(batches)
 
         # for each bucket, generate a shuffled list of samples
         samples = {bucket_key: self.bucket_dict[bucket_key].copy() for bucket_key in self.bucket_dict.keys()}
         for sample_key in samples:
-            random.shuffle(samples[sample_key])
+            rand.shuffle(samples[sample_key])
 
         # calculate the order of samples
         index_list = []

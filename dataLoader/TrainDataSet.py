@@ -1,4 +1,6 @@
+import random
 from abc import abstractmethod, ABCMeta
+from random import Random
 
 import torch
 from torch.utils.data import DataLoader, Dataset
@@ -6,6 +8,7 @@ from torch.utils.data import DataLoader, Dataset
 
 class PipelineModule(metaclass=ABCMeta):
     pipeline: 'LoadingPipeline'
+    base_seed: int
     module_index: int
     previous_item_cache_index: int
     previous_item_cache: dict
@@ -14,8 +17,9 @@ class PipelineModule(metaclass=ABCMeta):
     def __init__(self):
         self.clear_previous_cache()
 
-    def init(self, pipeline: 'LoadingPipeline', module_index: int):
+    def init(self, pipeline: 'LoadingPipeline', base_seed: int, module_index: int):
         self.pipeline = pipeline
+        self.base_seed = base_seed
         self.module_index = module_index
 
     def clear_previous_cache(self):
@@ -47,6 +51,10 @@ class PipelineModule(metaclass=ABCMeta):
                     break
 
         return self.previous_length_cache[name]
+
+    def get_rand(self, index: int = -1) -> Random:
+        seed = hash((self.base_seed, self.module_index, self.pipeline.current_epoch, index))
+        return Random(seed)
 
     @abstractmethod
     def length(self) -> int:
@@ -92,22 +100,24 @@ class LoadingPipeline:
     device: torch.device
     concepts: list[dict]
     modules: list[PipelineModule]
+    current_epoch: int
 
-    def __init__(self, device: torch.device, concepts: list[dict], modules: list):
+    def __init__(self, device: torch.device, concepts: list[dict], modules: list, seed: int):
         self.device = device
         self.concepts = concepts
-        self.modules = list(filter(lambda x: x is not None, self.flatten(modules)))
+        self.modules = list(filter(lambda x: x is not None, self.__flatten(modules)))
         self.cached_length = None
 
         self.modules.insert(0, ConceptPipelineModule(self.concepts))
-
         for index, module in enumerate(self.modules):
-            module.init(self, index)
+            module.init(self, seed, index)
 
-    def flatten(self, data: list | object) -> list:
+        self.current_epoch = -1
+
+    def __flatten(self, data: list | object) -> list:
         if isinstance(data, list):
             new_list = []
-            for x in [self.flatten(x) for x in data]:
+            for x in [self.__flatten(x) for x in data]:
                 new_list.extend(x)
             return new_list
         else:
@@ -125,21 +135,24 @@ class LoadingPipeline:
         Can be used to add caching or other logic that should run once.
         """
 
-        for module_index in range(1, len(self.modules)):
+        for module_index in range(len(self.modules)):
             module = self.modules[module_index]
             module.preprocess()
 
     def get_item(self, index: int) -> dict:
-        # At the start of each epoch, the previous cache is cleared.
-        # This prevents duplicating samples when training on single images.
-        if index == 0:
-            for module in self.modules:
-                module.clear_previous_cache()
 
         module_index = len(self.modules) - 1
         last_module = self.modules[module_index]
 
         return last_module.get_item(index)
+
+    def start_next_epoch(self):
+        self.current_epoch += 1
+
+        # At the start of each epoch, the previous cache is cleared.
+        # This prevents duplicating samples when training on single images.
+        for module in self.modules:
+            module.clear_previous_cache()
 
 
 class TrainDataSet(Dataset):
@@ -151,9 +164,11 @@ class TrainDataSet(Dataset):
             device: torch.device,
             concepts: [dict],
             definition: [PipelineModule],
+            seed: int = 42
     ):
         self.device = device
-        self.loading_pipeline = LoadingPipeline(device, concepts, definition)
+        seed = (random.randint(-((1 << 30) - 1), (1 << 30) - 1) if seed == -1 else seed)
+        self.loading_pipeline = LoadingPipeline(device, concepts, definition, seed=seed)
 
         self.loading_pipeline.start()
 
@@ -162,6 +177,9 @@ class TrainDataSet(Dataset):
 
     def __getitem__(self, index):
         return self.loading_pipeline.get_item(index)
+
+    def start_next_epoch(self):
+        self.loading_pipeline.start_next_epoch()
 
 
 class TrainDataLoader(DataLoader):
