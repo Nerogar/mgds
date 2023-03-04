@@ -93,10 +93,10 @@ class LoadingPipeline:
     concepts: list[dict]
     modules: list[PipelineModule]
 
-    def __init__(self, device: torch.device, concepts: list[dict], modules: list[PipelineModule]):
+    def __init__(self, device: torch.device, concepts: list[dict], modules: list):
         self.device = device
         self.concepts = concepts
-        self.modules = list(filter(lambda x: x is not None, modules))
+        self.modules = list(filter(lambda x: x is not None, self.flatten(modules)))
         self.cached_length = None
 
         self.modules.insert(0, ConceptPipelineModule(self.concepts))
@@ -104,7 +104,16 @@ class LoadingPipeline:
         for index, module in enumerate(self.modules):
             module.init(self, index)
 
-    def length(self):
+    def flatten(self, data: list | object) -> list:
+        if isinstance(data, list):
+            new_list = []
+            for x in [self.flatten(x) for x in data]:
+                new_list.extend(x)
+            return new_list
+        else:
+            return [data]
+
+    def length(self) -> int:
         if not self.cached_length:
             self.cached_length = self.modules[-1].length()
 

@@ -408,7 +408,7 @@ class DiskCache(PipelineModule):
                     caching_done = True
 
         if caching_done:
-            length = len(os.listdir(self.cache_length))
+            length = len(os.listdir(self.cache_dir))
         else:
             length = self.get_previous_length(self.names[0])
 
@@ -447,10 +447,10 @@ class AspectBatchSorting(PipelineModule):
         return len(self.index_list)
 
     def get_inputs(self) -> list[str]:
-        return [self.resolution_in_name]
+        return [self.resolution_in_name] + self.names
 
     def get_outputs(self) -> list[str]:
-        return []
+        return self.names
 
     def preprocess(self):
         resolutions = []

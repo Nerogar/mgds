@@ -1,3 +1,5 @@
+import os.path
+
 from dataLoader.DebugDataLoaderModules import SaveImage, DecodeVAE
 from dataLoader.DiffusersDataLoaderModules import *
 from dataLoader.GenericDataLoaderModules import *
@@ -10,14 +12,14 @@ BATCH_SIZE = 4
 
 
 def test():
-    vae = AutoencoderKL.from_pretrained('F:\\StableTunerPip\\models\\v2-0-base\\vae').to(DEVICE)
-    depth_estimator = DPTForDepthEstimation.from_pretrained('F:\\StableTunerPip\\models\\v2-0-depth\\depth_estimator').to(DEVICE)
-    image_depth_processor = DPTImageProcessor.from_pretrained('F:\\StableTunerPip\\models\\v2-0-depth\\feature_extractor')
-    tokenizer = CLIPTokenizer.from_pretrained('F:\\StableTunerPip\\models\\v2-0-depth\\tokenizer')
+    depth_model_path = 'F:\\StableTunerPip\\models\\v2-0-depth'
 
-    ds = TrainDataSet(torch.device(DEVICE), [
-        {'name': 'X', 'path': 'dataset'}
-    ], [
+    vae = AutoencoderKL.from_pretrained(os.path.join(depth_model_path, 'vae')).to(DEVICE)
+    image_depth_processor = DPTImageProcessor.from_pretrained(os.path.join(depth_model_path, 'feature_extractor'))
+    depth_estimator = DPTForDepthEstimation.from_pretrained(os.path.join(depth_model_path, 'depth_estimator')).to(DEVICE)
+    tokenizer = CLIPTokenizer.from_pretrained(os.path.join(depth_model_path, 'tokenizer'))
+
+    input_modules = [
         CollectPaths(concept_in_name='concept', path_out_name='image_path', concept_out_name='concept', extensions=['.png', '.jpg'], include_postfix=None, exclude_postfix=['-masklabel']),
         ModifyPath(in_name='image_path', out_name='mask_path', postfix='-masklabel', extension='.png'),
         ModifyPath(in_name='image_path', out_name='prompt_path', postfix='', extension='.txt'),
@@ -40,20 +42,26 @@ def test():
         DiskCache(names=['latent_image_distribution', 'latent_mask', 'latent_conditioning_image_distribution', 'latent_depth', 'tokens'], cache_dir='cache'),
         SampleVAEDistribution(in_name='latent_image_distribution', out_name='latent_image', mode='mean'),
         SampleVAEDistribution(in_name='latent_conditioning_image_distribution', out_name='latent_conditioning_image', mode='mean'),
-        AspectBatchSorting(resolution_in_name='crop_resolution', names=['latent_image', 'latent_conditioning_image', 'latent_mask', 'latent_depth', 'tokens'], batch_size=BATCH_SIZE),
+    ]
 
-        # debut modules
-        SampleVAEDistribution(in_name='latent_image_distribution', out_name='latent_image_debug', mode='mean'),
-        SampleVAEDistribution(in_name='latent_conditioning_image_distribution', out_name='latent_conditioning_image_debug', mode='mean'),
-        DecodeVAE(in_name='latent_image_debug', out_name='decoded_image', vae=vae),
-        DecodeVAE(in_name='latent_conditioning_image_debug', out_name='decoded_conditioning_image', vae=vae),
+    debug_modules = [
+        DecodeVAE(in_name='latent_image', out_name='decoded_image', vae=vae),
+        DecodeVAE(in_name='latent_conditioning_image', out_name='decoded_conditioning_image', vae=vae),
         SaveImage(image_in_name='decoded_image', original_path_in_name='image_path', postfix='', path='debug', in_range_min=-1, in_range_max=1),
-        SaveImage(image_in_name='mask', original_path_in_name='image_path', postfix='mask', path='debug', in_range_min=0, in_range_max=1),
-        SaveImage(image_in_name='decoded_conditioning_image', original_path_in_name='image_path', postfix='conditioning', path='debug', in_range_min=-1, in_range_max=1),
-        SaveImage(image_in_name='depth', original_path_in_name='image_path', postfix='depth', path='debug', in_range_min=-1, in_range_max=1),
-        SaveImage(image_in_name='latent_mask', original_path_in_name='image_path', postfix='mask', path='debug', in_range_min=0, in_range_max=1),
-        SaveImage(image_in_name='latent_depth', original_path_in_name='image_path', postfix='depth', path='debug', in_range_min=-1, in_range_max=1),
-    ])
+        SaveImage(image_in_name='mask', original_path_in_name='image_path', postfix='-mask', path='debug', in_range_min=0, in_range_max=1),
+        SaveImage(image_in_name='decoded_conditioning_image', original_path_in_name='image_path', postfix='-conditioning', path='debug', in_range_min=-1, in_range_max=1),
+        SaveImage(image_in_name='depth', original_path_in_name='image_path', postfix='-depth', path='debug', in_range_min=-1, in_range_max=1),
+        SaveImage(image_in_name='latent_mask', original_path_in_name='image_path', postfix='-latent-mask', path='debug', in_range_min=0, in_range_max=1),
+        SaveImage(image_in_name='latent_depth', original_path_in_name='image_path', postfix='-latent-depth', path='debug', in_range_min=-1, in_range_max=1),
+    ]
+
+    output_modules = [
+        AspectBatchSorting(resolution_in_name='crop_resolution', names=['latent_image', 'latent_conditioning_image', 'latent_mask', 'latent_depth', 'tokens'], batch_size=BATCH_SIZE),
+    ]
+
+    ds = TrainDataSet(torch.device(DEVICE), [
+        {'name': 'X', 'path': 'dataset'}
+    ], [input_modules, debug_modules, output_modules])
     dl = TrainDataLoader(ds, batch_size=BATCH_SIZE)
 
     for batch in tqdm(dl):

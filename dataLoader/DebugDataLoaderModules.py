@@ -31,7 +31,7 @@ class SaveImage(PipelineModule):
         if not os.path.exists(self.path):
             os.makedirs(self.path)
 
-        for index in tqdm(range(self.get_previous_length(self.image_in_name)), desc='writing debug images'):
+        for index in tqdm(range(self.get_previous_length(self.image_in_name)), desc='writing debug images for \'' + self.postfix + '\''):
             image_tensor = self.get_previous_item(self.image_in_name, index)
             original_path = self.get_previous_item(self.original_path_in_name, index)
             name = os.path.basename(original_path)
