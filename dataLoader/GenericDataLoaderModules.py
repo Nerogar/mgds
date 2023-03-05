@@ -4,8 +4,9 @@ import os
 import numpy as np
 import torch
 from PIL import Image
+from torch import Tensor
 from torchvision import transforms
-from torchvision.transforms import functional
+from torchvision.transforms import functional, InterpolationMode
 from tqdm import tqdm
 
 from dataLoader.TrainDataSet import PipelineModule
@@ -43,6 +44,7 @@ class CollectPaths(PipelineModule):
             concept_name = concept['name']
 
             file_names = [os.path.join(path, filename) for filename in os.listdir(path)]
+            file_names = sorted(file_names)
 
             file_names = list(filter(lambda name: os.path.splitext(name)[1] in self.extensions, file_names))
 
@@ -230,13 +232,20 @@ class AspectBucketing(PipelineModule):
 
 
 class LoadImage(PipelineModule):
-    def __init__(self, path_in_name: str, image_out_name: str, range_min: float, range_max: float):
+    def __init__(self, path_in_name: str, image_out_name: str, range_min: float, range_max: float, channels: int = 3):
         super(LoadImage, self).__init__()
         self.path_in_name = path_in_name
         self.image_out_name = image_out_name
 
         self.range_min = range_min
         self.range_max = range_max
+
+        if channels == 3:
+            self.mode = 'RGB'
+        elif channels == 1:
+            self.mode = 'L'
+        else:
+            raise ValueError('Only 1 and 3 channels are supported.')
 
     def length(self) -> int:
         return self.get_previous_length(self.path_in_name)
@@ -251,7 +260,7 @@ class LoadImage(PipelineModule):
         path = self.get_previous_item(self.path_in_name, index)
 
         image_tensor = Image.open(path)
-        image_tensor = image_tensor.convert('RGB')
+        image_tensor = image_tensor.convert(self.mode)
 
         t = transforms.ToTensor()
         image_tensor = t(image_tensor).to(self.pipeline.device)
@@ -547,3 +556,173 @@ class GenerateMaskedConditioningImage(PipelineModule):
         return {
             self.image_out_name: conditioning_image
         }
+
+
+class RandomMaskRotateCrop(PipelineModule):
+    def __init__(self, mask_name: str, additional_names: [str], min_size: int, min_padding_percent: float, max_padding_percent: float, max_rotate_angle: float = 0):
+        super(RandomMaskRotateCrop, self).__init__()
+        self.mask_name = mask_name
+        self.additional_names = additional_names
+        self.min_size = min_size
+        self.min_padding_percent = min_padding_percent
+        self.max_padding_percent = max_padding_percent
+        self.max_rotate_angle = max_rotate_angle
+
+    def length(self) -> int:
+        return self.get_previous_length(self.mask_name)
+
+    def get_inputs(self) -> list[str]:
+        return [self.mask_name] + self.additional_names
+
+    def get_outputs(self) -> list[str]:
+        return [self.mask_name] + self.additional_names
+
+    @staticmethod
+    def __get_masked_region(mask: Tensor) -> (int, int, int, int):
+        # Find the first and last occurrence of a 1 in the mask by
+        # 1. reducing the 2D image tensor to a 1D tensor
+        # 2. multiplying the result by an ascending or descending sequence
+        # 3. getting the max value of this sequence
+
+        # y/height direction
+        reduced_mask = (torch.amax(mask, dim=2, keepdim=True) > 0.5).float()
+        height = reduced_mask.shape[1]
+
+        ascending_sequence = torch.arange(0, height, 1, device=mask.device, dtype=mask.dtype).unsqueeze(0).unsqueeze(2)
+        ascending_mask = reduced_mask * ascending_sequence
+
+        descending_sequence = torch.arange(height, 0, -1, device=mask.device, dtype=mask.dtype).unsqueeze(0).unsqueeze(2)
+        descending_mask = reduced_mask * descending_sequence
+
+        y_min = height - torch.max(descending_mask).item()
+        y_max = torch.max(ascending_mask).item()
+
+        # x/width direction
+        reduced_mask = (torch.amax(mask, dim=1, keepdim=True) > 0.5).float()
+        width = reduced_mask.shape[2]
+
+        ascending_sequence = torch.arange(0, width, 1, device=mask.device, dtype=mask.dtype).unsqueeze(0).unsqueeze(0)
+        ascending_mask = reduced_mask * ascending_sequence
+
+        descending_sequence = torch.arange(width, 0, -1, device=mask.device, dtype=mask.dtype).unsqueeze(0).unsqueeze(0)
+        descending_mask = reduced_mask * descending_sequence
+
+        x_min = width - torch.max(descending_mask).item()
+        x_max = torch.max(ascending_mask).item()
+
+        # safety check, if the found region is negative in size
+        # this can happen if no mask exists
+        if y_max < y_min or x_max < x_min:
+            y_min = 0
+            y_max = height
+            x_min = 0
+            x_max = width
+
+        return y_min, y_max, x_min, x_max
+
+    @staticmethod
+    def __rotate(tensor: Tensor, center: list[int], angle: float) -> Tensor:
+        return functional.rotate(tensor, angle, interpolation=InterpolationMode.BILINEAR, center=center)
+
+    @staticmethod
+    def __crop(tensor: Tensor, y_min: int, y_max: int, x_min: int, x_max: int) -> Tensor:
+        return functional.crop(tensor, y_min, x_min, y_max - y_min, x_max - x_min)
+
+    def get_item(self, index: int) -> dict:
+        rand = self.get_rand(index)
+        mask = self.get_previous_item(self.mask_name, index)
+
+        mask_height = mask.shape[1]
+        mask_width = mask.shape[2]
+
+        item = {}
+
+        for name in self.additional_names:
+            item[name] = self.get_previous_item(name, index)
+
+        # get initial dimensions for rotation
+        y_min, y_max, x_min, x_max = self.__get_masked_region(mask)
+        y_center = (y_max + y_min) / 2
+        x_center = (x_max + x_min) / 2
+
+        # rotate
+        angle = rand.uniform(-self.max_rotate_angle, self.max_rotate_angle)
+        mask = self.__rotate(mask, [x_center, y_center], angle)
+
+        for key in item.keys():
+            item[key] = self.__rotate(item[key], [x_center, y_center], angle)
+
+        # get dimensions for cropping
+        y_min, y_max, x_min, x_max = self.__get_masked_region(mask)
+
+        height = y_max - y_min
+        width = x_max - x_min
+
+        min_height = height / (1 - (self.min_padding_percent / 100))
+        min_width = width / (1 - (self.min_padding_percent / 100))
+
+        max_height = height / (1 - (self.max_padding_percent / 100))
+        max_width = width / (1 - (self.max_padding_percent / 100))
+
+        min_y_expand = (min_height - height) / 2
+        min_x_expand = (min_width - width) / 2
+
+        max_y_expand = (max_height - height) / 2
+        max_x_expand = (max_width - width) / 2
+
+        y_expand_top = rand.uniform(min_y_expand, max_y_expand)
+        y_expand_bottom = rand.uniform(min_y_expand, max_y_expand)
+        x_expand_left = rand.uniform(min_x_expand, max_x_expand)
+        x_expand_right = rand.uniform(min_x_expand, max_x_expand)
+
+        # stretch region
+        y_min -= y_expand_top
+        y_max += y_expand_bottom
+        x_min -= x_expand_left
+        x_max += x_expand_right
+
+        # increase size of region in case it is smaller than self.min_size, while preserving the aspect ratio
+        area = (y_max - y_min) * (x_max - x_min)
+        min_area = self.min_size * self.min_size
+        if area < min_area:
+            scale = math.sqrt(min_area / area)
+            y_expand = (1 - scale) * (y_max - y_min)
+            x_expand = (1 - scale) * (x_max - x_min)
+            y_min -= y_expand
+            y_max += y_expand
+            x_min -= x_expand
+            x_max += x_expand
+
+        # move the region back into the image bounds
+        if y_min < 0:
+            y_shift = -y_min
+            y_min += y_shift
+            y_max += y_shift
+        if y_max > mask_height:
+            y_shift = mask_height - y_max
+            y_min += y_shift
+            y_max += y_shift
+        if x_min < 0:
+            x_shift = -x_min
+            x_min += x_shift
+            x_max += x_shift
+        if x_max > mask_width:
+            x_shift = mask_width - x_max
+            x_min += x_shift
+            x_max += x_shift
+
+        # crop to image bounds
+        y_min = int(max(0, y_min))
+        y_max = int(min(mask_height, y_max))
+        x_min = int(max(0, x_min))
+        x_max = int(min(mask_width, x_max))
+
+        # apply crop
+        mask = self.__crop(mask, y_min, y_max, x_min, x_max)
+        for key in item.keys():
+            item[key] = self.__crop(item[key], y_min, y_max, x_min, x_max)
+
+        # add mask to return value
+        item[self.mask_name] = mask
+
+        return item
