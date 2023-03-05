@@ -10,47 +10,43 @@ class PipelineModule(metaclass=ABCMeta):
     pipeline: 'LoadingPipeline'
     base_seed: int
     module_index: int
-    previous_item_cache_index: int
-    previous_item_cache: dict
-    previous_length_cache: dict
+
+    item_cache_index: int
+    item_cache: dict
+    length_cache: int
 
     def __init__(self):
-        self.clear_previous_cache()
+        self.clear_item_cache()
 
     def init(self, pipeline: 'LoadingPipeline', base_seed: int, module_index: int):
         self.pipeline = pipeline
         self.base_seed = base_seed
         self.module_index = module_index
 
-    def clear_previous_cache(self):
-        self.previous_item_cache_index = -1
-        self.previous_item_cache = {}
-        self.previous_length_cache = {}
+    def clear_item_cache(self):
+        self.item_cache_index = -1
+        self.item_cache = {}
+        self.length_cache = -1
 
     def get_previous_item(self, name: str, index: int):
-        if self.previous_item_cache_index != index:
-            self.clear_previous_cache()
-            self.previous_item_cache_index = index
-
-        if name not in self.previous_item_cache:
-            for previous_module_index in range(self.module_index - 1, -1, -1):
-                module = self.pipeline.modules[previous_module_index]
-                if name in module.get_outputs():
+        for previous_module_index in range(self.module_index - 1, -1, -1):
+            module = self.pipeline.modules[previous_module_index]
+            if name in module.get_outputs():
+                if module.item_cache_index == index:
+                    return module.item_cache[name]
+                else:
                     item = module.get_item(index)
-                    self.previous_item_cache[name] = item[name]
-                    break
-
-        return self.previous_item_cache[name]
+                    module.item_cache_index = index
+                    module.item_cache = item
+                    return item[name]
 
     def get_previous_length(self, name: str):
-        if name not in self.previous_length_cache:
-            for previous_module_index in range(self.module_index - 1, -1, -1):
-                module = self.pipeline.modules[previous_module_index]
-                if name in module.get_outputs():
-                    self.previous_length_cache[name] = module.length()
-                    break
-
-        return self.previous_length_cache[name]
+        for previous_module_index in range(self.module_index - 1, -1, -1):
+            module = self.pipeline.modules[previous_module_index]
+            if name in module.get_outputs():
+                if module.length_cache < 0:
+                    module.length_cache = module.length()
+                return module.length_cache
 
     def get_rand(self, index: int = -1) -> Random:
         seed = hash((self.base_seed, self.module_index, self.pipeline.current_epoch, index))
@@ -152,7 +148,7 @@ class LoadingPipeline:
         # At the start of each epoch, the previous cache is cleared.
         # This prevents duplicating samples when training on single images.
         for module in self.modules:
-            module.clear_previous_cache()
+            module.clear_item_cache()
 
 
 class TrainDataSet(Dataset):

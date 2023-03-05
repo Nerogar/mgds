@@ -142,9 +142,6 @@ class AspectBucketing(PipelineModule):
 
         self.possible_resolutions, self.possible_aspects = self.create_buckets(target_resolution)
 
-        self.scale_resolutions = []
-        self.crop_resolutions = []
-
     def length(self) -> int:
         return self.get_previous_length(self.resolution_in_name)
 
@@ -198,36 +195,30 @@ class AspectBucketing(PipelineModule):
         bucket_index = np.argmin(abs(self.possible_aspects - aspect))
         return self.possible_resolutions[bucket_index]
 
-    def preprocess(self):
-        # calculate bucket for each sample
-        for index in tqdm(range(self.get_previous_length(self.resolution_in_name)), desc='aspect ratio bucketing'):
-            resolution = self.get_previous_item(self.resolution_in_name, index)
-
-            target_resolution = self.get_bucket(resolution[0], resolution[1])
-
-            aspect = resolution[0] / resolution[1]
-            target_aspect = target_resolution[0] / target_resolution[1]
-
-            if aspect > target_aspect:
-                scale = target_resolution[1] / resolution[1]
-                scale_resolution = (
-                    round(resolution[0] * scale),
-                    target_resolution[1]
-                )
-            else:
-                scale = target_resolution[0] / resolution[0]
-                scale_resolution = (
-                    target_resolution[0],
-                    round(resolution[1] * scale)
-                )
-
-            self.scale_resolutions.append(scale_resolution)
-            self.crop_resolutions.append(target_resolution)
-
     def get_item(self, index: int) -> dict:
+        resolution = self.get_previous_item(self.resolution_in_name, index)
+
+        target_resolution = self.get_bucket(resolution[0], resolution[1])
+
+        aspect = resolution[0] / resolution[1]
+        target_aspect = target_resolution[0] / target_resolution[1]
+
+        if aspect > target_aspect:
+            scale = target_resolution[1] / resolution[1]
+            scale_resolution = (
+                round(resolution[0] * scale),
+                target_resolution[1]
+            )
+        else:
+            scale = target_resolution[0] / resolution[0]
+            scale_resolution = (
+                target_resolution[0],
+                round(resolution[1] * scale)
+            )
+
         return {
-            self.scale_resolution_out_name: self.scale_resolutions[index],
-            self.crop_resolution_out_name: self.crop_resolutions[index],
+            self.scale_resolution_out_name: scale_resolution,
+            self.crop_resolution_out_name: target_resolution,
         }
 
 
@@ -397,23 +388,29 @@ class Downscale(PipelineModule):
 
 
 class DiskCache(PipelineModule):
-    def __init__(self, names: [str], cache_dir: str):
+    def __init__(self, cache_dir: str, split_names=None, aggregate_names=None):
         super(DiskCache, self).__init__()
-        self.names = names
         self.cache_dir = cache_dir
+        self.split_names = [] if split_names is None else split_names
+        self.aggregate_names = [] if aggregate_names is None else aggregate_names
         self.cache_length = None
+        self.aggregate_cache = None
+
+        if len(self.split_names) + len(self.aggregate_names) == 0:
+            raise ValueError('No cache items supplied')
 
     def length(self) -> int:
         if not self.cache_length:
-            return self.get_previous_length(self.names[0])
+            name = self.split_names[0] if len(self.split_names) > 0 else self.aggregate_names[0]
+            return self.get_previous_length(name)
         else:
             return self.cache_length
 
     def get_inputs(self) -> list[str]:
-        return self.names
+        return self.split_names + self.aggregate_names
 
     def get_outputs(self) -> list[str]:
-        return self.names
+        return self.split_names + self.aggregate_names
 
     def preprocess(self):
         caching_done = False
@@ -424,27 +421,41 @@ class DiskCache(PipelineModule):
                     caching_done = True
 
         if caching_done:
-            length = len(os.listdir(self.cache_dir))
+            if len(self.aggregate_names) > 0:
+                self.aggregate_cache = torch.load(os.path.join(self.cache_dir, 'aggregate.pt'))
+                length = len(self.aggregate_cache)
+            else:
+                length = len(os.listdir(self.cache_dir))
         else:
-            length = self.get_previous_length(self.names[0])
+            length = self.length()
+            self.aggregate_cache = []
 
             for index in tqdm(range(length), desc='caching'):
-                item = {}
+                split_item = {}
+                aggregate_item = {}
 
-                for name in self.names:
-                    item[name] = self.get_previous_item(name, index)
+                for name in self.split_names:
+                    split_item[name] = self.get_previous_item(name, index)
+                for name in self.aggregate_names:
+                    aggregate_item[name] = self.get_previous_item(name, index)
 
-                torch.save(item, os.path.join(self.cache_dir, str(index) + '.pt'))
+                torch.save(split_item, os.path.join(self.cache_dir, str(index) + '.pt'))
+                self.aggregate_cache.append(aggregate_item)
+
+            torch.save(self.aggregate_cache, os.path.join(self.cache_dir, 'aggregate.pt'))
 
         self.cache_length = length
 
     def get_item(self, index: int) -> dict:
-        cache_item = torch.load(os.path.join(self.cache_dir, str(index) + '.pt'))
+        split_item = torch.load(os.path.join(self.cache_dir, str(index) + '.pt'))
+        aggregate_item = self.aggregate_cache[index]
 
         item = {}
 
-        for name in self.names:
-            item[name] = cache_item[name]
+        for name in self.split_names:
+            item[name] = split_item[name]
+        for name in self.aggregate_names:
+            item[name] = aggregate_item[name]
 
         return item
 
@@ -551,7 +562,7 @@ class GenerateMaskedConditioningImage(PipelineModule):
         image = self.get_previous_item(self.image_in_name, index)
         mask = self.get_previous_item(self.mask_in_name, index)
 
-        conditioning_image = image * mask
+        conditioning_image = image * (1 - mask)
 
         return {
             self.image_out_name: conditioning_image
@@ -686,8 +697,8 @@ class RandomMaskRotateCrop(PipelineModule):
         min_area = self.min_size * self.min_size
         if area < min_area:
             scale = math.sqrt(min_area / area)
-            y_expand = (1 - scale) * (y_max - y_min)
-            x_expand = (1 - scale) * (x_max - x_min)
+            y_expand = (scale - 1) * (y_max - y_min)
+            x_expand = (scale - 1) * (x_max - x_min)
             y_min -= y_expand
             y_max += y_expand
             x_min -= x_expand

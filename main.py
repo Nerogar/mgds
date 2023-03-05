@@ -8,7 +8,7 @@ from dataLoader.TransformersDataLoaderModules import *
 
 DEVICE = 'cuda'
 DTYPE = torch.float32
-BATCH_SIZE = 1
+BATCH_SIZE = 4
 
 
 def test():
@@ -40,7 +40,7 @@ def test():
         EncodeVAE(in_name='conditioning_image', out_name='latent_conditioning_image_distribution', vae=vae),
         Downscale(in_name='depth', out_name='latent_depth'),
         Tokenize(in_name='prompt', out_name='tokens', tokenizer=tokenizer),
-        # DiskCache(names=['latent_image_distribution', 'latent_mask', 'latent_conditioning_image_distribution', 'latent_depth', 'tokens'], cache_dir='cache'),
+        DiskCache(cache_dir='cache', split_names=['latent_image_distribution', 'latent_mask', 'latent_conditioning_image_distribution', 'latent_depth', 'tokens'], aggregate_names=['crop_resolution']),
         SampleVAEDistribution(in_name='latent_image_distribution', out_name='latent_image', mode='mean'),
         SampleVAEDistribution(in_name='latent_conditioning_image_distribution', out_name='latent_conditioning_image', mode='mean'),
     ]

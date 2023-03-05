@@ -42,33 +42,6 @@ class GenerateDepth(PipelineModule):
         }
 
 
-class GenerateMaskedConditioningImage(PipelineModule):
-    def __init__(self, image_in_name: str, mask_in_name: str, image_out_name: str):
-        super(GenerateMaskedConditioningImage, self).__init__()
-        self.image_in_name = image_in_name
-        self.mask_in_name = mask_in_name
-        self.image_out_name = image_out_name
-
-    def length(self) -> int:
-        return self.get_previous_length(self.image_in_name)
-
-    def get_inputs(self) -> list[str]:
-        return [self.image_in_name, self.mask_in_name]
-
-    def get_outputs(self) -> list[str]:
-        return [self.image_out_name]
-
-    def get_item(self, index: int) -> dict:
-        image = self.get_previous_item(self.image_in_name, index)
-        mask = self.get_previous_item(self.mask_in_name, index)
-
-        conditioning_image = image * mask
-
-        return {
-            self.image_out_name: conditioning_image
-        }
-
-
 class Tokenize(PipelineModule):
     def __init__(self, in_name: str, out_name: str, tokenizer: CLIPTokenizer):
         super(Tokenize, self).__init__()
