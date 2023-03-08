@@ -58,7 +58,7 @@ class CollectPaths(PipelineModule):
             self.concept_name.extend([concept_name] * len(file_names))
             self.concepts[concept_name] = concept
 
-    def get_item(self, index: int) -> dict:
+    def get_item(self, index: int, requested_name: str = None) -> dict:
         return {
             self.path_out_name: self.image_paths[index],
             self.concept_out_name: self.concepts[self.concept_name[index]],
@@ -95,7 +95,7 @@ class ModifyPath(PipelineModule):
 
             self.extra_paths.append(extra_path)
 
-    def get_item(self, index: int) -> (str, object):
+    def get_item(self, index: int, requested_name: str = None) -> (str, object):
         return {
             self.out_name: self.extra_paths[index],
         }
@@ -116,7 +116,7 @@ class CalcAspect(PipelineModule):
     def get_outputs(self) -> list[str]:
         return [self.resolution_out_name]
 
-    def get_item(self, index: int) -> dict:
+    def get_item(self, index: int, requested_name: str = None) -> dict:
         image = self.get_previous_item(self.image_in_name, index)
 
         height, width = image.shape[1], image.shape[2]
@@ -195,7 +195,7 @@ class AspectBucketing(PipelineModule):
         bucket_index = np.argmin(abs(self.possible_aspects - aspect))
         return self.possible_resolutions[bucket_index]
 
-    def get_item(self, index: int) -> dict:
+    def get_item(self, index: int, requested_name: str = None) -> dict:
         resolution = self.get_previous_item(self.resolution_in_name, index)
 
         target_resolution = self.get_bucket(resolution[0], resolution[1])
@@ -247,7 +247,7 @@ class LoadImage(PipelineModule):
     def get_outputs(self) -> list[str]:
         return [self.image_out_name]
 
-    def get_item(self, index: int) -> dict:
+    def get_item(self, index: int, requested_name: str = None) -> dict:
         path = self.get_previous_item(self.path_in_name, index)
 
         image_tensor = Image.open(path)
@@ -280,7 +280,7 @@ class ScaleCropImage(PipelineModule):
     def get_outputs(self) -> list[str]:
         return [self.image_out_name]
 
-    def get_item(self, index: int) -> dict:
+    def get_item(self, index: int, requested_name: str = None) -> dict:
         image = self.get_previous_item(self.image_in_name, index)
         scale_resolution = self.get_previous_item(self.scale_resolution_in_name, index)
         crop_resolution = self.get_previous_item(self.crop_resolution_in_name, index)
@@ -312,7 +312,7 @@ class LoadText(PipelineModule):
     def get_outputs(self) -> list[str]:
         return [self.text_out_name]
 
-    def get_item(self, index: int) -> dict:
+    def get_item(self, index: int, requested_name: str = None) -> dict:
         path = self.get_previous_item(self.path_in_name, index)
 
         text = ''
@@ -340,8 +340,8 @@ class RandomFlip(PipelineModule):
     def get_outputs(self) -> list[str]:
         return self.names
 
-    def get_item(self, index: int) -> dict:
-        rand = self.get_rand(index)
+    def get_item(self, index: int, requested_name: str = None) -> dict:
+        rand = self._get_rand(index)
         item = {}
 
         check = rand.random()
@@ -371,7 +371,7 @@ class Downscale(PipelineModule):
     def get_outputs(self) -> list[str]:
         return [self.out_name]
 
-    def get_item(self, index: int) -> dict:
+    def get_item(self, index: int, requested_name: str = None) -> dict:
         image = self.get_previous_item(self.in_name, index)
 
         size = (int(image.shape[1] / 8), int(image.shape[2] / 8))
@@ -446,16 +446,18 @@ class DiskCache(PipelineModule):
 
         self.cache_length = length
 
-    def get_item(self, index: int) -> dict:
-        split_item = torch.load(os.path.join(self.cache_dir, str(index) + '.pt'))
-        aggregate_item = self.aggregate_cache[index]
-
+    def get_item(self, index: int, requested_name: str = None) -> dict:
         item = {}
 
-        for name in self.split_names:
-            item[name] = split_item[name]
+        aggregate_item = self.aggregate_cache[index]
         for name in self.aggregate_names:
             item[name] = aggregate_item[name]
+
+        if requested_name in self.split_names:
+            split_item = torch.load(os.path.join(self.cache_dir, str(index) + '.pt'))
+
+            for name in self.split_names:
+                item[name] = split_item[name]
 
         return item
 
@@ -505,7 +507,7 @@ class AspectBatchSorting(PipelineModule):
         self.index_list = self.shuffle()
 
     def shuffle(self) -> list[int]:
-        rand = self.get_rand()
+        rand = self._get_rand()
 
         # generate a shuffled list of batches
         batches = []
@@ -531,7 +533,7 @@ class AspectBatchSorting(PipelineModule):
 
         return index_list
 
-    def get_item(self, index: int) -> dict:
+    def get_item(self, index: int, requested_name: str = None) -> dict:
         index = self.index_list[index]
 
         item = {}
@@ -558,7 +560,7 @@ class GenerateMaskedConditioningImage(PipelineModule):
     def get_outputs(self) -> list[str]:
         return [self.image_out_name]
 
-    def get_item(self, index: int) -> dict:
+    def get_item(self, index: int, requested_name: str = None) -> dict:
         image = self.get_previous_item(self.image_in_name, index)
         mask = self.get_previous_item(self.mask_in_name, index)
 
@@ -639,8 +641,8 @@ class RandomMaskRotateCrop(PipelineModule):
     def __crop(tensor: Tensor, y_min: int, y_max: int, x_min: int, x_max: int) -> Tensor:
         return functional.crop(tensor, y_min, x_min, y_max - y_min, x_max - x_min)
 
-    def get_item(self, index: int) -> dict:
-        rand = self.get_rand(index)
+    def get_item(self, index: int, requested_name: str = None) -> dict:
+        rand = self._get_rand(index)
         mask = self.get_previous_item(self.mask_name, index)
 
         mask_height = mask.shape[1]

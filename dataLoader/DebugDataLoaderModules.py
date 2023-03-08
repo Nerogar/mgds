@@ -45,7 +45,7 @@ class SaveImage(PipelineModule):
             image = t(image_tensor)
             image.save(os.path.join(self.path, name + '-' + self.image_in_name + ext))
 
-    def get_item(self, index: int) -> dict:
+    def get_item(self, index: int, requested_name: str = None) -> dict:
         return {}
 
 
@@ -65,7 +65,7 @@ class DecodeVAE(PipelineModule):
     def get_outputs(self) -> list[str]:
         return [self.out_name]
 
-    def get_item(self, index: int) -> dict:
+    def get_item(self, index: int, requested_name: str = None) -> dict:
         latent_image = self.get_previous_item(self.in_name, index)
 
         with torch.no_grad():

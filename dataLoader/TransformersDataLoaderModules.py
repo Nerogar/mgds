@@ -22,7 +22,7 @@ class GenerateDepth(PipelineModule):
     def get_outputs(self) -> list[str]:
         return [self.image_out_name]
 
-    def get_item(self, index: int) -> dict:
+    def get_item(self, index: int, requested_name: str = None) -> dict:
         path = self.get_previous_item(self.path_in_name, index)
 
         image = Image.open(path)
@@ -58,7 +58,7 @@ class Tokenize(PipelineModule):
     def get_outputs(self) -> list[str]:
         return [self.out_name]
 
-    def get_item(self, index: int) -> dict:
+    def get_item(self, index: int, requested_name: str = None) -> dict:
         text = self.get_previous_item(self.in_name, index)
 
         tokens = self.tokenizer(

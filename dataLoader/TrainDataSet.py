@@ -32,12 +32,16 @@ class PipelineModule(metaclass=ABCMeta):
         for previous_module_index in range(self.module_index - 1, -1, -1):
             module = self.pipeline.modules[previous_module_index]
             if name in module.get_outputs():
-                if module.item_cache_index == index:
+                if module.item_cache_index == index and name in module.item_cache.keys():
                     return module.item_cache[name]
-                else:
-                    item = module.get_item(index)
+                if module.item_cache_index != index:
+                    item = module.get_item(index, name)
                     module.item_cache_index = index
                     module.item_cache = item
+                    return item[name]
+                elif name in module.item_cache.keys():
+                    item = module.get_item(index, name)
+                    module.item_cache.update(item)
                     return item[name]
 
     def get_previous_length(self, name: str):
@@ -48,7 +52,7 @@ class PipelineModule(metaclass=ABCMeta):
                     module.length_cache = module.length()
                 return module.length_cache
 
-    def get_rand(self, index: int = -1) -> Random:
+    def _get_rand(self, index: int = -1) -> Random:
         seed = hash((self.base_seed, self.module_index, self.pipeline.current_epoch, index))
         return Random(seed)
 
@@ -68,7 +72,7 @@ class PipelineModule(metaclass=ABCMeta):
         pass
 
     @abstractmethod
-    def get_item(self, index: int) -> dict:
+    def get_item(self, index: int, requested_name: str = None) -> dict:
         pass
 
 
@@ -86,7 +90,7 @@ class ConceptPipelineModule(PipelineModule):
     def get_outputs(self) -> list[str]:
         return ['concept']
 
-    def get_item(self, index: int) -> dict:
+    def get_item(self, index: int, requested_name: str = None) -> dict:
         return {
             'concept': self.concepts[index]
         }

@@ -22,7 +22,7 @@ class EncodeVAE(PipelineModule):
     def get_outputs(self) -> list[str]:
         return [self.out_name]
 
-    def get_item(self, index: int) -> dict:
+    def get_item(self, index: int, requested_name: str = None) -> dict:
         image = self.get_previous_item(self.in_name, index)
 
         with torch.no_grad():
@@ -49,7 +49,7 @@ class SampleVAEDistribution(PipelineModule):
     def get_outputs(self) -> list[str]:
         return [self.out_name]
 
-    def get_item(self, index: int) -> dict:
+    def get_item(self, index: int, requested_name: str = None) -> dict:
         distribution = self.get_previous_item(self.in_name, index)
 
         if self.mode == 'sample':
