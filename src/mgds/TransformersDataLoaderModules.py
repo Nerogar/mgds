@@ -2,7 +2,7 @@ import torch
 from PIL import Image
 from transformers import DPTForDepthEstimation, DPTImageProcessor, CLIPTokenizer
 
-from .TrainDataSet import PipelineModule
+from .MGDS import PipelineModule
 
 
 class GenerateDepth(PipelineModule):

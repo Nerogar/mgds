@@ -9,7 +9,7 @@ from torchvision import transforms
 from torchvision.transforms import functional, InterpolationMode
 from tqdm import tqdm
 
-from .TrainDataSet import PipelineModule
+from .MGDS import PipelineModule
 
 
 class CollectPaths(PipelineModule):
@@ -492,6 +492,41 @@ class AspectBatchSorting(PipelineModule):
     def get_outputs(self) -> list[str]:
         return self.names
 
+    def shuffle(self) -> list[int]:
+        rand = self._get_rand()
+
+        bucket_dict = {key: value.copy() for (key, value) in self.bucket_dict.items()}
+
+        # generate a shuffled list of batches in the format (resolution, batch index within resolution)
+        batches = []
+        for bucket_key in bucket_dict.keys():
+            batch_count = int(len(bucket_dict[bucket_key]) / self.batch_size)
+            batches.extend((bucket_key, i) for i in range(batch_count))
+        rand.shuffle(batches)
+
+        # for each bucket, generate a shuffled list of samples
+        for bucket_key, bucket in bucket_dict.items():
+            rand.shuffle(bucket)
+
+        # drop images for full buckets
+        for bucket_key in bucket_dict.keys():
+            samples = bucket_dict[bucket_key]
+            samples_to_drop = len(samples) % self.batch_size
+            for i in range(samples_to_drop):
+                print('dropping sample from bucket ' + str(bucket_key))
+                samples.pop()
+
+        # calculate the order of samples
+        index_list = []
+        for bucket_key, bucket_index in batches:
+            for i in range(bucket_index * self.batch_size, (bucket_index + 1) * self.batch_size):
+                index_list.append(bucket_dict[bucket_key][i])
+
+        print(batches)
+        print(index_list)
+
+        return index_list
+
     def preprocess(self):
         resolutions = []
         for index in range(self.get_previous_length(self.resolution_in_name)):
@@ -500,50 +535,17 @@ class AspectBatchSorting(PipelineModule):
             resolution = resolution[0], resolution[1]
             resolutions.append(resolution)
 
-        # sort buckets
+        # sort samples into dict of lists, with key = resolution
         self.bucket_dict = {}
         for index, resolution in enumerate(resolutions):
             if resolution not in self.bucket_dict:
                 self.bucket_dict[resolution] = []
             self.bucket_dict[resolution].append(index)
 
-        # drop images for full buckets
-        # TODO drop/duplicate in the shuffle function, so different samples are dropped in each epoch
-        for bucket_key in self.bucket_dict.keys():
-            samples = self.bucket_dict[bucket_key]
-            samples_to_drop = len(samples) % self.batch_size
-            for i in range(samples_to_drop):
-                print('dropping sample from bucket ' + str(bucket_key))
-                samples.pop()
-
         self.index_list = self.shuffle()
 
-    def shuffle(self) -> list[int]:
-        rand = self._get_rand()
-
-        # generate a shuffled list of batches
-        batches = []
-        for bucket_key in self.bucket_dict.keys():
-            batch_count = int(len(self.bucket_dict[bucket_key]) / self.batch_size)
-            batches.extend((bucket_key, i) for i in range(batch_count))
-        rand.shuffle(batches)
-
-        # for each bucket, generate a shuffled list of samples
-        samples = {bucket_key: self.bucket_dict[bucket_key].copy() for bucket_key in self.bucket_dict.keys()}
-        for sample_key in samples:
-            rand.shuffle(samples[sample_key])
-
-        # calculate the order of samples
-        index_list = []
-        for bucket_key, index in batches:
-            for i in range(index * self.batch_size, (index + 1) * self.batch_size):
-                index_list.append(samples[bucket_key][i])
-
-        print(batches)
-        print(samples)
-        print(index_list)
-
-        return index_list
+    def start_next_epoch(self):
+        self.index_list = self.shuffle()
 
     def get_item(self, index: int, requested_name: str = None) -> dict:
         index = self.index_list[index]

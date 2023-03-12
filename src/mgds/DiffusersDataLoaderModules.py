@@ -1,7 +1,7 @@
 import torch
 from diffusers.models.autoencoder_kl import AutoencoderKL
 
-from .TrainDataSet import PipelineModule
+from .MGDS import PipelineModule
 
 
 

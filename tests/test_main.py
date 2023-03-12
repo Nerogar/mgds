@@ -3,7 +3,7 @@ import os.path
 from src.mgds.DebugDataLoaderModules import SaveImage, DecodeVAE
 from src.mgds.DiffusersDataLoaderModules import *
 from src.mgds.GenericDataLoaderModules import *
-from src.mgds.TrainDataSet import TrainDataSet, TrainDataLoader
+from src.mgds.MGDS import MGDS, TrainDataLoader
 from src.mgds.TransformersDataLoaderModules import *
 
 DEVICE = 'cuda'
@@ -60,7 +60,7 @@ def test():
         AspectBatchSorting(resolution_in_name='crop_resolution', names=['latent_image', 'latent_conditioning_image', 'latent_mask', 'latent_depth', 'tokens'], batch_size=BATCH_SIZE),
     ]
 
-    ds = TrainDataSet(
+    ds = MGDS(
         torch.device(DEVICE),
         [{'name': 'X', 'path': 'dataset'}],
         [

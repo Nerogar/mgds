@@ -69,10 +69,29 @@ class PipelineModule(metaclass=ABCMeta):
         pass
 
     def preprocess(self):
+        """
+        Called once when the dataset is created.
+        """
+        pass
+
+    def start_next_epoch(self):
+        """
+        Called once before each epoch, starting with the second epoch.
+        """
         pass
 
     @abstractmethod
     def get_item(self, index: int, requested_name: str = None) -> dict:
+        """
+        Called to return an item or partial item from this module.
+        If `requested_name` is None, the entire item should be returned.
+        If `requested_name` is a string, only the specified key needs to be returned,
+        but the whole item can be returned if it improves performance to return everything at once.
+
+        :param index: the item index to return
+        :param requested_name: the requested item key
+        :return: an item or partial item
+        """
         pass
 
 
@@ -149,13 +168,14 @@ class LoadingPipeline:
     def start_next_epoch(self):
         self.current_epoch += 1
 
-        # At the start of each epoch, the previous cache is cleared.
-        # This prevents duplicating samples when training on single images.
         for module in self.modules:
+            # At the start of each epoch, the previous cache is cleared.
+            # This prevents duplicating samples when training on single images.
             module.clear_item_cache()
+            module.start_next_epoch()
 
 
-class TrainDataSet(Dataset):
+class MGDS(Dataset):
     device: torch.device
     loading_pipeline: LoadingPipeline
 
@@ -183,5 +203,5 @@ class TrainDataSet(Dataset):
 
 
 class TrainDataLoader(DataLoader):
-    def __init__(self, dataset: TrainDataSet, batch_size):
+    def __init__(self, dataset: MGDS, batch_size):
         super(TrainDataLoader, self).__init__(dataset, batch_size=batch_size, drop_last=True)
