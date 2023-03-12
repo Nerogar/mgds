@@ -9,18 +9,26 @@ from torchvision import transforms
 from torchvision.transforms import functional, InterpolationMode
 from tqdm import tqdm
 
-from dataLoader.TrainDataSet import PipelineModule
+from .TrainDataSet import PipelineModule
 
 
 class CollectPaths(PipelineModule):
-    def __init__(self, concept_in_name: str, path_out_name: str, concept_out_name: str, extensions: [str], include_postfix: [str], exclude_postfix: [str]):
+    def __init__(
+            self,
+            concept_in_name: str, path_in_name: str, name_in_name: str,
+            path_out_name: str, concept_out_name: str,
+            extensions: [str], include_postfix: [str], exclude_postfix: [str]
+    ):
         super(CollectPaths, self).__init__()
 
         self.concept_in_name = concept_in_name
+        self.path_in_name = path_in_name
+        self.name_in_name = name_in_name
+
         self.path_out_name = path_out_name
         self.concept_out_name = concept_out_name
 
-        self.extensions = extensions
+        self.extensions = [extension.lower() for extension in extensions]
         self.include_postfix = include_postfix
         self.exclude_postfix = exclude_postfix
 
@@ -40,13 +48,13 @@ class CollectPaths(PipelineModule):
     def preprocess(self):
         for index in tqdm(range(self.get_previous_length(self.concept_in_name)), desc='enumerating sample paths'):
             concept = self.get_previous_item(self.concept_in_name, index)
-            path = concept['path']
-            concept_name = concept['name']
+            path = concept[self.path_in_name]
+            concept_name = concept[self.name_in_name]
 
             file_names = [os.path.join(path, filename) for filename in os.listdir(path)]
             file_names = sorted(file_names)
 
-            file_names = list(filter(lambda name: os.path.splitext(name)[1] in self.extensions, file_names))
+            file_names = list(filter(lambda name: os.path.splitext(name)[1].lower() in self.extensions, file_names))
 
             if self.include_postfix:
                 file_names = list(filter(lambda name: any(os.path.splitext(name)[0].endswith(postfix) for postfix in self.include_postfix), file_names))
@@ -427,6 +435,9 @@ class DiskCache(PipelineModule):
             else:
                 length = len(os.listdir(self.cache_dir))
         else:
+            if not os.path.exists(self.cache_dir):
+                os.makedirs(self.cache_dir)
+
             length = self.length()
             self.aggregate_cache = []
 
@@ -502,6 +513,7 @@ class AspectBatchSorting(PipelineModule):
             samples = self.bucket_dict[bucket_key]
             samples_to_drop = len(samples) % self.batch_size
             for i in range(samples_to_drop):
+                print('dropping sample from bucket ' + str(bucket_key))
                 samples.pop()
 
         self.index_list = self.shuffle()

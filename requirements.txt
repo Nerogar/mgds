@@ -7,5 +7,5 @@ opencv-python==4.6.0.66
 pillow==9.3.0
 matplotlib==3.6.2
 tqdm==4.64.1
-diffusers==0.13.0
+diffusers==0.14.0
 transformers==4.26.1

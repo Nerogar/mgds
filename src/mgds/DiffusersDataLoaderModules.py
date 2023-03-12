@@ -1,7 +1,7 @@
 import torch
 from diffusers.models.autoencoder_kl import AutoencoderKL
 
-from dataLoader.TrainDataSet import PipelineModule
+from .TrainDataSet import PipelineModule
 
 
 
@@ -24,6 +24,8 @@ class EncodeVAE(PipelineModule):
 
     def get_item(self, index: int, requested_name: str = None) -> dict:
         image = self.get_previous_item(self.in_name, index)
+
+        image = image.to(device=image.device, dtype=self.vae.dtype)
 
         with torch.no_grad():
             latent_distribution = self.vae.encode(image.unsqueeze(0)).latent_dist

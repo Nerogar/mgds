@@ -1,10 +1,10 @@
 import os.path
 
-from dataLoader.DebugDataLoaderModules import SaveImage, DecodeVAE
-from dataLoader.DiffusersDataLoaderModules import *
-from dataLoader.GenericDataLoaderModules import *
-from dataLoader.TrainDataSet import TrainDataSet, TrainDataLoader
-from dataLoader.TransformersDataLoaderModules import *
+from src.mgds.DebugDataLoaderModules import SaveImage, DecodeVAE
+from src.mgds.DiffusersDataLoaderModules import *
+from src.mgds.GenericDataLoaderModules import *
+from src.mgds.TrainDataSet import TrainDataSet, TrainDataLoader
+from src.mgds.TransformersDataLoaderModules import *
 
 DEVICE = 'cuda'
 DTYPE = torch.float32
@@ -20,7 +20,7 @@ def test():
     tokenizer = CLIPTokenizer.from_pretrained(os.path.join(depth_model_path, 'tokenizer'))
 
     input_modules = [
-        CollectPaths(concept_in_name='concept', path_out_name='image_path', concept_out_name='concept', extensions=['.png', '.jpg'], include_postfix=None, exclude_postfix=['-masklabel']),
+        CollectPaths(concept_in_name='concept', path_in_name='path', name_in_name='name', path_out_name='image_path', concept_out_name='concept', extensions=['.png', '.jpg'], include_postfix=None, exclude_postfix=['-masklabel']),
         ModifyPath(in_name='image_path', out_name='mask_path', postfix='-masklabel', extension='.png'),
         ModifyPath(in_name='image_path', out_name='prompt_path', postfix='', extension='.txt'),
         LoadImage(path_in_name='image_path', image_out_name='image', range_min=-1.0, range_max=1.0),
@@ -51,18 +51,23 @@ def test():
         SaveImage(image_in_name='decoded_image', original_path_in_name='image_path', path='debug', in_range_min=-1, in_range_max=1),
         SaveImage(image_in_name='mask', original_path_in_name='image_path', path='debug', in_range_min=0, in_range_max=1),
         SaveImage(image_in_name='decoded_conditioning_image', original_path_in_name='image_path', path='debug', in_range_min=-1, in_range_max=1),
-        #SaveImage(image_in_name='depth', original_path_in_name='image_path', path='debug', in_range_min=-1, in_range_max=1),
-        #SaveImage(image_in_name='latent_mask', original_path_in_name='image_path', path='debug', in_range_min=0, in_range_max=1),
-        #SaveImage(image_in_name='latent_depth', original_path_in_name='image_path', path='debug', in_range_min=-1, in_range_max=1),
+        # SaveImage(image_in_name='depth', original_path_in_name='image_path', path='debug', in_range_min=-1, in_range_max=1),
+        # SaveImage(image_in_name='latent_mask', original_path_in_name='image_path', path='debug', in_range_min=0, in_range_max=1),
+        # SaveImage(image_in_name='latent_depth', original_path_in_name='image_path', path='debug', in_range_min=-1, in_range_max=1),
     ]
 
     output_modules = [
         AspectBatchSorting(resolution_in_name='crop_resolution', names=['latent_image', 'latent_conditioning_image', 'latent_mask', 'latent_depth', 'tokens'], batch_size=BATCH_SIZE),
     ]
 
-    ds = TrainDataSet(torch.device(DEVICE), [
-        {'name': 'X', 'path': 'dataset'}
-    ], [input_modules, debug_modules, output_modules])
+    ds = TrainDataSet(
+        torch.device(DEVICE),
+        [{'name': 'X', 'path': 'dataset'}],
+        [
+            input_modules,
+            debug_modules,
+            output_modules
+        ])
     dl = TrainDataLoader(ds, batch_size=BATCH_SIZE)
 
     for epoch in range(10):

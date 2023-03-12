@@ -2,7 +2,7 @@ import torch
 from PIL import Image
 from transformers import DPTForDepthEstimation, DPTImageProcessor, CLIPTokenizer
 
-from dataLoader.TrainDataSet import PipelineModule
+from .TrainDataSet import PipelineModule
 
 
 class GenerateDepth(PipelineModule):
@@ -66,7 +66,10 @@ class Tokenize(PipelineModule):
             padding='max_length',
             truncation=True,
             max_length=self.tokenizer.model_max_length,
+            return_tensors="pt",
         ).input_ids
+
+        tokens = tokens.squeeze()
 
         return {
             self.out_name: tokens

@@ -5,7 +5,7 @@ from diffusers.models.autoencoder_kl import AutoencoderKL
 from torchvision import transforms
 from tqdm import tqdm
 
-from dataLoader.TrainDataSet import PipelineModule
+from .TrainDataSet import PipelineModule
 
 
 class SaveImage(PipelineModule):
