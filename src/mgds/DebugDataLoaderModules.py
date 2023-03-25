@@ -26,9 +26,10 @@ class SaveImage(PipelineModule):
     def get_outputs(self) -> list[str]:
         return []
 
-    def preprocess(self):
-        if not os.path.exists(self.path):
-            os.makedirs(self.path)
+    def start_next_epoch(self):
+        path = os.path.join(self.path, "epoch-" + str(self.pipeline.current_epoch))
+        if not os.path.exists(path):
+            os.makedirs(path)
 
         for index in tqdm(range(self.get_previous_length(self.image_in_name)), desc='writing debug images for \'' + self.image_in_name + '\''):
             image_tensor = self.get_previous_item(self.image_in_name, index)
@@ -43,7 +44,7 @@ class SaveImage(PipelineModule):
             image_tensor = (image_tensor - self.in_range_min) / (self.in_range_max - self.in_range_min)
 
             image = t(image_tensor)
-            image.save(os.path.join(self.path, name + '-' + self.image_in_name + ext))
+            image.save(os.path.join(path, name + '-' + self.image_in_name + ext))
 
     def get_item(self, index: int, requested_name: str = None) -> dict:
         return {}

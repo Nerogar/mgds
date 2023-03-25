@@ -4,8 +4,6 @@ from diffusers.models.autoencoder_kl import AutoencoderKL
 from .MGDS import PipelineModule
 
 
-
-
 class EncodeVAE(PipelineModule):
     def __init__(self, in_name: str, out_name: str, vae: AutoencoderKL):
         super(EncodeVAE, self).__init__()

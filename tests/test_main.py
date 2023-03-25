@@ -40,7 +40,7 @@ def test():
         EncodeVAE(in_name='conditioning_image', out_name='latent_conditioning_image_distribution', vae=vae),
         Downscale(in_name='depth', out_name='latent_depth'),
         Tokenize(in_name='prompt', out_name='tokens', tokenizer=tokenizer),
-        DiskCache(cache_dir='cache', split_names=['latent_image_distribution', 'latent_mask', 'latent_conditioning_image_distribution', 'latent_depth', 'tokens'], aggregate_names=['crop_resolution']),
+        #DiskCache(cache_dir='cache', split_names=['latent_image_distribution', 'latent_mask', 'latent_conditioning_image_distribution', 'latent_depth', 'tokens'], aggregate_names=['crop_resolution']),
         SampleVAEDistribution(in_name='latent_image_distribution', out_name='latent_image', mode='mean'),
         SampleVAEDistribution(in_name='latent_conditioning_image_distribution', out_name='latent_conditioning_image', mode='mean'),
     ]
@@ -62,7 +62,7 @@ def test():
 
     ds = MGDS(
         torch.device(DEVICE),
-        [{'name': 'X', 'path': 'dataset'}],
+        [{'name': 'X', 'path': 'dataset2'}],
         [
             input_modules,
             debug_modules,

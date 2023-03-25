@@ -45,7 +45,7 @@ class CollectPaths(PipelineModule):
     def get_outputs(self) -> list[str]:
         return [self.path_out_name, self.concept_out_name]
 
-    def preprocess(self):
+    def start(self):
         for index in tqdm(range(self.get_previous_length(self.concept_in_name)), desc='enumerating sample paths'):
             concept = self.get_previous_item(self.concept_in_name, index)
             path = concept[self.path_in_name]
@@ -94,7 +94,7 @@ class ModifyPath(PipelineModule):
     def get_outputs(self) -> list[str]:
         return [self.out_name]
 
-    def preprocess(self):
+    def start(self):
         for index in range(self.get_previous_length(self.in_name)):
             image_path = self.get_previous_item(self.in_name, index)
 
@@ -420,7 +420,7 @@ class DiskCache(PipelineModule):
     def get_outputs(self) -> list[str]:
         return self.split_names + self.aggregate_names
 
-    def preprocess(self):
+    def start(self):
         caching_done = False
 
         if os.path.isdir(self.cache_dir):
@@ -527,7 +527,7 @@ class AspectBatchSorting(PipelineModule):
 
         return index_list
 
-    def preprocess(self):
+    def start(self):
         resolutions = []
         for index in range(self.get_previous_length(self.resolution_in_name)):
             resolution = self.get_previous_item(self.resolution_in_name, index)
@@ -541,8 +541,6 @@ class AspectBatchSorting(PipelineModule):
             if resolution not in self.bucket_dict:
                 self.bucket_dict[resolution] = []
             self.bucket_dict[resolution].append(index)
-
-        self.index_list = self.shuffle()
 
     def start_next_epoch(self):
         self.index_list = self.shuffle()

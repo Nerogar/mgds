@@ -68,7 +68,7 @@ class PipelineModule(metaclass=ABCMeta):
     def get_outputs(self) -> list[str]:
         pass
 
-    def preprocess(self):
+    def start(self):
         """
         Called once when the dataset is created.
         """
@@ -76,7 +76,7 @@ class PipelineModule(metaclass=ABCMeta):
 
     def start_next_epoch(self):
         """
-        Called once before each epoch, starting with the second epoch.
+        Called once before each epoch, starting with the first epoch.
         """
         pass
 
@@ -154,9 +154,11 @@ class LoadingPipeline:
         Can be used to add caching or other logic that should run once.
         """
 
+        self.current_epoch += 1
+
         for module_index in range(len(self.modules)):
             module = self.modules[module_index]
-            module.preprocess()
+            module.start()
 
     def get_item(self, index: int) -> dict:
 
