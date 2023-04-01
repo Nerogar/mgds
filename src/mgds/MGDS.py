@@ -154,11 +154,15 @@ class LoadingPipeline:
         Can be used to add caching or other logic that should run once.
         """
 
-        self.current_epoch += 1
+        # set current_epoch to 0 to simulate calling start() during the first epoch
+        self.current_epoch = 0
 
         for module_index in range(len(self.modules)):
             module = self.modules[module_index]
             module.start()
+
+        # reset current_epoch to -1, because the epoch has not yet started
+        self.current_epoch = -1
 
     def get_item(self, index: int) -> dict:
 
@@ -189,7 +193,7 @@ class MGDS(Dataset):
             seed: int = 42
     ):
         self.device = device
-        seed = (random.randint(-((1 << 30) - 1), (1 << 30) - 1) if seed == -1 else seed)
+        seed = (random.randint(-(1 << 30), 1 << 30) if seed == -1 else seed)
         self.loading_pipeline = LoadingPipeline(device, concepts, definition, seed=seed)
 
         self.loading_pipeline.start()

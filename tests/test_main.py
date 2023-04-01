@@ -26,6 +26,7 @@ def test():
         LoadImage(path_in_name='image_path', image_out_name='image', range_min=-1.0, range_max=1.0),
         LoadImage(path_in_name='mask_path', image_out_name='mask', range_min=0, range_max=1, channels=1),
         GenerateDepth(path_in_name='image_path', image_out_name='depth', image_depth_processor=image_depth_processor, depth_estimator=depth_estimator),
+        RandomCircularMaskShrink(mask_name='mask', shrink_probability=1.0, shrink_factor_min=0.2, shrink_factor_max=1.0),
         RandomMaskRotateCrop(mask_name='mask', additional_names=['image', 'depth'], min_size=512, min_padding_percent=10, max_padding_percent=30, max_rotate_angle=20),
         CalcAspect(image_in_name='image', resolution_out_name='original_resolution'),
         AspectBucketing(batch_size=BATCH_SIZE, target_resolution=512, resolution_in_name='original_resolution', scale_resolution_out_name='scale_resolution', crop_resolution_out_name='crop_resolution'),
@@ -40,9 +41,10 @@ def test():
         EncodeVAE(in_name='conditioning_image', out_name='latent_conditioning_image_distribution', vae=vae),
         Downscale(in_name='depth', out_name='latent_depth'),
         Tokenize(in_name='prompt', out_name='tokens', tokenizer=tokenizer),
-        #DiskCache(cache_dir='cache', split_names=['latent_image_distribution', 'latent_mask', 'latent_conditioning_image_distribution', 'latent_depth', 'tokens'], aggregate_names=['crop_resolution']),
+        # DiskCache(cache_dir='cache', split_names=['latent_image_distribution', 'latent_mask', 'latent_conditioning_image_distribution', 'latent_depth', 'tokens'], aggregate_names=['crop_resolution']),
         SampleVAEDistribution(in_name='latent_image_distribution', out_name='latent_image', mode='mean'),
         SampleVAEDistribution(in_name='latent_conditioning_image_distribution', out_name='latent_conditioning_image', mode='mean'),
+        # RandomLatentMaskRemove(latent_mask_name='latent_mask', latent_conditioning_image_name='latent_conditioning_image', replace_probability=0.1, vae=vae)
     ]
 
     debug_modules = [
@@ -57,17 +59,19 @@ def test():
     ]
 
     output_modules = [
-        AspectBatchSorting(resolution_in_name='crop_resolution', names=['latent_image', 'latent_conditioning_image', 'latent_mask', 'latent_depth', 'tokens'], batch_size=BATCH_SIZE),
+        AspectBatchSorting(resolution_in_name='crop_resolution', names=['latent_image', 'latent_conditioning_image', 'latent_mask', 'latent_depth', 'tokens'], batch_size=BATCH_SIZE, sort_resolutions_for_each_epoch=True),
     ]
 
     ds = MGDS(
-        torch.device(DEVICE),
-        [{'name': 'X', 'path': 'dataset2'}],
-        [
+        device=torch.device(DEVICE),
+        concepts=[{'name': 'X', 'path': 'dataset'}],
+        definition=[
             input_modules,
             debug_modules,
             output_modules
-        ])
+        ],
+        seed=42
+    )
     dl = TrainDataLoader(ds, batch_size=BATCH_SIZE)
 
     for epoch in range(10):

@@ -64,3 +64,64 @@ class SampleVAEDistribution(PipelineModule):
         return {
             self.out_name: latent
         }
+
+
+class RandomLatentMaskRemove(PipelineModule):
+    def __init__(self, latent_mask_name: str, latent_conditioning_image_name: str, replace_probability: float, vae: AutoencoderKL):
+        super(RandomLatentMaskRemove, self).__init__()
+        self.latent_mask_name = latent_mask_name
+        self.latent_conditioning_image_name = latent_conditioning_image_name
+        self.replace_probability = replace_probability
+        self.vae = vae
+
+        self.inputs_outputs = [latent_mask_name]
+        if latent_conditioning_image_name is not None:
+            self.inputs_outputs.append(latent_conditioning_image_name)
+
+        self.full_mask_cache = {}
+        self.blank_conditioning_image_cache = {}
+
+    def length(self) -> int:
+        return self.get_previous_length(self.latent_mask_name)
+
+    def get_inputs(self) -> list[str]:
+        return self.inputs_outputs
+
+    def get_outputs(self) -> list[str]:
+        return self.inputs_outputs
+
+    def get_item(self, index: int, requested_name: str = None) -> dict:
+        rand = self._get_rand(index)
+        latent_mask = self.get_previous_item(self.latent_mask_name, index)
+        latent_resolution = (latent_mask.shape[1], latent_mask.shape[2])
+        resolution = (latent_mask.shape[1] * 8, latent_mask.shape[2] * 8)
+
+        if latent_resolution not in self.full_mask_cache:
+            self.full_mask_cache[latent_resolution] = torch.ones_like(latent_mask)
+
+        if resolution not in self.blank_conditioning_image_cache:
+            with torch.no_grad():
+                blank_conditioning_image = torch.zeros(resolution, dtype=latent_mask.dtype, device=latent_mask.device)
+                blank_conditioning_image = blank_conditioning_image.unsqueeze(0).unsqueeze(0).expand([-1, 3, -1, -1])
+                self.blank_conditioning_image_cache[latent_resolution] = self.vae.encode(blank_conditioning_image).latent_dist.mode().squeeze()
+
+        replace = rand.random() < self.replace_probability
+
+        if replace:
+            latent_mask = self.full_mask_cache[latent_resolution]
+
+        latent_conditioning_image = None
+        if replace and self.latent_conditioning_image_name is not None:
+            latent_conditioning_image = self.blank_conditioning_image_cache[latent_resolution]
+        elif not replace and self.latent_conditioning_image_name is not None:
+            latent_conditioning_image = self.get_previous_item(self.latent_conditioning_image_name, index)
+
+        if self.latent_conditioning_image_name is not None:
+            return {
+                self.latent_mask_name: latent_mask,
+                self.latent_conditioning_image_name: latent_conditioning_image,
+            }
+        else:
+            return {
+                self.latent_mask_name: latent_mask,
+            }
