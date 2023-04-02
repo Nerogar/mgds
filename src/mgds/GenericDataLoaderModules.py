@@ -484,8 +484,10 @@ class AspectBatchSorting(PipelineModule):
         self.bucket_dict = {}
         self.index_list = []
 
+        self.length_cache = -1
+
     def length(self) -> int:
-        return len(self.index_list)
+        return self.length_cache
 
     def get_inputs(self) -> list[str]:
         return [self.resolution_in_name] + self.names
@@ -544,6 +546,8 @@ class AspectBatchSorting(PipelineModule):
             self.bucket_dict[resolution].append(index)
 
     def start(self):
+        self.length_cache = self.get_previous_length(self.resolution_in_name)
+
         if not self.sort_resolutions_for_each_epoch:
             self.__sort_resolutions()
 

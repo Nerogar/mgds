@@ -8,52 +8,54 @@ from torch.utils.data import DataLoader, Dataset
 
 class PipelineModule(metaclass=ABCMeta):
     pipeline: 'LoadingPipeline'
-    base_seed: int
-    module_index: int
 
-    item_cache_index: int
-    item_cache: dict
-    length_cache: int
+    __base_seed: int
+    __module_index: int
+
+    __item_cache_index: int
+    __item_cache: dict
+    __length_cache: int
 
     def __init__(self):
         self.clear_item_cache()
 
     def init(self, pipeline: 'LoadingPipeline', base_seed: int, module_index: int):
         self.pipeline = pipeline
-        self.base_seed = base_seed
-        self.module_index = module_index
+
+        self.__base_seed = base_seed
+        self.__module_index = module_index
 
     def clear_item_cache(self):
-        self.item_cache_index = -1
-        self.item_cache = {}
-        self.length_cache = -1
+        self.__item_cache_index = -1
+        self.__item_cache = {}
+        self.__length_cache = -1
 
     def get_previous_item(self, name: str, index: int):
-        for previous_module_index in range(self.module_index - 1, -1, -1):
+        for previous_module_index in range(self.__module_index - 1, -1, -1):
             module = self.pipeline.modules[previous_module_index]
             if name in module.get_outputs():
-                if module.item_cache_index == index and name in module.item_cache.keys():
-                    return module.item_cache[name]
-                if module.item_cache_index != index:
+                if module.__item_cache_index == index and name in module.__item_cache.keys():
+                    return module.__item_cache[name]
+                if module.__item_cache_index != index:
                     item = module.get_item(index, name)
-                    module.item_cache_index = index
-                    module.item_cache = item
+                    module.__item_cache_index = index
+                    module.__item_cache = item
                     return item[name]
-                elif name in module.item_cache.keys():
+                elif name in module.__item_cache.keys():
                     item = module.get_item(index, name)
-                    module.item_cache.update(item)
+                    module.__item_cache.update(item)
                     return item[name]
 
     def get_previous_length(self, name: str):
-        for previous_module_index in range(self.module_index - 1, -1, -1):
+        for previous_module_index in range(self.__module_index - 1, -1, -1):
             module = self.pipeline.modules[previous_module_index]
             if name in module.get_outputs():
-                if module.length_cache < 0:
-                    module.length_cache = module.length()
-                return module.length_cache
+                if module.__length_cache < 0:
+                    module.__length_cache = module.length()
+                return module.__length_cache
 
     def _get_rand(self, index: int = -1) -> Random:
-        seed = hash((self.base_seed, self.module_index, self.pipeline.current_epoch, index))
+        seed = hash((self.__base_seed, self.__module_index, self.pipeline.current_epoch, index))
         return Random(seed)
 
     @abstractmethod
