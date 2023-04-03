@@ -119,21 +119,24 @@ class ConceptPipelineModule(PipelineModule):
 
 class LoadingPipeline:
     device: torch.device
+    dtype: torch.dtype
     concepts: list[dict]
     modules: list[PipelineModule]
     current_epoch: int
+    last_initialized_epoch: int
 
-    def __init__(self, device: torch.device, concepts: list[dict], modules: list, seed: int):
+    def __init__(self, device: torch.device, dtype: torch.dtype, concepts: list[dict], modules: list, seed: int):
         self.device = device
+        self.dtype = dtype
         self.concepts = concepts
         self.modules = list(filter(lambda x: x is not None, self.__flatten(modules)))
-        self.cached_length = None
 
         self.modules.insert(0, ConceptPipelineModule(self.concepts))
         for index, module in enumerate(self.modules):
             module.init(self, seed, index)
 
         self.current_epoch = -1
+        self.last_initialized_epoch = -1
 
     def __flatten(self, data: list | object) -> list:
         if isinstance(data, list):
@@ -145,10 +148,7 @@ class LoadingPipeline:
             return [data]
 
     def length(self) -> int:
-        if not self.cached_length:
-            self.cached_length = self.modules[-1].length()
-
-        return self.cached_length
+        return self.modules[-1].length()
 
     def start(self):
         """
@@ -163,8 +163,27 @@ class LoadingPipeline:
             module = self.modules[module_index]
             module.start()
 
+        for module_index in range(len(self.modules)):
+            module = self.modules[module_index]
+            module.start_next_epoch()
+
+        self.last_initialized_epoch = 0
+
         # reset current_epoch to -1, because the epoch has not yet started
         self.current_epoch = -1
+
+    def start_next_epoch(self):
+        self.current_epoch += 1
+
+        # if the last initialized epoch is not the previous epoch, no initialization is needed
+        if self.last_initialized_epoch == self.current_epoch - 1:
+            for module in self.modules:
+                # At the start of each epoch, the previous cache is cleared.
+                # This prevents duplicating samples when training on single images.
+                module.clear_item_cache()
+                module.start_next_epoch()
+
+        self.last_initialized_epoch = self.current_epoch
 
     def get_item(self, index: int) -> dict:
 
@@ -173,30 +192,24 @@ class LoadingPipeline:
 
         return last_module.get_item(index)
 
-    def start_next_epoch(self):
-        self.current_epoch += 1
-
-        for module in self.modules:
-            # At the start of each epoch, the previous cache is cleared.
-            # This prevents duplicating samples when training on single images.
-            module.clear_item_cache()
-            module.start_next_epoch()
-
 
 class MGDS(Dataset):
     device: torch.device
+    dtype: torch.dtype
     loading_pipeline: LoadingPipeline
 
     def __init__(
             self,
             device: torch.device,
+            dtype: torch.dtype,
             concepts: [dict],
             definition: [PipelineModule],
             seed: int = 42
     ):
         self.device = device
+        self.dtype = dtype
         seed = (random.randint(-(1 << 30), 1 << 30) if seed == -1 else seed)
-        self.loading_pipeline = LoadingPipeline(device, concepts, definition, seed=seed)
+        self.loading_pipeline = LoadingPipeline(device, dtype, concepts, definition, seed=seed)
 
         self.loading_pipeline.start()
 

@@ -1,5 +1,7 @@
 import os.path
 
+import torch
+
 from src.mgds.DebugDataLoaderModules import SaveImage, DecodeVAE
 from src.mgds.DiffusersDataLoaderModules import *
 from src.mgds.GenericDataLoaderModules import *
@@ -35,7 +37,7 @@ def test():
         ScaleCropImage(image_in_name='depth', scale_resolution_in_name='scale_resolution', crop_resolution_in_name='crop_resolution', image_out_name='depth'),
         LoadText(path_in_name='prompt_path', text_out_name='prompt'),
         GenerateMaskedConditioningImage(image_in_name='image', mask_in_name='mask', image_out_name='conditioning_image'),
-        # RandomFlip(names=['image', 'mask', 'depth', 'conditioning_image']),
+        RandomFlip(names=['image', 'mask', 'depth', 'conditioning_image']),
         EncodeVAE(in_name='image', out_name='latent_image_distribution', vae=vae),
         Downscale(in_name='mask', out_name='latent_mask'),
         EncodeVAE(in_name='conditioning_image', out_name='latent_conditioning_image_distribution', vae=vae),
@@ -44,7 +46,7 @@ def test():
         # DiskCache(cache_dir='cache', split_names=['latent_image_distribution', 'latent_mask', 'latent_conditioning_image_distribution', 'latent_depth', 'tokens'], aggregate_names=['crop_resolution']),
         SampleVAEDistribution(in_name='latent_image_distribution', out_name='latent_image', mode='mean'),
         SampleVAEDistribution(in_name='latent_conditioning_image_distribution', out_name='latent_conditioning_image', mode='mean'),
-        # RandomLatentMaskRemove(latent_mask_name='latent_mask', latent_conditioning_image_name='latent_conditioning_image', replace_probability=0.1, vae=vae)
+        RandomLatentMaskRemove(latent_mask_name='latent_mask', latent_conditioning_image_name='latent_conditioning_image', replace_probability=0.1, vae=vae)
     ]
 
     debug_modules = [
@@ -64,6 +66,7 @@ def test():
 
     ds = MGDS(
         device=torch.device(DEVICE),
+        dtype=torch.float32,
         concepts=[{'name': 'X', 'path': 'dataset'}],
         definition=[
             input_modules,

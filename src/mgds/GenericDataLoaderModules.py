@@ -262,7 +262,7 @@ class LoadImage(PipelineModule):
         image_tensor = image_tensor.convert(self.mode)
 
         t = transforms.ToTensor()
-        image_tensor = t(image_tensor).to(self.pipeline.device)
+        image_tensor = t(image_tensor).to(device=self.pipeline.device, dtype=self.pipeline.dtype)
 
         image_tensor = image_tensor * (self.range_max - self.range_min) + self.range_min
 
@@ -483,11 +483,10 @@ class AspectBatchSorting(PipelineModule):
 
         self.bucket_dict = {}
         self.index_list = []
-
-        self.length_cache = -1
+        self.index_list = []
 
     def length(self) -> int:
-        return self.length_cache
+        return len(self.index_list)
 
     def get_inputs(self) -> list[str]:
         return [self.resolution_in_name] + self.names
@@ -546,8 +545,6 @@ class AspectBatchSorting(PipelineModule):
             self.bucket_dict[resolution].append(index)
 
     def start(self):
-        self.length_cache = self.get_previous_length(self.resolution_in_name)
-
         if not self.sort_resolutions_for_each_epoch:
             self.__sort_resolutions()
 
@@ -812,24 +809,26 @@ class RandomCircularMaskShrink(PipelineModule):
         left = -center[1]
         right = resolution[1] - center[1] - 1
 
-        vertical_gradient = torch.linspace(start=top, end=bottom, steps=resolution[0], dtype=mask.dtype, device=mask.device)
+        vertical_gradient = torch.linspace(start=top, end=bottom, steps=resolution[0], dtype=torch.float32, device=mask.device)
         vertical_gradient = vertical_gradient * vertical_gradient
         vertical_gradient = vertical_gradient.unsqueeze(1)
         vertical_gradient = vertical_gradient.expand(resolution)
 
-        horizontal_gradient = torch.linspace(start=left, end=right, steps=resolution[1], dtype=mask.dtype, device=mask.device)
+        horizontal_gradient = torch.linspace(start=left, end=right, steps=resolution[1], dtype=torch.float32, device=mask.device)
         horizontal_gradient = horizontal_gradient * horizontal_gradient
         horizontal_gradient = horizontal_gradient.unsqueeze(0)
         horizontal_gradient = horizontal_gradient.expand(resolution)
 
-        circular_gradient = torch.sqrt(vertical_gradient + horizontal_gradient)
-        circular_gradient = circular_gradient.unsqueeze(0)
+        radial_gradient = torch.sqrt(vertical_gradient + horizontal_gradient)
+        radial_gradient = radial_gradient.unsqueeze(0)
 
-        return circular_gradient
+        radial_gradient = radial_gradient.to(dtype=mask.dtype)
+
+        return radial_gradient
 
     @staticmethod
     def __get_disc_mask(radial_gradient: Tensor, radius) -> Tensor:
-        return (radial_gradient <= radius).float()
+        return (radial_gradient <= radius).to(dtype=radial_gradient.dtype)
 
     def get_item(self, index: int, requested_name: str = None) -> dict:
         rand = self._get_rand(index)
