@@ -1,6 +1,7 @@
 import random
 from abc import abstractmethod, ABCMeta
 from random import Random
+from typing import Any
 
 import torch
 from torch.utils.data import DataLoader, Dataset
@@ -54,6 +55,12 @@ class PipelineModule(metaclass=ABCMeta):
                     module.__length_cache = module.length()
                 return module.__length_cache
 
+    def get_previous_meta(self, name: str):
+        for previous_module_index in range(self.__module_index - 1, -1, -1):
+            module = self.pipeline.modules[previous_module_index]
+            if name in module.get_outputs():
+                return module.get_meta(name)
+
     def _get_rand(self, index: int = -1) -> Random:
         seed = hash((self.__base_seed, self.__module_index, self.pipeline.current_epoch, index))
         return Random(seed)
@@ -81,6 +88,15 @@ class PipelineModule(metaclass=ABCMeta):
         Called once before each epoch, starting with the first epoch.
         """
         pass
+
+    def get_meta(self, name: str) -> Any:
+        """
+        Called to return meta information about this module.
+
+        :param name: the requested meta key
+        :return: meta information
+        """
+        return None
 
     @abstractmethod
     def get_item(self, index: int, requested_name: str = None) -> dict:

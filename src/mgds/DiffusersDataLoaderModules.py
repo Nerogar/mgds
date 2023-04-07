@@ -67,10 +67,11 @@ class SampleVAEDistribution(PipelineModule):
 
 
 class RandomLatentMaskRemove(PipelineModule):
-    def __init__(self, latent_mask_name: str, latent_conditioning_image_name: str, replace_probability: float, vae: AutoencoderKL):
+    def __init__(self, latent_mask_name: str, latent_conditioning_image_name: str, possible_resolutions_in_name: str, replace_probability: float, vae: AutoencoderKL):
         super(RandomLatentMaskRemove, self).__init__()
         self.latent_mask_name = latent_mask_name
         self.latent_conditioning_image_name = latent_conditioning_image_name
+        self.possible_resolutions_in_name = possible_resolutions_in_name
         self.replace_probability = replace_probability
         self.vae = vae
 
@@ -90,6 +91,16 @@ class RandomLatentMaskRemove(PipelineModule):
     def get_outputs(self) -> list[str]:
         return self.inputs_outputs
 
+    def start(self):
+        possible_resolutions = self.get_previous_meta(self.possible_resolutions_in_name)
+
+        with torch.no_grad():
+            for resolution in possible_resolutions:
+                blank_conditioning_image = torch.zeros(resolution, dtype=self.pipeline.dtype, device=self.pipeline.device)
+                blank_conditioning_image = blank_conditioning_image.unsqueeze(0).unsqueeze(0).expand([-1, 3, -1, -1])
+                self.blank_conditioning_image_cache[resolution] = self.vae.encode(blank_conditioning_image).latent_dist.mode().squeeze()
+
+
     def get_item(self, index: int, requested_name: str = None) -> dict:
         rand = self._get_rand(index)
         latent_mask = self.get_previous_item(self.latent_mask_name, index)
@@ -99,12 +110,6 @@ class RandomLatentMaskRemove(PipelineModule):
         if latent_resolution not in self.full_mask_cache:
             self.full_mask_cache[latent_resolution] = torch.ones_like(latent_mask)
 
-        if resolution not in self.blank_conditioning_image_cache:
-            with torch.no_grad():
-                blank_conditioning_image = torch.zeros(resolution, dtype=latent_mask.dtype, device=latent_mask.device)
-                blank_conditioning_image = blank_conditioning_image.unsqueeze(0).unsqueeze(0).expand([-1, 3, -1, -1])
-                self.blank_conditioning_image_cache[latent_resolution] = self.vae.encode(blank_conditioning_image).latent_dist.mode().squeeze()
-
         replace = rand.random() < self.replace_probability
 
         if replace:
@@ -112,7 +117,7 @@ class RandomLatentMaskRemove(PipelineModule):
 
         latent_conditioning_image = None
         if replace and self.latent_conditioning_image_name is not None:
-            latent_conditioning_image = self.blank_conditioning_image_cache[latent_resolution]
+            latent_conditioning_image = self.blank_conditioning_image_cache[resolution]
         elif not replace and self.latent_conditioning_image_name is not None:
             latent_conditioning_image = self.get_previous_item(self.latent_conditioning_image_name, index)
 

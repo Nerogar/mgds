@@ -1,5 +1,6 @@
 import math
 import os
+from typing import Any
 
 import numpy as np
 import torch
@@ -137,7 +138,7 @@ class CalcAspect(PipelineModule):
 class AspectBucketing(PipelineModule):
     def __init__(self, batch_size: int, target_resolution: int,
                  resolution_in_name: str,
-                 scale_resolution_out_name: str, crop_resolution_out_name: str):
+                 scale_resolution_out_name: str, crop_resolution_out_name: str, possible_resolutions_out_name: str):
         super(AspectBucketing, self).__init__()
 
         self.batch_size = batch_size
@@ -147,6 +148,7 @@ class AspectBucketing(PipelineModule):
 
         self.scale_resolution_out_name = scale_resolution_out_name
         self.crop_resolution_out_name = crop_resolution_out_name
+        self.possible_resolutions_out_name = possible_resolutions_out_name
 
         self.possible_resolutions, self.possible_aspects = self.create_buckets(target_resolution)
 
@@ -157,7 +159,7 @@ class AspectBucketing(PipelineModule):
         return [self.resolution_in_name]
 
     def get_outputs(self) -> list[str]:
-        return [self.scale_resolution_out_name, self.crop_resolution_out_name]
+        return [self.scale_resolution_out_name, self.crop_resolution_out_name, self.possible_resolutions_out_name]
 
     @staticmethod
     def create_buckets(target_resolution: int) -> (np.ndarray, np.ndarray):
@@ -202,6 +204,12 @@ class AspectBucketing(PipelineModule):
         aspect = h / w
         bucket_index = np.argmin(abs(self.possible_aspects - aspect))
         return self.possible_resolutions[bucket_index]
+
+    def get_meta(self, name: str) -> Any:
+        if name == self.possible_resolutions_out_name:
+            return self.possible_resolutions
+        else:
+            return None
 
     def get_item(self, index: int, requested_name: str = None) -> dict:
         resolution = self.get_previous_item(self.resolution_in_name, index)

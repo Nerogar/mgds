@@ -67,7 +67,7 @@ class Tokenize(PipelineModule):
             truncation=True,
             max_length=self.tokenizer.model_max_length,
             return_tensors="pt",
-        ).input_ids
+        ).input_ids.to(self.pipeline.device)
 
         tokens = tokens.squeeze()
 
