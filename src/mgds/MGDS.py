@@ -35,14 +35,20 @@ class PipelineModule(metaclass=ABCMeta):
         for previous_module_index in range(self.__module_index - 1, -1, -1):
             module = self.pipeline.modules[previous_module_index]
             if name in module.get_outputs():
+                # item is cached
                 if module.__item_cache_index == index and name in module.__item_cache.keys():
                     return module.__item_cache[name]
+
+                # the wrong index is cached, clear cache and recalculate
                 if module.__item_cache_index != index:
                     item = module.get_item(index, name)
                     module.__item_cache_index = index
                     module.__item_cache = item
                     return item[name]
-                elif name in module.__item_cache.keys():
+
+                # the item is cached and the index is correct, but the name is not part of the cache
+                # recalculate and add to the cache
+                if name not in module.__item_cache.keys():
                     item = module.get_item(index, name)
                     module.__item_cache.update(item)
                     return item[name]
