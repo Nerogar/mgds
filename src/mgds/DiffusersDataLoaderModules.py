@@ -1,3 +1,5 @@
+from contextlib import nullcontext
+
 import torch
 from diffusers.models.autoencoder_kl import AutoencoderKL
 
@@ -23,10 +25,11 @@ class EncodeVAE(PipelineModule):
     def get_item(self, index: int, requested_name: str = None) -> dict:
         image = self.get_previous_item(self.in_name, index)
 
-        image = image.to(device=image.device, dtype=self.vae.dtype)
+        image = image.to(device=image.device, dtype=self.pipeline.dtype)
 
         with torch.no_grad():
-            latent_distribution = self.vae.encode(image.unsqueeze(0)).latent_dist
+            with torch.autocast(self.pipeline.device.type) if self.pipeline.allow_mixed_precision else nullcontext():
+                latent_distribution = self.vae.encode(image.unsqueeze(0)).latent_dist
 
         return {
             self.out_name: latent_distribution
@@ -95,11 +98,11 @@ class RandomLatentMaskRemove(PipelineModule):
         possible_resolutions = self.get_previous_meta(self.possible_resolutions_in_name)
 
         with torch.no_grad():
-            for resolution in possible_resolutions:
-                blank_conditioning_image = torch.zeros(resolution, dtype=self.pipeline.dtype, device=self.pipeline.device)
-                blank_conditioning_image = blank_conditioning_image.unsqueeze(0).unsqueeze(0).expand([-1, 3, -1, -1])
-                self.blank_conditioning_image_cache[resolution] = self.vae.encode(blank_conditioning_image).latent_dist.mode().squeeze()
-
+            with torch.autocast(self.pipeline.device.type) if self.pipeline.allow_mixed_precision else nullcontext():
+                for resolution in possible_resolutions:
+                    blank_conditioning_image = torch.zeros(resolution, dtype=self.pipeline.dtype, device=self.pipeline.device)
+                    blank_conditioning_image = blank_conditioning_image.unsqueeze(0).unsqueeze(0).expand([-1, 3, -1, -1])
+                    self.blank_conditioning_image_cache[resolution] = self.vae.encode(blank_conditioning_image).latent_dist.mode().squeeze()
 
     def get_item(self, index: int, requested_name: str = None) -> dict:
         rand = self._get_rand(index)

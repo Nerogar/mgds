@@ -1,3 +1,5 @@
+from contextlib import nullcontext
+
 import torch
 from PIL import Image
 from transformers import DPTForDepthEstimation, DPTImageProcessor, CLIPTokenizer
@@ -29,13 +31,14 @@ class GenerateDepth(PipelineModule):
         image = image.convert('RGB')
 
         with torch.no_grad():
-            image = self.image_depth_processor(image, return_tensors="pt").pixel_values
-            image = image.to(self.pipeline.device)
-            depth = self.depth_estimator(image).predicted_depth
+            with torch.autocast(self.pipeline.device.type) if self.pipeline.allow_mixed_precision else nullcontext():
+                image = self.image_depth_processor(image, return_tensors="pt").pixel_values
+                image = image.to(self.pipeline.device)
+                depth = self.depth_estimator(image).predicted_depth
 
-            depth_min = torch.amin(depth, dim=[1, 2], keepdim=True)
-            depth_max = torch.amax(depth, dim=[1, 2], keepdim=True)
-            depth = 2.0 * (depth - depth_min) / (depth_max - depth_min) - 1.0
+                depth_min = torch.amin(depth, dim=[1, 2], keepdim=True)
+                depth_max = torch.amax(depth, dim=[1, 2], keepdim=True)
+                depth = 2.0 * (depth - depth_min) / (depth_max - depth_min) - 1.0
 
         return {
             self.image_out_name: depth

@@ -1,4 +1,5 @@
 import os
+from contextlib import nullcontext
 
 import torch
 from diffusers.models.autoencoder_kl import AutoencoderKL
@@ -70,8 +71,9 @@ class DecodeVAE(PipelineModule):
         latent_image = self.get_previous_item(self.in_name, index)
 
         with torch.no_grad():
-            image = self.vae.decode(latent_image.unsqueeze(0)).sample
-            image = image.clamp(-1, 1).squeeze()
+            with torch.autocast(self.pipeline.device.type) if self.pipeline.allow_mixed_precision else nullcontext():
+                image = self.vae.decode(latent_image.unsqueeze(0)).sample
+                image = image.clamp(-1, 1).squeeze()
 
         return {
             self.out_name: image

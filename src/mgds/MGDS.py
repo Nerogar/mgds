@@ -142,14 +142,24 @@ class ConceptPipelineModule(PipelineModule):
 class LoadingPipeline:
     device: torch.device
     dtype: torch.dtype
+    allow_mixed_precision: bool
     concepts: list[dict]
     modules: list[PipelineModule]
     current_epoch: int
     last_initialized_epoch: int
 
-    def __init__(self, device: torch.device, dtype: torch.dtype, concepts: list[dict], modules: list, seed: int):
+    def __init__(
+            self,
+            device: torch.device,
+            dtype: torch.dtype,
+            allow_mixed_precision: bool,
+            concepts: list[dict],
+            modules: list,
+            seed: int
+    ):
         self.device = device
         self.dtype = dtype
+        self.allow_mixed_precision = allow_mixed_precision
         self.concepts = concepts
         self.modules = list(filter(lambda x: x is not None, self.__flatten(modules)))
 
@@ -218,20 +228,23 @@ class LoadingPipeline:
 class MGDS(Dataset):
     device: torch.device
     dtype: torch.dtype
+    allow_mixed_precision: bool
     loading_pipeline: LoadingPipeline
 
     def __init__(
             self,
             device: torch.device,
             dtype: torch.dtype,
+            allow_mixed_precision: bool,
             concepts: [dict],
             definition: [PipelineModule],
             seed: int = 42
     ):
         self.device = device
         self.dtype = dtype
+        self.allow_mixed_precision = allow_mixed_precision
         seed = (random.randint(-(1 << 30), 1 << 30) if seed == -1 else seed)
-        self.loading_pipeline = LoadingPipeline(device, dtype, concepts, definition, seed=seed)
+        self.loading_pipeline = LoadingPipeline(device, dtype, allow_mixed_precision, concepts, definition, seed=seed)
 
         self.loading_pipeline.start()
 
