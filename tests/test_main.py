@@ -12,7 +12,7 @@ BATCH_SIZE = 4
 
 
 def test():
-    depth_model_path = 'F:\\StableTunerPip\\models\\v2-0-depth'
+    depth_model_path = '..\\..\\models\\diffusers-base\\v2-0-depth'
 
     vae = AutoencoderKL.from_pretrained(os.path.join(depth_model_path, 'vae')).to(DEVICE)
     image_depth_processor = DPTImageProcessor.from_pretrained(os.path.join(depth_model_path, 'feature_extractor'))
@@ -66,13 +66,17 @@ def test():
     ds = MGDS(
         device=torch.device(DEVICE),
         dtype=torch.float32,
+        allow_mixed_precision=False,
         concepts=[{'name': 'X', 'path': 'dataset'}],
         definition=[
             input_modules,
-            debug_modules,
+            # debug_modules,
             output_modules
         ],
-        seed=42
+        batch_size=BATCH_SIZE,
+        seed=42,
+        initial_epoch=0,
+        initial_epoch_step=10,
     )
     dl = TrainDataLoader(ds, batch_size=BATCH_SIZE)
 

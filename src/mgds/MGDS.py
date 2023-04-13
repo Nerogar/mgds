@@ -147,6 +147,9 @@ class LoadingPipeline:
     modules: list[PipelineModule]
     current_epoch: int
     last_initialized_epoch: int
+    batch_size: int
+    initial_epoch: int
+    initial_epoch_step: int
 
     def __init__(
             self,
@@ -155,7 +158,10 @@ class LoadingPipeline:
             allow_mixed_precision: bool,
             concepts: list[dict],
             modules: list,
-            seed: int
+            batch_size: int,
+            seed: int,
+            initial_epoch: int = 0,
+            initial_epoch_step: int = 0,
     ):
         self.device = device
         self.dtype = dtype
@@ -166,6 +172,10 @@ class LoadingPipeline:
         self.modules.insert(0, ConceptPipelineModule(self.concepts))
         for index, module in enumerate(self.modules):
             module.init(self, seed, index)
+
+        self.batch_size = batch_size
+        self.initial_epoch = initial_epoch
+        self.initial_epoch_step = initial_epoch_step
 
         self.current_epoch = -1
         self.last_initialized_epoch = -1
@@ -180,7 +190,11 @@ class LoadingPipeline:
             return [data]
 
     def length(self) -> int:
-        return self.modules[-1].length()
+        if self.current_epoch == self.initial_epoch:
+            # for the initial epoch, initial_epoch_step defines the amount of samples to skip
+            return self.modules[-1].length() - self.initial_epoch_step * self.batch_size
+        else:
+            return self.modules[-1].length()
 
     def start(self):
         """
@@ -188,21 +202,23 @@ class LoadingPipeline:
         Can be used to add caching or other logic that should run once.
         """
 
-        # set current_epoch to 0 to simulate calling start() during the first epoch
+        # Set current_epoch to 0 to simulate calling start() during the first epoch.
         self.current_epoch = 0
-
         for module_index in range(len(self.modules)):
             module = self.modules[module_index]
             module.start()
 
+        # Set current_epoch to initial_epoch to simulate calling start_next_epoch() during the current epoch.
+        self.current_epoch = self.initial_epoch
         for module_index in range(len(self.modules)):
             module = self.modules[module_index]
             module.start_next_epoch()
 
-        self.last_initialized_epoch = 0
+        self.last_initialized_epoch = self.current_epoch
 
-        # reset current_epoch to -1, because the epoch has not yet started
-        self.current_epoch = -1
+        # Reset current_epoch to initial_epoch - 1, because the epoch has not yet started.
+        # Calling start_next_epoch() once, will start the current epoch
+        self.current_epoch = self.initial_epoch - 1
 
     def start_next_epoch(self):
         self.current_epoch += 1
@@ -218,6 +234,9 @@ class LoadingPipeline:
         self.last_initialized_epoch = self.current_epoch
 
     def get_item(self, index: int) -> dict:
+        # for the initial epoch, initial_epoch_step defines the amount of samples to skip
+        if self.current_epoch == self.initial_epoch:
+            index += self.initial_epoch_step * self.batch_size
 
         module_index = len(self.modules) - 1
         last_module = self.modules[module_index]
@@ -238,13 +257,16 @@ class MGDS(Dataset):
             allow_mixed_precision: bool,
             concepts: [dict],
             definition: [PipelineModule],
-            seed: int = 42
+            batch_size: int,
+            seed: int = 42,
+            initial_epoch: int = 0,
+            initial_epoch_step: int = 0
     ):
         self.device = device
         self.dtype = dtype
         self.allow_mixed_precision = allow_mixed_precision
         seed = (random.randint(-(1 << 30), 1 << 30) if seed == -1 else seed)
-        self.loading_pipeline = LoadingPipeline(device, dtype, allow_mixed_precision, concepts, definition, seed=seed)
+        self.loading_pipeline = LoadingPipeline(device, dtype, allow_mixed_precision, concepts, definition, batch_size, seed, initial_epoch, initial_epoch_step)
 
         self.loading_pipeline.start()
 
