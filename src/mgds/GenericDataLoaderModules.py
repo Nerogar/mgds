@@ -445,13 +445,18 @@ class Downscale(PipelineModule):
 
 
 class DiskCache(PipelineModule):
-    def __init__(self, cache_dir: str, split_names=None, aggregate_names=None):
+    def __init__(
+            self,
+            cache_dir: str,
+            split_names=None, aggregate_names=None, cached_epochs: int = 1
+    ):
         super(DiskCache, self).__init__()
         self.cache_dir = cache_dir
         self.split_names = [] if split_names is None else split_names
         self.aggregate_names = [] if aggregate_names is None else aggregate_names
         self.cache_length = None
         self.aggregate_cache = None
+        self.cached_epochs = cached_epochs
 
         if len(self.split_names) + len(self.aggregate_names) == 0:
             raise ValueError('No cache items supplied')
@@ -469,23 +474,30 @@ class DiskCache(PipelineModule):
     def get_outputs(self) -> list[str]:
         return self.split_names + self.aggregate_names
 
-    def start(self):
-        caching_done = False
+    def __current_cache_dir(self) -> str:
+        return os.path.join(self.cache_dir, "epoch-" + str(self.pipeline.current_epoch % self.cached_epochs))
 
-        if os.path.isdir(self.cache_dir):
-            with os.scandir(self.cache_dir) as path_iter:
+    def __is_caching_done(self):
+        cache_dir = self.__current_cache_dir()
+        if os.path.isdir(cache_dir):
+            with os.scandir(cache_dir) as path_iter:
                 if any(path_iter):
-                    caching_done = True
+                    return True
+        return False
 
-        if caching_done:
+    def __refresh_cache(self):
+        self.cache_length = None
+        self.aggregate_cache = None
+        cache_dir = self.__current_cache_dir()
+
+        if self.__is_caching_done():
             if len(self.aggregate_names) > 0:
-                self.aggregate_cache = torch.load(os.path.join(self.cache_dir, 'aggregate.pt'))
+                self.aggregate_cache = torch.load(os.path.join(cache_dir, 'aggregate.pt'))
                 length = len(self.aggregate_cache)
             else:
-                length = len(os.listdir(self.cache_dir))
+                length = len(os.listdir(cache_dir))
         else:
-            if not os.path.exists(self.cache_dir):
-                os.makedirs(self.cache_dir)
+            os.makedirs(cache_dir, exist_ok=True)
 
             length = self.length()
             self.aggregate_cache = []
@@ -499,12 +511,20 @@ class DiskCache(PipelineModule):
                 for name in self.aggregate_names:
                     aggregate_item[name] = self.get_previous_item(name, index)
 
-                torch.save(split_item, os.path.join(self.cache_dir, str(index) + '.pt'))
+                torch.save(split_item, os.path.join(cache_dir, str(index) + '.pt'))
                 self.aggregate_cache.append(aggregate_item)
 
-            torch.save(self.aggregate_cache, os.path.join(self.cache_dir, 'aggregate.pt'))
+            torch.save(self.aggregate_cache, os.path.join(cache_dir, 'aggregate.pt'))
 
         self.cache_length = length
+
+    def start(self):
+        if self.cached_epochs == 1:
+            self.__refresh_cache()
+
+    def start_next_epoch(self):
+        if self.cached_epochs > 1:
+            self.__refresh_cache()
 
     def get_item(self, index: int, requested_name: str = None) -> dict:
         item = {}
@@ -514,7 +534,7 @@ class DiskCache(PipelineModule):
             item[name] = aggregate_item[name]
 
         if requested_name in self.split_names:
-            split_item = torch.load(os.path.join(self.cache_dir, str(index) + '.pt'))
+            split_item = torch.load(os.path.join(self.__current_cache_dir(), str(index) + '.pt'))
 
             for name in self.split_names:
                 item[name] = split_item[name]
@@ -705,7 +725,8 @@ class RandomMaskRotateCrop(PipelineModule):
 
     @staticmethod
     def __rotate(tensor: Tensor, center: list[int], angle: float) -> Tensor:
-        return functional.rotate(tensor, angle, interpolation=InterpolationMode.BILINEAR, center=center)
+        # TODO: BILINEAR interpolation would be preferred, but currently produces artifacts
+        return functional.rotate(tensor, angle, interpolation=InterpolationMode.NEAREST, center=center)
 
     @staticmethod
     def __crop(tensor: Tensor, y_min: int, y_max: int, x_min: int, x_max: int) -> Tensor:
@@ -838,7 +859,7 @@ class RandomCircularMaskShrink(PipelineModule):
 
         generator = torch.Generator(device=mask.device)
         generator.manual_seed(seed)
-        random = torch.rand(size=mask.shape, generator=generator, dtype=mask.dtype, device=mask.device)
+        random = torch.rand(size=mask.shape, generator=generator, dtype=torch.float32, device=mask.device)
         random_mask = torch.flatten(random * mask)
         max_index_flat = torch.argmax(random_mask).item()
         max_index = (max_index_flat // random.shape[2], max_index_flat % random.shape[2])

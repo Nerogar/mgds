@@ -139,12 +139,36 @@ class ConceptPipelineModule(PipelineModule):
         }
 
 
+class OutputPipelineModule(PipelineModule):
+    def __init__(self, names: list[str]):
+        super(OutputPipelineModule, self).__init__()
+        self.names = names
+
+    def length(self) -> int:
+        return self.get_previous_length(self.names[0])
+
+    def get_inputs(self) -> list[str]:
+        return self.names
+
+    def get_outputs(self) -> list[str]:
+        return self.names
+
+    def get_item(self, index: int, requested_name: str = None) -> dict:
+        item = {}
+
+        for name in self.names:
+            item[name] = self.get_previous_item(name, index)
+
+        return item
+
+
 class LoadingPipeline:
     device: torch.device
     dtype: torch.dtype
     allow_mixed_precision: bool
     concepts: list[dict]
     modules: list[PipelineModule]
+    output_module: PipelineModule
     current_epoch: int
     last_initialized_epoch: int
     batch_size: int
@@ -157,17 +181,20 @@ class LoadingPipeline:
             dtype: torch.dtype,
             allow_mixed_precision: bool,
             concepts: list[dict],
-            modules: list,
+            modules: list[PipelineModule],
             batch_size: int,
             seed: int,
             initial_epoch: int = 0,
-            initial_epoch_step: int = 0,
+            initial_epoch_sample: int = 0,
     ):
         self.device = device
         self.dtype = dtype
         self.allow_mixed_precision = allow_mixed_precision
         self.concepts = concepts
         self.modules = list(filter(lambda x: x is not None, self.__flatten(modules)))
+        for module in self.modules:
+            if isinstance(module, OutputPipelineModule):
+                self.output_module = module
 
         self.modules.insert(0, ConceptPipelineModule(self.concepts))
         for index, module in enumerate(self.modules):
@@ -175,7 +202,7 @@ class LoadingPipeline:
 
         self.batch_size = batch_size
         self.initial_epoch = initial_epoch
-        self.initial_epoch_step = initial_epoch_step
+        self.initial_epoch_sample = initial_epoch_sample
 
         self.current_epoch = -1
         self.last_initialized_epoch = -1
@@ -192,9 +219,9 @@ class LoadingPipeline:
     def length(self) -> int:
         if self.current_epoch == self.initial_epoch:
             # for the initial epoch, initial_epoch_step defines the amount of samples to skip
-            return self.modules[-1].length() - self.initial_epoch_step * self.batch_size
+            return min(0, self.output_module.length() - self.initial_epoch_sample)
         else:
-            return self.modules[-1].length()
+            return self.output_module.length()
 
     def start(self):
         """
@@ -238,10 +265,7 @@ class LoadingPipeline:
         if self.current_epoch == self.initial_epoch:
             index += self.initial_epoch_step * self.batch_size
 
-        module_index = len(self.modules) - 1
-        last_module = self.modules[module_index]
-
-        return last_module.get_item(index)
+        return self.output_module.get_item(index)
 
 
 class MGDS(Dataset):
@@ -260,13 +284,13 @@ class MGDS(Dataset):
             batch_size: int,
             seed: int = 42,
             initial_epoch: int = 0,
-            initial_epoch_step: int = 0
+            initial_epoch_sample: int = 0
     ):
         self.device = device
         self.dtype = dtype
         self.allow_mixed_precision = allow_mixed_precision
         seed = (random.randint(-(1 << 30), 1 << 30) if seed == -1 else seed)
-        self.loading_pipeline = LoadingPipeline(device, dtype, allow_mixed_precision, concepts, definition, batch_size, seed, initial_epoch, initial_epoch_step)
+        self.loading_pipeline = LoadingPipeline(device, dtype, allow_mixed_precision, concepts, definition, batch_size, seed, initial_epoch, initial_epoch_sample)
 
         self.loading_pipeline.start()
 
