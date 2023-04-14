@@ -76,7 +76,7 @@ def test():
         batch_size=BATCH_SIZE,
         seed=42,
         initial_epoch=0,
-        initial_epoch_step=10,
+        initial_epoch_sample=10,
     )
     dl = TrainDataLoader(ds, batch_size=BATCH_SIZE)
 

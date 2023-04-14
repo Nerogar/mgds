@@ -173,7 +173,7 @@ class LoadingPipeline:
     last_initialized_epoch: int
     batch_size: int
     initial_epoch: int
-    initial_epoch_step: int
+    initial_epoch_sample: int
 
     def __init__(
             self,
@@ -218,8 +218,8 @@ class LoadingPipeline:
 
     def length(self) -> int:
         if self.current_epoch == self.initial_epoch:
-            # for the initial epoch, initial_epoch_step defines the amount of samples to skip
-            return min(0, self.output_module.length() - self.initial_epoch_sample)
+            # for the initial epoch, initial_epoch_sample defines the amount of samples to skip
+            return max(0, self.output_module.length() - self.initial_epoch_sample)
         else:
             return self.output_module.length()
 
@@ -261,9 +261,9 @@ class LoadingPipeline:
         self.last_initialized_epoch = self.current_epoch
 
     def get_item(self, index: int) -> dict:
-        # for the initial epoch, initial_epoch_step defines the amount of samples to skip
+        # for the initial epoch, initial_epoch_sample defines the amount of samples to skip
         if self.current_epoch == self.initial_epoch:
-            index += self.initial_epoch_step * self.batch_size
+            index += self.initial_epoch_sample
 
         return self.output_module.get_item(index)
 
