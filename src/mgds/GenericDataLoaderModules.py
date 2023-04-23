@@ -383,6 +383,90 @@ class LoadText(PipelineModule):
         }
 
 
+class LoadMultipleTexts(PipelineModule):
+    def __init__(self, path_in_name: str, texts_out_name: str):
+        super(LoadMultipleTexts, self).__init__()
+        self.path_in_name = path_in_name
+        self.texts_out_name = texts_out_name
+
+    def length(self) -> int:
+        return self.get_previous_length(self.path_in_name)
+
+    def get_inputs(self) -> list[str]:
+        return [self.path_in_name]
+
+    def get_outputs(self) -> list[str]:
+        return [self.texts_out_name]
+
+    def get_item(self, index: int, requested_name: str = None) -> dict:
+        path = self.get_previous_item(self.path_in_name, index)
+
+        texts = ['']
+        if os.path.exists(path):
+            with open(path, encoding='utf-8') as f:
+                texts = [line.strip() for line in f]
+                f.close()
+
+        texts = list(filter(lambda text: text != "", texts))
+
+        return {
+            self.texts_out_name: texts
+        }
+
+
+class SelectRandomText(PipelineModule):
+    def __init__(self, texts_in_name: str, text_out_name: str):
+        super(SelectRandomText, self).__init__()
+        self.texts_in_name = texts_in_name
+        self.text_out_name = text_out_name
+
+    def length(self) -> int:
+        return self.get_previous_length(self.texts_in_name)
+
+    def get_inputs(self) -> list[str]:
+        return [self.texts_in_name]
+
+    def get_outputs(self) -> list[str]:
+        return [self.text_out_name]
+
+    def get_item(self, index: int, requested_name: str = None) -> dict:
+        rand = self._get_rand(index)
+        texts = self.get_previous_item(self.texts_in_name, index)
+
+        text = rand.choice(texts)
+
+        return {
+            self.text_out_name: text
+        }
+
+
+class ReplaceText(PipelineModule):
+    def __init__(self, text_in_name: str, text_out_name: str, old_text: str, new_text: str):
+        super(ReplaceText, self).__init__()
+        self.text_in_name = text_in_name
+        self.text_out_name = text_out_name
+        self.old_text = old_text
+        self.new_text = new_text
+
+    def length(self) -> int:
+        return self.get_previous_length(self.text_in_name)
+
+    def get_inputs(self) -> list[str]:
+        return [self.text_in_name]
+
+    def get_outputs(self) -> list[str]:
+        return [self.text_out_name]
+
+    def get_item(self, index: int, requested_name: str = None) -> dict:
+        text = self.get_previous_item(self.text_in_name, index)
+
+        text = text.replace(self.old_text, self.new_text)
+
+        return {
+            self.text_out_name: text
+        }
+
+
 class RandomFlip(PipelineModule):
     def __init__(self, names: [str]):
         super(RandomFlip, self).__init__()

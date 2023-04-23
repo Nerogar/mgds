@@ -32,26 +32,40 @@ class PipelineModule(metaclass=ABCMeta):
         self.__length_cache = -1
 
     def get_previous_item(self, name: str, index: int):
+        split_name = name.split('.')
+        item_name = split_name[0]
+        path_names = split_name[1::]
+
+        item = None
+
         for previous_module_index in range(self.__module_index - 1, -1, -1):
             module = self.pipeline.modules[previous_module_index]
-            if name in module.get_outputs():
+            if item_name in module.get_outputs():
                 # item is cached
-                if module.__item_cache_index == index and name in module.__item_cache.keys():
-                    return module.__item_cache[name]
+                if module.__item_cache_index == index and item_name in module.__item_cache.keys():
+                    item = module.__item_cache[item_name]
+                    break
 
                 # the wrong index is cached, clear cache and recalculate
                 if module.__item_cache_index != index:
-                    item = module.get_item(index, name)
+                    item = module.get_item(index, item_name)
                     module.__item_cache_index = index
                     module.__item_cache = item
-                    return item[name]
+                    item = item[item_name]
+                    break
 
-                # the item is cached and the index is correct, but the name is not part of the cache
+                # the item is cached and the index is correct, but the item_name is not part of the cache
                 # recalculate and add to the cache
-                if name not in module.__item_cache.keys():
-                    item = module.get_item(index, name)
+                if item_name not in module.__item_cache.keys():
+                    item = module.get_item(index, item_name)
                     module.__item_cache.update(item)
-                    return item[name]
+                    item = item[item_name]
+                    break
+
+        for path_name in path_names:
+            item = item[path_name]
+
+        return item
 
     def get_previous_length(self, name: str):
         for previous_module_index in range(self.__module_index - 1, -1, -1):
@@ -119,6 +133,26 @@ class PipelineModule(metaclass=ABCMeta):
         pass
 
 
+class SettingsPipelineModule(PipelineModule):
+    def __init__(self, settings: dict):
+        super(SettingsPipelineModule, self).__init__()
+        self.settings = settings
+
+    def length(self) -> int:
+        return 1
+
+    def get_inputs(self) -> list[str]:
+        return []
+
+    def get_outputs(self) -> list[str]:
+        return ['settings']
+
+    def get_item(self, index: int, requested_name: str = None) -> dict:
+        return {
+            'settings': self.settings
+        }
+
+
 class ConceptPipelineModule(PipelineModule):
     def __init__(self, concepts: list[dict]):
         super(ConceptPipelineModule, self).__init__()
@@ -167,6 +201,7 @@ class LoadingPipeline:
     dtype: torch.dtype
     allow_mixed_precision: bool
     concepts: list[dict]
+    settings: dict
     modules: list[PipelineModule]
     output_module: PipelineModule
     current_epoch: int
@@ -181,6 +216,7 @@ class LoadingPipeline:
             dtype: torch.dtype,
             allow_mixed_precision: bool,
             concepts: list[dict],
+            settings: dict,
             modules: list[PipelineModule],
             batch_size: int,
             seed: int,
@@ -191,12 +227,14 @@ class LoadingPipeline:
         self.dtype = dtype
         self.allow_mixed_precision = allow_mixed_precision
         self.concepts = concepts
+        self.settings = settings
         self.modules = list(filter(lambda x: x is not None, self.__flatten(modules)))
         for module in self.modules:
             if isinstance(module, OutputPipelineModule):
                 self.output_module = module
 
         self.modules.insert(0, ConceptPipelineModule(self.concepts))
+        self.modules.insert(1, SettingsPipelineModule(self.settings))
         for index, module in enumerate(self.modules):
             module.init(self, seed, index)
 
@@ -279,7 +317,8 @@ class MGDS(Dataset):
             device: torch.device,
             dtype: torch.dtype,
             allow_mixed_precision: bool,
-            concepts: [dict],
+            concepts: list[dict],
+            settings: dict,
             definition: [PipelineModule],
             batch_size: int,
             seed: int = 42,
@@ -290,7 +329,7 @@ class MGDS(Dataset):
         self.dtype = dtype
         self.allow_mixed_precision = allow_mixed_precision
         seed = (random.randint(-(1 << 30), 1 << 30) if seed == -1 else seed)
-        self.loading_pipeline = LoadingPipeline(device, dtype, allow_mixed_precision, concepts, definition, batch_size, seed, initial_epoch, initial_epoch_sample)
+        self.loading_pipeline = LoadingPipeline(device, dtype, allow_mixed_precision, concepts, settings, definition, batch_size, seed, initial_epoch, initial_epoch_sample)
 
         self.loading_pipeline.start()
 
