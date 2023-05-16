@@ -44,22 +44,24 @@ class PipelineModule(metaclass=ABCMeta):
                 # item is cached
                 if module.__item_cache_index == index and item_name in module.__item_cache.keys():
                     item = module.__item_cache[item_name]
-                    break
 
                 # the wrong index is cached, clear cache and recalculate
-                if module.__item_cache_index != index:
+                elif module.__item_cache_index != index:
                     item = module.get_item(index, item_name)
                     module.__item_cache_index = index
                     module.__item_cache = item
                     item = item[item_name]
-                    break
 
                 # the item is cached and the index is correct, but the item_name is not part of the cache
                 # recalculate and add to the cache
-                if item_name not in module.__item_cache.keys():
+                elif item_name not in module.__item_cache.keys():
                     item = module.get_item(index, item_name)
                     module.__item_cache.update(item)
                     item = item[item_name]
+
+                # if the item was found, break the loop
+                # else, fall through to a previous module and try again
+                if item is not None:
                     break
 
         for path_name in path_names:
@@ -240,7 +242,7 @@ class LoadingPipeline:
 
         self.batch_size = batch_size
         self.initial_epoch = initial_epoch
-        self.initial_epoch_sample = initial_epoch_sample
+        self.initial_epoch_sample = initial_epoch_sample - (initial_epoch_sample % batch_size)
 
         self.current_epoch = -1
         self.last_initialized_epoch = -1

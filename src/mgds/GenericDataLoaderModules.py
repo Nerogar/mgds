@@ -1,5 +1,6 @@
 import math
 import os
+from random import Random
 from typing import Any
 
 import numpy as np
@@ -58,10 +59,13 @@ class CollectPaths(PipelineModule):
             file_names = list(filter(lambda name: os.path.splitext(name)[1].lower() in self.extensions, file_names))
 
             if self.include_postfix:
-                file_names = list(filter(lambda name: any(os.path.splitext(name)[0].endswith(postfix) for postfix in self.include_postfix), file_names))
+                file_names = list(filter(
+                    lambda name: any(os.path.splitext(name)[0].endswith(postfix) for postfix in self.include_postfix),
+                    file_names))
 
             if self.exclude_postfix:
-                file_names = list(filter(lambda name: not any(os.path.splitext(name)[0].endswith(postfix) for postfix in self.exclude_postfix), file_names))
+                file_names = list(filter(lambda name: not any(
+                    os.path.splitext(name)[0].endswith(postfix) for postfix in self.exclude_postfix), file_names))
 
             self.image_paths.extend(file_names)
             self.concept_name.extend([concept_name] * len(file_names))
@@ -136,12 +140,16 @@ class CalcAspect(PipelineModule):
 
 
 class AspectBucketing(PipelineModule):
-    def __init__(self, batch_size: int, target_resolution: int,
-                 resolution_in_name: str,
-                 scale_resolution_out_name: str, crop_resolution_out_name: str, possible_resolutions_out_name: str):
+    def __init__(
+            self,
+            target_resolution: int,
+            resolution_in_name: str,
+            scale_resolution_out_name: str,
+            crop_resolution_out_name: str,
+            possible_resolutions_out_name: str
+    ):
         super(AspectBucketing, self).__init__()
 
-        self.batch_size = batch_size
         self.target_resolution = target_resolution
 
         self.resolution_in_name = resolution_in_name
@@ -238,6 +246,67 @@ class AspectBucketing(PipelineModule):
         }
 
 
+class SingleAspectCropping(PipelineModule):
+    def __init__(
+            self,
+            target_resolution: int,
+            resolution_in_name: str,
+            scale_resolution_out_name: str,
+            crop_resolution_out_name: str,
+            possible_resolutions_out_name: str
+    ):
+        super(SingleAspectCropping, self).__init__()
+
+        self.target_resolution = target_resolution
+
+        self.resolution_in_name = resolution_in_name
+
+        self.scale_resolution_out_name = scale_resolution_out_name
+        self.crop_resolution_out_name = crop_resolution_out_name
+        self.possible_resolutions_out_name = possible_resolutions_out_name
+
+    def length(self) -> int:
+        return self.get_previous_length(self.resolution_in_name)
+
+    def get_inputs(self) -> list[str]:
+        return [self.resolution_in_name]
+
+    def get_outputs(self) -> list[str]:
+        return [self.scale_resolution_out_name, self.crop_resolution_out_name, self.possible_resolutions_out_name]
+
+    def get_meta(self, name: str) -> Any:
+        if name == self.possible_resolutions_out_name:
+            return [(self.target_resolution, self.target_resolution)]
+        else:
+            return None
+
+    def get_item(self, index: int, requested_name: str = None) -> dict:
+        resolution = self.get_previous_item(self.resolution_in_name, index)
+
+        target_resolution = (self.target_resolution, self.target_resolution)
+
+        aspect = resolution[0] / resolution[1]
+        target_aspect = target_resolution[0] / target_resolution[1]
+
+        if aspect > target_aspect:
+            scale = target_resolution[1] / resolution[1]
+            scale_resolution = (
+                round(resolution[0] * scale),
+                target_resolution[1]
+            )
+        else:
+            scale = target_resolution[0] / resolution[0]
+            scale_resolution = (
+                target_resolution[0],
+                round(resolution[1] * scale)
+            )
+
+        return {
+            self.scale_resolution_out_name: scale_resolution,
+            self.crop_resolution_out_name: target_resolution,
+        }
+
+
 class LoadImage(PipelineModule):
     def __init__(self, path_in_name: str, image_out_name: str, range_min: float, range_max: float, channels: int = 3):
         super(LoadImage, self).__init__()
@@ -266,13 +335,16 @@ class LoadImage(PipelineModule):
     def get_item(self, index: int, requested_name: str = None) -> dict:
         path = self.get_previous_item(self.path_in_name, index)
 
-        image = Image.open(path)
-        image = image.convert(self.mode)
+        try:
+            image = Image.open(path)
+            image = image.convert(self.mode)
 
-        t = transforms.ToTensor()
-        image_tensor = t(image).to(device=self.pipeline.device, dtype=self.pipeline.dtype)
+            t = transforms.ToTensor()
+            image_tensor = t(image).to(device=self.pipeline.device, dtype=self.pipeline.dtype)
 
-        image_tensor = image_tensor * (self.range_max - self.range_min) + self.range_min
+            image_tensor = image_tensor * (self.range_max - self.range_min) + self.range_min
+        except FileNotFoundError:
+            image_tensor = None
 
         return {
             self.image_out_name: image_tensor
@@ -280,7 +352,8 @@ class LoadImage(PipelineModule):
 
 
 class GenerateImageLike(PipelineModule):
-    def __init__(self, image_in_name: str, image_out_name: str, color: float | int | tuple[float, float, float], range_min: float, range_max: float, channels: int = 3):
+    def __init__(self, image_in_name: str, image_out_name: str, color: float | int | tuple[float, float, float],
+                 range_min: float, range_max: float, channels: int = 3):
         super(GenerateImageLike, self).__init__()
         self.image_in_name = image_in_name
         self.image_out_name = image_out_name
@@ -321,7 +394,12 @@ class GenerateImageLike(PipelineModule):
 
 
 class ScaleCropImage(PipelineModule):
-    def __init__(self, image_in_name: str, scale_resolution_in_name: str, crop_resolution_in_name: str, image_out_name: str):
+    def __init__(
+            self, image_in_name: str,
+            scale_resolution_in_name: str,
+            crop_resolution_in_name: str,
+            image_out_name: str
+    ):
         super(ScaleCropImage, self).__init__()
         self.image_in_name = image_in_name
         self.scale_resolution_in_name = scale_resolution_in_name
@@ -441,7 +519,13 @@ class SelectRandomText(PipelineModule):
 
 
 class ReplaceText(PipelineModule):
-    def __init__(self, text_in_name: str, text_out_name: str, old_text: str, new_text: str):
+    def __init__(
+            self,
+            text_in_name: str,
+            text_out_name: str,
+            old_text: str,
+            new_text: str
+    ):
         super(ReplaceText, self).__init__()
         self.text_in_name = text_in_name
         self.text_out_name = text_out_name
@@ -468,9 +552,14 @@ class ReplaceText(PipelineModule):
 
 
 class RandomFlip(PipelineModule):
-    def __init__(self, names: [str]):
+    def __init__(
+            self,
+            names: [str],
+            enabled_in_name: str
+    ):
         super(RandomFlip, self).__init__()
         self.names = names
+        self.enabled_in_name = enabled_in_name
 
     def length(self) -> int:
         return self.get_previous_length(self.names[0])
@@ -482,11 +571,13 @@ class RandomFlip(PipelineModule):
         return self.names
 
     def get_item(self, index: int, requested_name: str = None) -> dict:
+        enabled = self.get_previous_item(self.enabled_in_name, index)
+
         rand = self._get_rand(index)
         item = {}
 
         check = rand.random()
-        flip = check < 0.5
+        flip = enabled and check < 0.5
 
         for name in self.names:
             previous_item = self.get_previous_item(name, index)
@@ -498,10 +589,11 @@ class RandomFlip(PipelineModule):
 
 
 class Downscale(PipelineModule):
-    def __init__(self, in_name: str, out_name: str):
+    def __init__(self, in_name: str, out_name: str, factor: int):
         super(Downscale, self).__init__()
         self.in_name = in_name
         self.out_name = out_name
+        self.factor = factor
 
     def length(self) -> int:
         return self.get_previous_length(self.in_name)
@@ -515,7 +607,7 @@ class Downscale(PipelineModule):
     def get_item(self, index: int, requested_name: str = None) -> dict:
         image = self.get_previous_item(self.in_name, index)
 
-        size = (int(image.shape[1] / 8), int(image.shape[2] / 8))
+        size = (int(image.shape[1] / self.factor), int(image.shape[2] / self.factor))
 
         t = transforms.Compose([
             transforms.Resize(size, interpolation=transforms.InterpolationMode.BILINEAR),
@@ -719,7 +811,12 @@ class AspectBatchSorting(PipelineModule):
 
 
 class GenerateMaskedConditioningImage(PipelineModule):
-    def __init__(self, image_in_name: str, mask_in_name: str, image_out_name: str):
+    def __init__(
+            self,
+            image_in_name: str,
+            mask_in_name: str,
+            image_out_name: str
+    ):
         super(GenerateMaskedConditioningImage, self).__init__()
         self.image_in_name = image_in_name
         self.mask_in_name = mask_in_name
@@ -746,10 +843,20 @@ class GenerateMaskedConditioningImage(PipelineModule):
 
 
 class RandomMaskRotateCrop(PipelineModule):
-    def __init__(self, mask_name: str, additional_names: [str], min_size: int, min_padding_percent: float, max_padding_percent: float, max_rotate_angle: float = 0):
+    def __init__(
+            self,
+            mask_name: str,
+            additional_names: [str],
+            enabled_in_name: str,
+            min_size: int,
+            min_padding_percent: float,
+            max_padding_percent: float,
+            max_rotate_angle: float = 0
+    ):
         super(RandomMaskRotateCrop, self).__init__()
         self.mask_name = mask_name
         self.additional_names = additional_names
+        self.enabled_in_name = enabled_in_name
         self.min_size = min_size
         self.min_padding_percent = min_padding_percent
         self.max_padding_percent = max_padding_percent
@@ -778,7 +885,8 @@ class RandomMaskRotateCrop(PipelineModule):
         ascending_sequence = torch.arange(0, height, 1, device=mask.device, dtype=mask.dtype).unsqueeze(0).unsqueeze(2)
         ascending_mask = reduced_mask * ascending_sequence
 
-        descending_sequence = torch.arange(height, 0, -1, device=mask.device, dtype=mask.dtype).unsqueeze(0).unsqueeze(2)
+        descending_sequence = torch.arange(height, 0, -1, device=mask.device, dtype=mask.dtype).unsqueeze(0).unsqueeze(
+            2)
         descending_mask = reduced_mask * descending_sequence
 
         y_min = height - torch.max(descending_mask).item()
@@ -809,24 +917,15 @@ class RandomMaskRotateCrop(PipelineModule):
 
     @staticmethod
     def __rotate(tensor: Tensor, center: list[int], angle: float) -> Tensor:
-        # TODO: BILINEAR interpolation would be preferred, but currently produces artifacts
-        return functional.rotate(tensor, angle, interpolation=InterpolationMode.NEAREST, center=center)
+        return functional.rotate(tensor, angle, interpolation=InterpolationMode.BILINEAR, center=center)
 
     @staticmethod
     def __crop(tensor: Tensor, y_min: int, y_max: int, x_min: int, x_max: int) -> Tensor:
         return functional.crop(tensor, y_min, x_min, y_max - y_min, x_max - x_min)
 
-    def get_item(self, index: int, requested_name: str = None) -> dict:
-        rand = self._get_rand(index)
-        mask = self.get_previous_item(self.mask_name, index)
-
+    def __apply(self, rand: Random, mask: Tensor, item: dict[str, Tensor]):
         mask_height = mask.shape[1]
         mask_width = mask.shape[2]
-
-        item = {}
-
-        for name in self.additional_names:
-            item[name] = self.get_previous_item(name, index)
 
         # get initial dimensions for rotation
         y_min, y_max, x_min, x_max = self.__get_masked_region(mask)
@@ -913,14 +1012,38 @@ class RandomMaskRotateCrop(PipelineModule):
         # add mask to return value
         item[self.mask_name] = mask
 
+    def get_item(self, index: int, requested_name: str = None) -> dict:
+        enabled = self.get_previous_item(self.enabled_in_name, index)
+
+        mask = self.get_previous_item(self.mask_name, index)
+
+        item = {}
+        for name in self.additional_names:
+            item[name] = self.get_previous_item(name, index)
+
+        if enabled:
+            rand = self._get_rand(index)
+
+            self.__apply(rand, mask, item)
+        else:
+            item[self.mask_name] = mask
+
         return item
 
 
 class RandomCircularMaskShrink(PipelineModule):
-    def __init__(self, mask_name: str, shrink_probability: float, shrink_factor_min: float, shrink_factor_max: float = 1):
+    def __init__(
+            self,
+            mask_name: str,
+            enabled_in_name: str,
+            shrink_probability: float,
+            shrink_factor_min: float,
+            shrink_factor_max: float = 1
+    ):
         super(RandomCircularMaskShrink, self).__init__()
 
         self.mask_name = mask_name
+        self.enabled_in_name = enabled_in_name
         self.shrink_probability = shrink_probability
         self.shrink_factor_min = shrink_factor_min
         self.shrink_factor_max = shrink_factor_max
@@ -963,12 +1086,14 @@ class RandomCircularMaskShrink(PipelineModule):
         left = -center[1]
         right = resolution[1] - center[1] - 1
 
-        vertical_gradient = torch.linspace(start=top, end=bottom, steps=resolution[0], dtype=torch.float32, device=mask.device)
+        vertical_gradient = torch.linspace(start=top, end=bottom, steps=resolution[0], dtype=torch.float32,
+                                           device=mask.device)
         vertical_gradient = vertical_gradient * vertical_gradient
         vertical_gradient = vertical_gradient.unsqueeze(1)
         vertical_gradient = vertical_gradient.expand(resolution)
 
-        horizontal_gradient = torch.linspace(start=left, end=right, steps=resolution[1], dtype=torch.float32, device=mask.device)
+        horizontal_gradient = torch.linspace(start=left, end=right, steps=resolution[1], dtype=torch.float32,
+                                             device=mask.device)
         horizontal_gradient = horizontal_gradient * horizontal_gradient
         horizontal_gradient = horizontal_gradient.unsqueeze(0)
         horizontal_gradient = horizontal_gradient.expand(resolution)
@@ -985,19 +1110,27 @@ class RandomCircularMaskShrink(PipelineModule):
         return (radial_gradient <= radius).to(dtype=radial_gradient.dtype)
 
     def get_item(self, index: int, requested_name: str = None) -> dict:
-        rand = self._get_rand(index)
+        enabled = self.get_previous_item(self.enabled_in_name, index)
+
         mask = self.get_previous_item(self.mask_name, index)
 
-        random_center = self.__get_random_point_in_mask(mask, rand.randint(0, 1 << 30))
-        radial_gradient = self.__get_radial_gradient(mask, random_center)
+        if enabled:
+            rand = self._get_rand(index)
 
-        max_radius = (mask * radial_gradient).max().item()
-        radius = rand.uniform(self.shrink_factor_min, self.shrink_factor_max) * max_radius
+            random_center = self.__get_random_point_in_mask(mask, rand.randint(0, 1 << 30))
+            radial_gradient = self.__get_radial_gradient(mask, random_center)
 
-        disc_mask = self.__get_disc_mask(radial_gradient, radius)
+            max_radius = (mask * radial_gradient).max().item()
+            radius = rand.uniform(self.shrink_factor_min, self.shrink_factor_max) * max_radius
 
-        result_mask = mask * disc_mask
+            disc_mask = self.__get_disc_mask(radial_gradient, radius)
 
-        return {
-            self.mask_name: result_mask,
-        }
+            result_mask = mask * disc_mask
+
+            return {
+                self.mask_name: result_mask,
+            }
+        else:
+            return {
+                self.mask_name: mask,
+            }

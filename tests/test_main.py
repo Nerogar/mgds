@@ -3,7 +3,7 @@ import os.path
 from src.mgds.DebugDataLoaderModules import SaveImage, DecodeVAE
 from src.mgds.DiffusersDataLoaderModules import *
 from src.mgds.GenericDataLoaderModules import *
-from src.mgds.MGDS import MGDS, TrainDataLoader
+from src.mgds.MGDS import MGDS, TrainDataLoader, OutputPipelineModule
 from src.mgds.TransformersDataLoaderModules import *
 
 DEVICE = 'cuda'
@@ -24,23 +24,23 @@ def test():
         ModifyPath(in_name='image_path', out_name='mask_path', postfix='-masklabel', extension='.png'),
         ModifyPath(in_name='image_path', out_name='prompt_path', postfix='', extension='.txt'),
         LoadImage(path_in_name='image_path', image_out_name='image', range_min=-1.0, range_max=1.0),
+        GenerateImageLike(image_in_name='image', image_out_name='mask', color=255, range_min=0, range_max=1, channels=1),
         LoadImage(path_in_name='mask_path', image_out_name='mask', range_min=0, range_max=1, channels=1),
         GenerateDepth(path_in_name='image_path', image_out_name='depth', image_depth_processor=image_depth_processor, depth_estimator=depth_estimator),
-        RandomCircularMaskShrink(mask_name='mask', shrink_probability=1.0, shrink_factor_min=0.2, shrink_factor_max=1.0),
-        RandomMaskRotateCrop(mask_name='mask', additional_names=['image', 'depth'], min_size=512, min_padding_percent=10, max_padding_percent=30, max_rotate_angle=20),
+        RandomCircularMaskShrink(mask_name='mask', shrink_probability=1.0, shrink_factor_min=0.2, shrink_factor_max=1.0, enabled_in_name='concept.random_circular_crop'),
+        RandomMaskRotateCrop(mask_name='mask', additional_names=['image', 'depth'], min_size=512, min_padding_percent=10, max_padding_percent=30, max_rotate_angle=20, enabled_in_name='concept.random_mask_rotate_crop'),
         CalcAspect(image_in_name='image', resolution_out_name='original_resolution'),
-        AspectBucketing(batch_size=BATCH_SIZE, target_resolution=512, resolution_in_name='original_resolution', scale_resolution_out_name='scale_resolution', crop_resolution_out_name='crop_resolution',
-                        possible_resolutions_out_name='possible_resolutions'),
+        AspectBucketing(target_resolution=512, resolution_in_name='original_resolution', scale_resolution_out_name='scale_resolution', crop_resolution_out_name='crop_resolution', possible_resolutions_out_name='possible_resolutions'),
         ScaleCropImage(image_in_name='image', scale_resolution_in_name='scale_resolution', crop_resolution_in_name='crop_resolution', image_out_name='image'),
         ScaleCropImage(image_in_name='mask', scale_resolution_in_name='scale_resolution', crop_resolution_in_name='crop_resolution', image_out_name='mask'),
         ScaleCropImage(image_in_name='depth', scale_resolution_in_name='scale_resolution', crop_resolution_in_name='crop_resolution', image_out_name='depth'),
         LoadText(path_in_name='prompt_path', text_out_name='prompt'),
         GenerateMaskedConditioningImage(image_in_name='image', mask_in_name='mask', image_out_name='conditioning_image'),
-        RandomFlip(names=['image', 'mask', 'depth', 'conditioning_image']),
+        RandomFlip(names=['image', 'mask', 'depth', 'conditioning_image'], enabled_in_name='concept.random_flip'),
         EncodeVAE(in_name='image', out_name='latent_image_distribution', vae=vae),
-        Downscale(in_name='mask', out_name='latent_mask'),
+        Downscale(in_name='mask', out_name='latent_mask', factor=8),
         EncodeVAE(in_name='conditioning_image', out_name='latent_conditioning_image_distribution', vae=vae),
-        Downscale(in_name='depth', out_name='latent_depth'),
+        Downscale(in_name='depth', out_name='latent_depth', factor=8),
         Tokenize(in_name='prompt', out_name='tokens', tokenizer=tokenizer),
         # DiskCache(cache_dir='cache', split_names=['latent_image_distribution', 'latent_mask', 'latent_conditioning_image_distribution', 'latent_depth', 'tokens'], aggregate_names=['crop_resolution']),
         SampleVAEDistribution(in_name='latent_image_distribution', out_name='latent_image', mode='mean'),
@@ -61,16 +61,33 @@ def test():
 
     output_modules = [
         AspectBatchSorting(resolution_in_name='crop_resolution', names=['latent_image', 'latent_conditioning_image', 'latent_mask', 'latent_depth', 'tokens'], batch_size=BATCH_SIZE, sort_resolutions_for_each_epoch=True),
+        OutputPipelineModule(names=['latent_image', 'latent_conditioning_image', 'latent_mask', 'latent_depth', 'tokens'])
     ]
 
     ds = MGDS(
         device=torch.device(DEVICE),
         dtype=torch.float32,
         allow_mixed_precision=False,
-        concepts=[{'name': 'X', 'path': 'dataset'}],
+        concepts=[
+            {
+                'name': 'DS',
+                'path': '..\\..\\datasets\\dataset',
+                'random_circular_crop': True,
+                'random_mask_rotate_crop': True,
+                'random_flip': True,
+            },
+            {
+                'name': 'DS4',
+                'path': '..\\..\\datasets\\dataset4',
+                'random_circular_crop': False,
+                'random_mask_rotate_crop': False,
+                'random_flip': False,
+            },
+        ],
+        settings={},
         definition=[
             input_modules,
-            # debug_modules,
+            debug_modules,
             output_modules
         ],
         batch_size=BATCH_SIZE,
