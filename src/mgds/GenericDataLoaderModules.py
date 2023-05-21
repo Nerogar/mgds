@@ -5,10 +5,10 @@ from typing import Any
 
 import numpy as np
 import torch
-from PIL import Image
-from torch import Tensor
 from torchvision import transforms
 from torchvision.transforms import functional, InterpolationMode
+from PIL import Image
+from torch import Tensor
 from tqdm import tqdm
 
 from .MGDS import PipelineModule
@@ -246,7 +246,7 @@ class AspectBucketing(PipelineModule):
         }
 
 
-class SingleAspectCropping(PipelineModule):
+class SingleAspectCalculation(PipelineModule):
     def __init__(
             self,
             target_resolution: int,
@@ -255,7 +255,7 @@ class SingleAspectCropping(PipelineModule):
             crop_resolution_out_name: str,
             possible_resolutions_out_name: str
     ):
-        super(SingleAspectCropping, self).__init__()
+        super(SingleAspectCalculation, self).__init__()
 
         self.target_resolution = target_resolution
 
@@ -398,12 +398,14 @@ class ScaleCropImage(PipelineModule):
             self, image_in_name: str,
             scale_resolution_in_name: str,
             crop_resolution_in_name: str,
-            image_out_name: str
+            enable_crop_jitter_in_name: str,
+            image_out_name: str,
     ):
         super(ScaleCropImage, self).__init__()
         self.image_in_name = image_in_name
         self.scale_resolution_in_name = scale_resolution_in_name
         self.crop_resolution_in_name = crop_resolution_in_name
+        self.enable_crop_jitter_in_name = enable_crop_jitter_in_name
         self.image_out_name = image_out_name
 
     def length(self) -> int:
@@ -416,16 +418,21 @@ class ScaleCropImage(PipelineModule):
         return [self.image_out_name]
 
     def get_item(self, index: int, requested_name: str = None) -> dict:
+        rand = self._get_rand()
         image = self.get_previous_item(self.image_in_name, index)
         scale_resolution = self.get_previous_item(self.scale_resolution_in_name, index)
         crop_resolution = self.get_previous_item(self.crop_resolution_in_name, index)
+        enable_crop_jitter = self.get_previous_item(self.enable_crop_jitter_in_name, index)
 
-        t = transforms.Compose([
-            transforms.Resize(scale_resolution, interpolation=transforms.InterpolationMode.BILINEAR),
-            transforms.CenterCrop(crop_resolution),
-        ])
+        resize = transforms.Resize(scale_resolution, interpolation=transforms.InterpolationMode.BILINEAR)
+        image = resize(image)
 
-        image = t(image)
+        if enable_crop_jitter:
+            image = functional.center_crop(image, crop_resolution)
+        else:
+            y_offset = rand.randint(0, scale_resolution[0] - crop_resolution[0])
+            x_offset = rand.randint(0, scale_resolution[1] - crop_resolution[1])
+            image = functional.crop(image, y_offset, x_offset, crop_resolution[0], crop_resolution[1])
 
         return {
             self.image_out_name: image
@@ -479,13 +486,16 @@ class LoadMultipleTexts(PipelineModule):
     def get_item(self, index: int, requested_name: str = None) -> dict:
         path = self.get_previous_item(self.path_in_name, index)
 
-        texts = ['']
+        texts = []
         if os.path.exists(path):
             with open(path, encoding='utf-8') as f:
                 texts = [line.strip() for line in f]
                 f.close()
 
         texts = list(filter(lambda text: text != "", texts))
+
+        if len(texts) == 0:
+            texts = [""]
 
         return {
             self.texts_out_name: texts
@@ -511,10 +521,47 @@ class SelectRandomText(PipelineModule):
         rand = self._get_rand(index)
         texts = self.get_previous_item(self.texts_in_name, index)
 
-        text = rand.choice(texts)
+        if isinstance(texts, str):
+            text = texts
+        else:
+            text = rand.choice(texts)
 
         return {
             self.text_out_name: text
+        }
+
+
+class SelectInput(PipelineModule):
+    def __init__(self, setting_name: str, out_name: str, setting_to_in_name_map: dict[str, str], default_in_name: str):
+        super(SelectInput, self).__init__()
+        self.setting_name = setting_name
+        self.out_name = out_name
+        self.setting_to_in_name_map = setting_to_in_name_map
+        self.default_in_name = default_in_name
+
+        self.in_names = [name for key, name in setting_to_in_name_map.items()]
+
+    def length(self) -> int:
+        return self.get_previous_length(self.in_names[0])
+
+    def get_inputs(self) -> list[str]:
+        return self.in_names
+
+    def get_outputs(self) -> list[str]:
+        return [self.out_name]
+
+    def get_item(self, index: int, requested_name: str = None) -> dict:
+        setting = self.get_previous_item(self.setting_name, index)
+
+        in_name = self.setting_to_in_name_map[setting]
+
+        out = self.get_previous_item(in_name, index)
+
+        if out is None:
+            out = self.get_previous_item(self.default_in_name, index)
+
+        return {
+            self.out_name: out
         }
 
 
@@ -548,6 +595,39 @@ class ReplaceText(PipelineModule):
 
         return {
             self.text_out_name: text
+        }
+
+
+class GetFilename(PipelineModule):
+    def __init__(
+            self,
+            path_in_name: str,
+            filename_out_name: str,
+            include_extension: bool,
+    ):
+        super(GetFilename, self).__init__()
+        self.path_in_name = path_in_name
+        self.filename_out_name = filename_out_name
+        self.include_extension = include_extension
+
+    def length(self) -> int:
+        return self.get_previous_length(self.path_in_name)
+
+    def get_inputs(self) -> list[str]:
+        return [self.path_in_name]
+
+    def get_outputs(self) -> list[str]:
+        return [self.filename_out_name]
+
+    def get_item(self, index: int, requested_name: str = None) -> dict:
+        path = self.get_previous_item(self.path_in_name, index)
+
+        filename = os.path.basename(path)
+        if not self.include_extension:
+            filename = os.path.splitext(filename)[0]
+
+        return {
+            self.filename_out_name: filename
         }
 
 
@@ -608,6 +688,38 @@ class Downscale(PipelineModule):
         image = self.get_previous_item(self.in_name, index)
 
         size = (int(image.shape[1] / self.factor), int(image.shape[2] / self.factor))
+
+        t = transforms.Compose([
+            transforms.Resize(size, interpolation=transforms.InterpolationMode.BILINEAR),
+        ])
+
+        image = t(image)
+
+        return {
+            self.out_name: image
+        }
+
+
+class Upscale(PipelineModule):
+    def __init__(self, in_name: str, out_name: str, factor: int):
+        super(Upscale, self).__init__()
+        self.in_name = in_name
+        self.out_name = out_name
+        self.factor = factor
+
+    def length(self) -> int:
+        return self.get_previous_length(self.in_name)
+
+    def get_inputs(self) -> list[str]:
+        return [self.in_name]
+
+    def get_outputs(self) -> list[str]:
+        return [self.out_name]
+
+    def get_item(self, index: int, requested_name: str = None) -> dict:
+        image = self.get_previous_item(self.in_name, index)
+
+        size = (int(image.shape[1] * self.factor), int(image.shape[2] * self.factor))
 
         t = transforms.Compose([
             transforms.Resize(size, interpolation=transforms.InterpolationMode.BILINEAR),
