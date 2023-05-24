@@ -5,10 +5,10 @@ from typing import Any
 
 import numpy as np
 import torch
-from torchvision import transforms
-from torchvision.transforms import functional, InterpolationMode
 from PIL import Image
 from torch import Tensor
+from torchvision import transforms
+from torchvision.transforms import functional, InterpolationMode
 from tqdm import tqdm
 
 from .MGDS import PipelineModule
@@ -351,6 +351,42 @@ class LoadImage(PipelineModule):
         }
 
 
+class RescaleImageChannels(PipelineModule):
+    def __init__(
+            self,
+            image_in_name: str, image_out_name: str,
+            in_range_min: float, in_range_max: float,
+            out_range_min: float, out_range_max: float,
+    ):
+        super(RescaleImageChannels, self).__init__()
+        self.image_in_name = image_in_name
+        self.image_out_name = image_out_name
+        self.in_range_min = in_range_min
+        self.in_range_max = in_range_max
+        self.out_range_min = out_range_min
+        self.out_range_max = out_range_max
+
+    def length(self) -> int:
+        return self.get_previous_length(self.image_in_name)
+
+    def get_inputs(self) -> list[str]:
+        return [self.image_out_name]
+
+    def get_outputs(self) -> list[str]:
+        return [self.image_out_name]
+
+    def get_item(self, index: int, requested_name: str = None) -> dict:
+        image = self.get_previous_item(self.image_in_name, index)
+
+        image = (image - self.in_range_min) \
+                * (self.out_range_max - self.out_range_min / self.in_range_max - self.in_range_min) \
+                + self.out_range_min
+
+        return {
+            self.image_out_name: image
+        }
+
+
 class GenerateImageLike(PipelineModule):
     def __init__(self, image_in_name: str, image_out_name: str, color: float | int | tuple[float, float, float],
                  range_min: float, range_max: float, channels: int = 3):
@@ -663,6 +699,205 @@ class RandomFlip(PipelineModule):
             previous_item = self.get_previous_item(name, index)
             if flip:
                 previous_item = functional.hflip(previous_item)
+            item[name] = previous_item
+
+        return item
+
+
+class RandomRotate(PipelineModule):
+    def __init__(
+            self,
+            names: [str],
+            enabled_in_name: str,
+            max_angle_in_name: str,
+    ):
+        super(RandomRotate, self).__init__()
+        self.names = names
+        self.enabled_in_name = enabled_in_name
+        self.max_angle_in_name = max_angle_in_name
+
+    def length(self) -> int:
+        return self.get_previous_length(self.names[0])
+
+    def get_inputs(self) -> list[str]:
+        return self.names
+
+    def get_outputs(self) -> list[str]:
+        return self.names
+
+    def get_item(self, index: int, requested_name: str = None) -> dict:
+        enabled = self.get_previous_item(self.enabled_in_name, index)
+        max_angle = self.get_previous_item(self.max_angle_in_name, index)
+
+        rand = self._get_rand(index)
+        item = {}
+
+        angle = rand.uniform(-max_angle, max_angle)
+
+        for name in self.names:
+            previous_item = self.get_previous_item(name, index)
+            if enabled:
+                previous_item = functional.rotate(previous_item, angle, interpolation=InterpolationMode.BILINEAR)
+            item[name] = previous_item
+
+        return item
+
+
+class RandomBrightness(PipelineModule):
+    def __init__(
+            self,
+            names: [str],
+            enabled_in_name: str,
+            max_strength_in_name: str,
+    ):
+        super(RandomBrightness, self).__init__()
+        self.names = names
+        self.enabled_in_name = enabled_in_name
+        self.max_strength_in_name = max_strength_in_name
+
+    def length(self) -> int:
+        return self.get_previous_length(self.names[0])
+
+    def get_inputs(self) -> list[str]:
+        return self.names
+
+    def get_outputs(self) -> list[str]:
+        return self.names
+
+    def get_item(self, index: int, requested_name: str = None) -> dict:
+        enabled = self.get_previous_item(self.enabled_in_name, index)
+        max_strength = self.get_previous_item(self.max_strength_in_name, index)
+
+        rand = self._get_rand(index)
+        item = {}
+
+        strength = rand.uniform(1 - max_strength, 1 + max_strength)
+        strength = max(0.0, strength)
+
+        for name in self.names:
+            previous_item = self.get_previous_item(name, index)
+            if enabled:
+                previous_item = functional.adjust_brightness(previous_item, strength)
+            item[name] = previous_item
+
+        return item
+
+
+class RandomContrast(PipelineModule):
+    def __init__(
+            self,
+            names: [str],
+            enabled_in_name: str,
+            max_strength_in_name: str,
+    ):
+        super(RandomContrast, self).__init__()
+        self.names = names
+        self.enabled_in_name = enabled_in_name
+        self.max_strength_in_name = max_strength_in_name
+
+    def length(self) -> int:
+        return self.get_previous_length(self.names[0])
+
+    def get_inputs(self) -> list[str]:
+        return self.names
+
+    def get_outputs(self) -> list[str]:
+        return self.names
+
+    def get_item(self, index: int, requested_name: str = None) -> dict:
+        enabled = self.get_previous_item(self.enabled_in_name, index)
+        max_strength = self.get_previous_item(self.max_strength_in_name, index)
+
+        rand = self._get_rand(index)
+        item = {}
+
+        strength = rand.uniform(1 - max_strength, 1 + max_strength)
+        strength = max(0.0, strength)
+
+        for name in self.names:
+            previous_item = self.get_previous_item(name, index)
+            if enabled:
+                previous_item = functional.adjust_contrast(previous_item, strength)
+            item[name] = previous_item
+
+        return item
+
+
+class RandomSaturation(PipelineModule):
+    def __init__(
+            self,
+            names: [str],
+            enabled_in_name: str,
+            max_strength_in_name: str,
+    ):
+        super(RandomSaturation, self).__init__()
+        self.names = names
+        self.enabled_in_name = enabled_in_name
+        self.max_strength_in_name = max_strength_in_name
+
+    def length(self) -> int:
+        return self.get_previous_length(self.names[0])
+
+    def get_inputs(self) -> list[str]:
+        return self.names
+
+    def get_outputs(self) -> list[str]:
+        return self.names
+
+    def get_item(self, index: int, requested_name: str = None) -> dict:
+        enabled = self.get_previous_item(self.enabled_in_name, index)
+        max_strength = self.get_previous_item(self.max_strength_in_name, index)
+
+        rand = self._get_rand(index)
+        item = {}
+
+        strength = rand.uniform(1 - max_strength, 1 + max_strength)
+        strength = max(0.0, strength)
+
+        for name in self.names:
+            previous_item = self.get_previous_item(name, index)
+            if enabled:
+                previous_item = functional.adjust_saturation(previous_item, strength)
+            item[name] = previous_item
+
+        return item
+
+
+class RandomHue(PipelineModule):
+    def __init__(
+            self,
+            names: [str],
+            enabled_in_name: str,
+            max_strength_in_name: str,
+    ):
+        super(RandomHue, self).__init__()
+        self.names = names
+        self.enabled_in_name = enabled_in_name
+        self.max_strength_in_name = max_strength_in_name
+
+    def length(self) -> int:
+        return self.get_previous_length(self.names[0])
+
+    def get_inputs(self) -> list[str]:
+        return self.names
+
+    def get_outputs(self) -> list[str]:
+        return self.names
+
+    def get_item(self, index: int, requested_name: str = None) -> dict:
+        enabled = self.get_previous_item(self.enabled_in_name, index)
+        max_strength = self.get_previous_item(self.max_strength_in_name, index)
+
+        rand = self._get_rand(index)
+        item = {}
+
+        strength = rand.uniform(-max_strength * 0.5, max_strength * 0.5)
+        strength = max(-0.5, min(0.5, strength))
+
+        for name in self.names:
+            previous_item = self.get_previous_item(name, index)
+            if enabled:
+                previous_item = functional.adjust_hue(previous_item, strength)
             item[name] = previous_item
 
         return item
