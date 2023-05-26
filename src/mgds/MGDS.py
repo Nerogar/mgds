@@ -257,11 +257,21 @@ class LoadingPipeline:
             return [data]
 
     def length(self) -> int:
+        """
+        Returns the exact length of a current epoch. This number can change between epochs.
+        """
         if self.current_epoch == self.initial_epoch:
             # for the initial epoch, initial_epoch_sample defines the amount of samples to skip
             return max(0, self.output_module.length() - self.initial_epoch_sample)
         else:
             return self.output_module.length()
+
+    def approximate_length(self) -> int:
+        """
+        Returns an approximated length of a full epoch.
+        The number may not be exact, because the length can change between epochs.
+        """
+        return max(0, self.output_module.length())
 
     def start(self):
         """
@@ -331,7 +341,8 @@ class MGDS(Dataset):
         self.dtype = dtype
         self.allow_mixed_precision = allow_mixed_precision
         seed = (random.randint(-(1 << 30), 1 << 30) if seed == -1 else seed)
-        self.loading_pipeline = LoadingPipeline(device, dtype, allow_mixed_precision, concepts, settings, definition, batch_size, seed, initial_epoch, initial_epoch_sample)
+        self.loading_pipeline = LoadingPipeline(device, dtype, allow_mixed_precision, concepts, settings, definition,
+                                                batch_size, seed, initial_epoch, initial_epoch_sample)
 
         self.loading_pipeline.start()
 
@@ -340,6 +351,9 @@ class MGDS(Dataset):
 
     def __getitem__(self, index):
         return self.loading_pipeline.get_item(index)
+
+    def approximate_length(self) -> int:
+        return self.loading_pipeline.approximate_length()
 
     def start_next_epoch(self):
         self.loading_pipeline.start_next_epoch()
