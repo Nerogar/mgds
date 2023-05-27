@@ -1011,7 +1011,7 @@ class DiskCache(PipelineModule):
                 cache_exists = any(path_iter)
 
             aggregate_path = os.path.join(cache_dir, 'aggregate.pt')
-            caching_done = os.path.exists(aggregate_path) and os.path.isdir(aggregate_path)
+            caching_done = os.path.exists(aggregate_path) and os.path.isfile(aggregate_path)
 
         return cache_exists and caching_done
 
