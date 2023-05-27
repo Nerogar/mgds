@@ -1002,11 +1002,18 @@ class DiskCache(PipelineModule):
 
     def __is_caching_done(self):
         cache_dir = self.__current_cache_dir()
+
+        cache_exists = False
+        caching_done = False
+
         if os.path.isdir(cache_dir):
             with os.scandir(cache_dir) as path_iter:
-                if any(path_iter):
-                    return True
-        return False
+                cache_exists = any(path_iter)
+
+            aggregate_path = os.path.join(cache_dir, 'aggregate.pt')
+            caching_done = os.path.exists(aggregate_path) and os.path.isdir(aggregate_path)
+
+        return cache_exists and caching_done
 
     def __refresh_cache(self):
         self.cache_length = None
@@ -1162,12 +1169,17 @@ class GenerateMaskedConditioningImage(PipelineModule):
             self,
             image_in_name: str,
             mask_in_name: str,
-            image_out_name: str
+            image_out_name: str,
+            image_range_min: float,
+            image_range_max: float,
     ):
         super(GenerateMaskedConditioningImage, self).__init__()
         self.image_in_name = image_in_name
         self.mask_in_name = mask_in_name
         self.image_out_name = image_out_name
+
+        self.image_range_min = image_range_min
+        self.image_range_max = image_range_max
 
     def length(self) -> int:
         return self.get_previous_length(self.image_in_name)
@@ -1182,7 +1194,9 @@ class GenerateMaskedConditioningImage(PipelineModule):
         image = self.get_previous_item(self.image_in_name, index)
         mask = self.get_previous_item(self.mask_in_name, index)
 
-        conditioning_image = image * (1 - mask)
+        image_midpoint = (self.image_range_max - self.image_range_min) / 2.0
+
+        conditioning_image = (image * (1 - mask)) + (mask * image_midpoint)
 
         return {
             self.image_out_name: conditioning_image
