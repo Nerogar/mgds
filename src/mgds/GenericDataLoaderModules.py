@@ -971,7 +971,9 @@ class DiskCache(PipelineModule):
     def __init__(
             self,
             cache_dir: str,
-            split_names=None, aggregate_names=None, cached_epochs: int = 1
+            split_names: list[str] | None = None,
+            aggregate_names: list[str] | None = None,
+            cached_epochs: int = 1,
     ):
         super(DiskCache, self).__init__()
         self.cache_dir = cache_dir
@@ -1070,6 +1072,45 @@ class DiskCache(PipelineModule):
                 item[name] = split_item[name]
 
         return item
+
+
+class RamCache(PipelineModule):
+    def __init__(
+            self,
+            names: list[str] = None,
+    ):
+        super(RamCache, self).__init__()
+        self.names = names
+        self.cache_length = None
+        self.cache = None
+
+    def length(self) -> int:
+        if not self.cache_length:
+            return self.get_previous_length(self.names[0])
+        else:
+            return self.cache_length
+
+    def get_inputs(self) -> list[str]:
+        return self.names
+
+    def get_outputs(self) -> list[str]:
+        return self.names
+
+    def start_next_epoch(self):
+        length = self.length()
+        self.cache = []
+        for index in tqdm(range(length), desc='caching'):
+            item = {}
+
+            for name in self.names:
+                item[name] = self.get_previous_item(name, index)
+
+            self.cache[index] = item
+
+        self.cache_length = length
+
+    def get_item(self, index: int, requested_name: str = None) -> dict:
+        return self.cache[index]
 
 
 class AspectBatchSorting(PipelineModule):
