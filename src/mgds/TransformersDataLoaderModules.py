@@ -46,11 +46,20 @@ class GenerateDepth(PipelineModule):
 
 
 class Tokenize(PipelineModule):
-    def __init__(self, in_name: str, out_name: str, tokenizer: CLIPTokenizer):
+    def __init__(
+            self,
+            in_name: str,
+            tokens_out_name: str,
+            mask_out_name: str,
+            tokenizer: CLIPTokenizer,
+            max_token_length: int,
+    ):
         super(Tokenize, self).__init__()
         self.in_name = in_name
-        self.out_name = out_name
+        self.tokens_out_name = tokens_out_name
+        self.mask_out_name = mask_out_name
         self.tokenizer = tokenizer
+        self.max_token_length = max_token_length
 
     def length(self) -> int:
         return self.get_previous_length(self.in_name)
@@ -59,21 +68,25 @@ class Tokenize(PipelineModule):
         return [self.in_name]
 
     def get_outputs(self) -> list[str]:
-        return [self.out_name]
+        return [self.tokens_out_name, self.mask_out_name]
 
     def get_item(self, index: int, requested_name: str = None) -> dict:
         text = self.get_previous_item(self.in_name, index)
 
-        tokens = self.tokenizer(
+        tokenizer_output = self.tokenizer(
             text,
             padding='max_length',
             truncation=True,
-            max_length=self.tokenizer.model_max_length,
+            max_length=self.max_token_length,
             return_tensors="pt",
-        ).input_ids.to(self.pipeline.device)
+        )
+
+        tokens = tokenizer_output.input_ids.to(self.pipeline.device)
+        mask = tokenizer_output.attention_mask.to(self.pipeline.device)
 
         tokens = tokens.squeeze()
 
         return {
-            self.out_name: tokens
+            self.tokens_out_name: tokens,
+            self.mask_out_name: mask,
         }

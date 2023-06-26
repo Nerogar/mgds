@@ -156,14 +156,16 @@ class AspectBucketing(PipelineModule):
     def __init__(
             self,
             target_resolution: int,
+            quantization: int,
             resolution_in_name: str,
             scale_resolution_out_name: str,
             crop_resolution_out_name: str,
-            possible_resolutions_out_name: str
+            possible_resolutions_out_name: str,
     ):
         super(AspectBucketing, self).__init__()
 
         self.target_resolution = target_resolution
+        self.quantization = quantization
 
         self.resolution_in_name = resolution_in_name
 
@@ -171,7 +173,7 @@ class AspectBucketing(PipelineModule):
         self.crop_resolution_out_name = crop_resolution_out_name
         self.possible_resolutions_out_name = possible_resolutions_out_name
 
-        self.possible_resolutions, self.possible_aspects = self.create_buckets(target_resolution)
+        self.possible_resolutions, self.possible_aspects = self.create_buckets(target_resolution, self.quantization)
 
     def length(self) -> int:
         return self.get_previous_length(self.resolution_in_name)
@@ -183,9 +185,7 @@ class AspectBucketing(PipelineModule):
         return [self.scale_resolution_out_name, self.crop_resolution_out_name, self.possible_resolutions_out_name]
 
     @staticmethod
-    def create_buckets(target_resolution: int) -> (np.ndarray, np.ndarray):
-        quantization = 8
-
+    def create_buckets(target_resolution: int, quantization: int) -> (np.ndarray, np.ndarray):
         # all possible target aspect ratios
         possible_resolutions = np.array([
             (1.0, 1.0),
