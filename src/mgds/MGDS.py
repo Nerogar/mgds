@@ -65,7 +65,11 @@ class PipelineModule(metaclass=ABCMeta):
                     break
 
         for path_name in path_names:
-            item = item[path_name]
+            if path_name in item:
+                item = item[path_name]
+            else:
+                item = None
+                break
 
         return item
 

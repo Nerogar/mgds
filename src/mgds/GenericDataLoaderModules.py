@@ -17,15 +17,16 @@ from .MGDS import PipelineModule
 class CollectPaths(PipelineModule):
     def __init__(
             self,
-            concept_in_name: str, path_in_name: str, name_in_name: str,
+            concept_in_name: str, path_in_name: str, name_in_name: str, include_subdirectories_in_name: str,
             path_out_name: str, concept_out_name: str,
-            extensions: [str], include_postfix: [str], exclude_postfix: [str]
+            extensions: [str], include_postfix: [str], exclude_postfix: [str],
     ):
         super(CollectPaths, self).__init__()
 
         self.concept_in_name = concept_in_name
         self.path_in_name = path_in_name
         self.name_in_name = name_in_name
+        self.include_subdirectories_in_name = include_subdirectories_in_name
 
         self.path_out_name = path_out_name
         self.concept_out_name = concept_out_name
@@ -47,14 +48,26 @@ class CollectPaths(PipelineModule):
     def get_outputs(self) -> list[str]:
         return [self.path_out_name, self.concept_out_name]
 
+    def __list_files(self, path: str, include_subdirectories: bool) -> list[str]:
+        dir_list = [os.path.join(path, filename) for filename in os.listdir(path)]
+
+        files = list(filter(os.path.isfile, dir_list))
+
+        if include_subdirectories:
+            sub_directories = list(filter(os.path.isdir, dir_list))
+            for sub_directory in sub_directories:
+                files.extend(self.__list_files(sub_directory, include_subdirectories))
+
+        return files
+
     def start(self):
         for index in tqdm(range(self.get_previous_length(self.concept_in_name)), desc='enumerating sample paths'):
             concept = self.get_previous_item(self.concept_in_name, index)
+            include_subdirectories = self.get_previous_item(self.include_subdirectories_in_name, index)
             path = concept[self.path_in_name]
             concept_name = concept[self.name_in_name]
 
-            file_names = [os.path.join(path, filename) for filename in os.listdir(path)]
-            file_names = sorted(file_names)
+            file_names = sorted(self.__list_files(path, include_subdirectories))
 
             file_names = list(filter(lambda name: os.path.splitext(name)[1].lower() in self.extensions, file_names))
 

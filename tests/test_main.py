@@ -12,7 +12,7 @@ BATCH_SIZE = 4
 
 
 def test():
-    depth_model_path = '..\\..\\models\\diffusers-base\\v2-0-depth'
+    depth_model_path = '..\\..\\models\\diffusers-base\\sd-v2-0-depth'
 
     vae = AutoencoderKL.from_pretrained(os.path.join(depth_model_path, 'vae')).to(DEVICE)
     image_depth_processor = DPTImageProcessor.from_pretrained(os.path.join(depth_model_path, 'feature_extractor'))
@@ -20,7 +20,7 @@ def test():
     tokenizer = CLIPTokenizer.from_pretrained(os.path.join(depth_model_path, 'tokenizer'))
 
     input_modules = [
-        CollectPaths(concept_in_name='concept', path_in_name='path', name_in_name='name', path_out_name='image_path', concept_out_name='concept', extensions=['.png', '.jpg'], include_postfix=None, exclude_postfix=['-masklabel']),
+        CollectPaths(concept_in_name='concept', path_in_name='path', name_in_name='name', path_out_name='image_path', concept_out_name='concept', extensions=['.png', '.jpg'], include_postfix=None, exclude_postfix=['-masklabel'], include_subdirectories_in_name='concept.include_subdirectories'),
         ModifyPath(in_name='image_path', out_name='mask_path', postfix='-masklabel', extension='.png'),
         ModifyPath(in_name='image_path', out_name='prompt_path', postfix='', extension='.txt'),
         LoadImage(path_in_name='image_path', image_out_name='image', range_min=-1.0, range_max=1.0),
@@ -31,11 +31,11 @@ def test():
         RandomMaskRotateCrop(mask_name='mask', additional_names=['image', 'depth'], min_size=512, min_padding_percent=10, max_padding_percent=30, max_rotate_angle=20, enabled_in_name='concept.random_mask_rotate_crop'),
         CalcAspect(image_in_name='image', resolution_out_name='original_resolution'),
         AspectBucketing(target_resolution=512, resolution_in_name='original_resolution', scale_resolution_out_name='scale_resolution', crop_resolution_out_name='crop_resolution', possible_resolutions_out_name='possible_resolutions'),
-        ScaleCropImage(image_in_name='image', scale_resolution_in_name='scale_resolution', crop_resolution_in_name='crop_resolution', image_out_name='image'),
-        ScaleCropImage(image_in_name='mask', scale_resolution_in_name='scale_resolution', crop_resolution_in_name='crop_resolution', image_out_name='mask'),
-        ScaleCropImage(image_in_name='depth', scale_resolution_in_name='scale_resolution', crop_resolution_in_name='crop_resolution', image_out_name='depth'),
+        ScaleCropImage(image_in_name='image', scale_resolution_in_name='scale_resolution', crop_resolution_in_name='crop_resolution', enable_crop_jitter_in_name='concept.enable_crop_jitter', image_out_name='image'),
+        ScaleCropImage(image_in_name='mask', scale_resolution_in_name='scale_resolution', crop_resolution_in_name='crop_resolution', enable_crop_jitter_in_name='concept.enable_crop_jitter', image_out_name='mask'),
+        ScaleCropImage(image_in_name='depth', scale_resolution_in_name='scale_resolution', crop_resolution_in_name='crop_resolution', enable_crop_jitter_in_name='concept.enable_crop_jitter', image_out_name='depth'),
         LoadText(path_in_name='prompt_path', text_out_name='prompt'),
-        GenerateMaskedConditioningImage(image_in_name='image', mask_in_name='mask', image_out_name='conditioning_image'),
+        GenerateMaskedConditioningImage(image_in_name='image', mask_in_name='mask', image_out_name='conditioning_image', image_range_min=0, image_range_max=1),
         RandomFlip(names=['image', 'mask', 'depth', 'conditioning_image'], enabled_in_name='concept.random_flip'),
         EncodeVAE(in_name='image', out_name='latent_image_distribution', vae=vae),
         Downscale(in_name='mask', out_name='latent_mask', factor=8),
@@ -75,6 +75,7 @@ def test():
                 'random_circular_crop': True,
                 'random_mask_rotate_crop': True,
                 'random_flip': True,
+                'include_subdirectories': True,
             },
             {
                 'name': 'DS4',
