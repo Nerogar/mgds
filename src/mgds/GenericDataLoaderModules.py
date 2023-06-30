@@ -1167,7 +1167,7 @@ class AspectBatchSorting(PipelineModule):
             samples = bucket_dict[bucket_key]
             samples_to_drop = len(samples) % self.batch_size
             for i in range(samples_to_drop):
-                print('dropping sample from bucket ' + str(bucket_key))
+                # print('dropping sample from bucket ' + str(bucket_key))
                 samples.pop()
 
         # calculate the order of samples
@@ -1176,8 +1176,8 @@ class AspectBatchSorting(PipelineModule):
             for i in range(bucket_index * self.batch_size, (bucket_index + 1) * self.batch_size):
                 index_list.append(bucket_dict[bucket_key][i])
 
-        print(bucket_dict)
-        print(index_list)
+        # print(bucket_dict)
+        # print(index_list)
 
         return index_list
 
