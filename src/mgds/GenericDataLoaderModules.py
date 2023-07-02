@@ -1117,7 +1117,7 @@ class RamCache(PipelineModule):
             for name in self.names:
                 item[name] = self.get_previous_item(name, index)
 
-            self.cache[index] = item
+            self.cache.append(item)
 
         self.cache_length = length
 
