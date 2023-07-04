@@ -1,3 +1,4 @@
+import traceback
 from contextlib import nullcontext
 
 import torch
@@ -27,7 +28,12 @@ class GenerateDepth(PipelineModule):
     def get_item(self, index: int, requested_name: str = None) -> dict:
         path = self.get_previous_item(self.path_in_name, index)
 
-        image = Image.open(path)
+        try:
+            image = Image.open(path)
+        except:
+            print("could not load image, it might be missing or corrupted: " + path)
+            raise
+
         image = image.convert('RGB')
 
         with torch.no_grad():

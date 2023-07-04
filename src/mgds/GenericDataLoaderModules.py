@@ -357,6 +357,9 @@ class LoadImage(PipelineModule):
             image_tensor = image_tensor * (self.range_max - self.range_min) + self.range_min
         except FileNotFoundError:
             image_tensor = None
+        except:
+            print("could not load image, it might be corrupted: " + path)
+            raise
 
         return {
             self.image_out_name: image_tensor
