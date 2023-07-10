@@ -1,9 +1,9 @@
-import traceback
 from contextlib import nullcontext
 
 import torch
 from PIL import Image
-from transformers import DPTForDepthEstimation, DPTImageProcessor, CLIPTokenizer
+from transformers import DPTForDepthEstimation, DPTImageProcessor, CLIPTokenizer, CLIPTextModel, \
+    CLIPTextModelWithProjection
 
 from .MGDS import PipelineModule
 
@@ -108,4 +108,60 @@ class Tokenize(PipelineModule):
         return {
             self.tokens_out_name: tokens,
             self.mask_out_name: mask,
+        }
+
+
+class EncodeClipText(PipelineModule):
+    def __init__(
+            self,
+            in_name: str,
+            hidden_states_out_name: str,
+            pooled_out_name: str | None,
+            text_encoder: CLIPTextModel | CLIPTextModelWithProjection,
+            override_allow_mixed_precision: bool | None = None,
+    ):
+        super(EncodeClipText, self).__init__()
+        self.in_name = in_name
+        self.hidden_states_out_name = hidden_states_out_name
+        self.pooled_out_name = pooled_out_name
+        self.text_encoder = text_encoder
+        self.override_allow_mixed_precision = override_allow_mixed_precision
+
+    def length(self) -> int:
+        return self.get_previous_length(self.in_name)
+
+    def get_inputs(self) -> list[str]:
+        return [self.in_name]
+
+    def get_outputs(self) -> list[str]:
+        if self.pooled_out_name:
+            return [self.hidden_states_out_name, self.pooled_out_name]
+        else:
+            return [self.hidden_states_out_name]
+
+    def get_item(self, index: int, requested_name: str = None) -> dict:
+        tokens = self.get_previous_item(self.in_name, index)
+
+        tokens = tokens.unsqueeze(0)
+
+        allow_mixed_precision = self.pipeline.allow_mixed_precision if self.override_allow_mixed_precision is None \
+            else self.override_allow_mixed_precision
+
+        with torch.no_grad():
+            with torch.autocast(self.pipeline.device.type, self.pipeline.dtype) if allow_mixed_precision \
+                    else nullcontext():
+                text_encoder_output = self.text_encoder(tokens, output_hidden_states=True, return_dict=True)
+
+        hidden_states = text_encoder_output.hidden_states
+        if self.pooled_out_name:
+            pooled_state = text_encoder_output.text_embeds
+        else:
+            pooled_state = None
+
+        hidden_states = [hidden_state.squeeze() for hidden_state in hidden_states]
+        pooled_state = None if pooled_state is None else pooled_state.squeeze()
+
+        return {
+            self.hidden_states_out_name: hidden_states,
+            self.pooled_out_name: pooled_state,
         }
