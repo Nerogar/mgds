@@ -5,5 +5,6 @@ numpy==1.23.5
 opencv-python==4.7.0.72
 pillow==9.3.0
 tqdm==4.64.1
-git+https://github.com/huggingface/diffusers.git@f96b760#egg=diffusers
+safetensors==0.3.1
+git+https://github.com/huggingface/diffusers.git@78922ed#egg=diffusers
 git+https://github.com/huggingface/transformers.git@656e869#egg=transformers

@@ -88,11 +88,18 @@ class SaveText(PipelineModule):
 
 
 class DecodeVAE(PipelineModule):
-    def __init__(self, in_name: str, out_name: str, vae: AutoencoderKL):
+    def __init__(
+            self,
+            in_name: str,
+            out_name: str,
+            vae: AutoencoderKL,
+            override_allow_mixed_precision: bool | None = None,
+    ):
         super(DecodeVAE, self).__init__()
         self.in_name = in_name
         self.out_name = out_name
         self.vae = vae
+        self.override_allow_mixed_precision = override_allow_mixed_precision
 
     def length(self) -> int:
         return self.get_previous_length(self.in_name)
@@ -106,8 +113,14 @@ class DecodeVAE(PipelineModule):
     def get_item(self, index: int, requested_name: str = None) -> dict:
         latent_image = self.get_previous_item(self.in_name, index)
 
+        allow_mixed_precision = self.pipeline.allow_mixed_precision if self.override_allow_mixed_precision is None \
+            else self.override_allow_mixed_precision
+
+        latent_image = latent_image if allow_mixed_precision else latent_image.to(self.vae.dtype)
+
         with torch.no_grad():
-            with torch.autocast(self.pipeline.device.type) if self.pipeline.allow_mixed_precision else nullcontext():
+            with torch.autocast(self.pipeline.device.type, self.pipeline.dtype) if allow_mixed_precision \
+                    else nullcontext():
                 image = self.vae.decode(latent_image.unsqueeze(0)).sample
                 image = image.clamp(-1, 1).squeeze()
 
@@ -122,11 +135,13 @@ class DecodeMoVQ(PipelineModule):
             in_name: str,
             out_name: str,
             movq: VQModel,
+            override_allow_mixed_precision: bool | None = None,
     ):
         super(DecodeMoVQ, self).__init__()
         self.in_name = in_name
         self.out_name = out_name
         self.movq = movq
+        self.override_allow_mixed_precision = override_allow_mixed_precision
 
     def length(self) -> int:
         return self.get_previous_length(self.in_name)
@@ -140,10 +155,14 @@ class DecodeMoVQ(PipelineModule):
     def get_item(self, index: int, requested_name: str = None) -> dict:
         latent_image = self.get_previous_item(self.in_name, index)
 
-        latent_image = latent_image.to(device=latent_image.device, dtype=self.pipeline.dtype)
+        allow_mixed_precision = self.pipeline.allow_mixed_precision if self.override_allow_mixed_precision is None \
+            else self.override_allow_mixed_precision
+
+        latent_image = latent_image if allow_mixed_precision else latent_image.to(self.movq.dtype)
 
         with torch.no_grad():
-            with torch.autocast(self.pipeline.device.type) if self.pipeline.allow_mixed_precision else nullcontext():
+            with torch.autocast(self.pipeline.device.type, self.pipeline.dtype) if allow_mixed_precision \
+                    else nullcontext():
                 image = self.movq.decode(latent_image.unsqueeze(0)).sample
                 image = image.clamp(-1, 1).squeeze()
 

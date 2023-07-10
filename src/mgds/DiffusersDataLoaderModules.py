@@ -8,11 +8,18 @@ from .MGDS import PipelineModule
 
 
 class EncodeVAE(PipelineModule):
-    def __init__(self, in_name: str, out_name: str, vae: AutoencoderKL):
+    def __init__(
+            self,
+            in_name: str,
+            out_name: str,
+            vae: AutoencoderKL,
+            override_allow_mixed_precision: bool | None = None,
+    ):
         super(EncodeVAE, self).__init__()
         self.in_name = in_name
         self.out_name = out_name
         self.vae = vae
+        self.override_allow_mixed_precision = override_allow_mixed_precision
 
     def length(self) -> int:
         return self.get_previous_length(self.in_name)
@@ -28,8 +35,14 @@ class EncodeVAE(PipelineModule):
 
         image = image.to(device=image.device, dtype=self.pipeline.dtype)
 
+        allow_mixed_precision = self.pipeline.allow_mixed_precision if self.override_allow_mixed_precision is None \
+            else self.override_allow_mixed_precision
+
+        image = image if allow_mixed_precision else image.to(self.vae.dtype)
+
         with torch.no_grad():
-            with torch.autocast(self.pipeline.device.type) if self.pipeline.allow_mixed_precision else nullcontext():
+            with torch.autocast(self.pipeline.device.type, self.pipeline.dtype) if allow_mixed_precision \
+                    else nullcontext():
                 latent_distribution = self.vae.encode(image.unsqueeze(0)).latent_dist
 
         return {
@@ -43,11 +56,13 @@ class EncodeMoVQ(PipelineModule):
             in_name: str,
             out_name: str,
             movq: VQModel,
+            override_allow_mixed_precision: bool | None = None,
     ):
         super(EncodeMoVQ, self).__init__()
         self.in_name = in_name
         self.out_name = out_name
         self.movq = movq
+        self.override_allow_mixed_precision = override_allow_mixed_precision
 
     def length(self) -> int:
         return self.get_previous_length(self.in_name)
@@ -63,8 +78,14 @@ class EncodeMoVQ(PipelineModule):
 
         image = image.to(device=image.device, dtype=self.pipeline.dtype)
 
+        allow_mixed_precision = self.pipeline.allow_mixed_precision if self.override_allow_mixed_precision is None \
+            else self.override_allow_mixed_precision
+
+        image = image if allow_mixed_precision else image.to(self.movq.dtype)
+
         with torch.no_grad():
-            with torch.autocast(self.pipeline.device.type) if self.pipeline.allow_mixed_precision else nullcontext():
+            with torch.autocast(self.pipeline.device.type, self.pipeline.dtype) if allow_mixed_precision \
+                    else nullcontext():
                 latent_image = self.movq.encode(image.unsqueeze(0)).latents
 
         latent_image = latent_image.squeeze()
@@ -108,13 +129,22 @@ class SampleVAEDistribution(PipelineModule):
 
 
 class RandomLatentMaskRemove(PipelineModule):
-    def __init__(self, latent_mask_name: str, latent_conditioning_image_name: str, possible_resolutions_in_name: str, replace_probability: float, vae: AutoencoderKL):
+    def __init__(
+            self,
+            latent_mask_name: str,
+            latent_conditioning_image_name: str,
+            possible_resolutions_in_name: str,
+            replace_probability: float,
+            vae: AutoencoderKL,
+            override_allow_mixed_precision: bool | None = None,
+    ):
         super(RandomLatentMaskRemove, self).__init__()
         self.latent_mask_name = latent_mask_name
         self.latent_conditioning_image_name = latent_conditioning_image_name
         self.possible_resolutions_in_name = possible_resolutions_in_name
         self.replace_probability = replace_probability
         self.vae = vae
+        self.override_allow_mixed_precision = override_allow_mixed_precision
 
         self.inputs_outputs = [latent_mask_name]
         if latent_conditioning_image_name is not None:
@@ -135,12 +165,22 @@ class RandomLatentMaskRemove(PipelineModule):
     def start(self):
         possible_resolutions = self.get_previous_meta(self.possible_resolutions_in_name)
 
+        allow_mixed_precision = self.pipeline.allow_mixed_precision if self.override_allow_mixed_precision is None \
+            else self.override_allow_mixed_precision
+
         with torch.no_grad():
-            with torch.autocast(self.pipeline.device.type) if self.pipeline.allow_mixed_precision else nullcontext():
+            with torch.autocast(self.pipeline.device.type, self.pipeline.dtype) if allow_mixed_precision \
+                    else nullcontext():
                 for resolution in possible_resolutions:
-                    blank_conditioning_image = torch.zeros(resolution, dtype=self.pipeline.dtype, device=self.pipeline.device)
-                    blank_conditioning_image = blank_conditioning_image.unsqueeze(0).unsqueeze(0).expand([-1, 3, -1, -1])
-                    self.blank_conditioning_image_cache[resolution] = self.vae.encode(blank_conditioning_image).latent_dist.mode().squeeze()
+                    blank_conditioning_image = torch.zeros(
+                        resolution,
+                        dtype=self.pipeline.dtype if allow_mixed_precision else self.vae.dtype,
+                        device=self.pipeline.device
+                    )
+                    blank_conditioning_image = blank_conditioning_image\
+                        .unsqueeze(0).unsqueeze(0).expand([-1, 3, -1, -1])
+                    self.blank_conditioning_image_cache[resolution] = self.vae.encode(
+                        blank_conditioning_image).latent_dist.mode().squeeze()
 
     def get_item(self, index: int, requested_name: str = None) -> dict:
         rand = self._get_rand(index)
