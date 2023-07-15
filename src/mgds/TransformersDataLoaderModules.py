@@ -115,16 +115,18 @@ class EncodeClipText(PipelineModule):
     def __init__(
             self,
             in_name: str,
-            hidden_states_out_name: str,
+            hidden_state_out_name: str,
             pooled_out_name: str | None,
             text_encoder: CLIPTextModel | CLIPTextModelWithProjection,
+            hidden_state_output_index: int | None = None,
             override_allow_mixed_precision: bool | None = None,
     ):
         super(EncodeClipText, self).__init__()
         self.in_name = in_name
-        self.hidden_states_out_name = hidden_states_out_name
+        self.hidden_state_out_name = hidden_state_out_name
         self.pooled_out_name = pooled_out_name
         self.text_encoder = text_encoder
+        self.hidden_state_output_index = hidden_state_output_index
         self.override_allow_mixed_precision = override_allow_mixed_precision
 
     def length(self) -> int:
@@ -135,9 +137,9 @@ class EncodeClipText(PipelineModule):
 
     def get_outputs(self) -> list[str]:
         if self.pooled_out_name:
-            return [self.hidden_states_out_name, self.pooled_out_name]
+            return [self.hidden_state_out_name, self.pooled_out_name]
         else:
-            return [self.hidden_states_out_name]
+            return [self.hidden_state_out_name]
 
     def get_item(self, index: int, requested_name: str = None) -> dict:
         tokens = self.get_previous_item(self.in_name, index)
@@ -161,7 +163,9 @@ class EncodeClipText(PipelineModule):
         hidden_states = [hidden_state.squeeze() for hidden_state in hidden_states]
         pooled_state = None if pooled_state is None else pooled_state.squeeze()
 
+        hidden_state = hidden_states[self.hidden_state_output_index]
+
         return {
-            self.hidden_states_out_name: hidden_states,
+            self.hidden_state_out_name: hidden_state,
             self.pooled_out_name: pooled_state,
         }
