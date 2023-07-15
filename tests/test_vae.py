@@ -25,7 +25,7 @@ def test():
         LoadImage(path_in_name='image_path', image_out_name='image', range_min=-1.0, range_max=1.0),
         CalcAspect(image_in_name='image', resolution_out_name='original_resolution'),
         AspectBucketing(target_resolution=512, resolution_in_name='original_resolution', scale_resolution_out_name='scale_resolution', crop_resolution_out_name='crop_resolution', possible_resolutions_out_name='possible_resolutions', quantization=64),
-        ScaleCropImage(image_in_name='image', scale_resolution_in_name='scale_resolution', crop_resolution_in_name='crop_resolution', enable_crop_jitter_in_name='concept.enable_crop_jitter', image_out_name='image'),
+        ScaleCropImage(image_in_name='image', scale_resolution_in_name='scale_resolution', crop_resolution_in_name='crop_resolution', enable_crop_jitter_in_name='concept.enable_crop_jitter', image_out_name='image', crop_offset_out_name='crop_offset'),
         EncodeVAE(in_name='image', out_name='latent_image_distribution', vae=vae, override_allow_mixed_precision=False),
         SampleVAEDistribution(in_name='latent_image_distribution', out_name='latent_image', mode='mean'),
     ]

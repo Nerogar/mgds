@@ -451,6 +451,7 @@ class ScaleCropImage(PipelineModule):
             crop_resolution_in_name: str,
             enable_crop_jitter_in_name: str,
             image_out_name: str,
+            crop_offset_out_name: str,
     ):
         super(ScaleCropImage, self).__init__()
         self.image_in_name = image_in_name
@@ -458,6 +459,7 @@ class ScaleCropImage(PipelineModule):
         self.crop_resolution_in_name = crop_resolution_in_name
         self.enable_crop_jitter_in_name = enable_crop_jitter_in_name
         self.image_out_name = image_out_name
+        self.crop_offset_out_name = crop_offset_out_name
 
     def length(self) -> int:
         return self.get_previous_length(self.image_in_name)
@@ -466,7 +468,7 @@ class ScaleCropImage(PipelineModule):
         return [self.image_in_name, self.scale_resolution_in_name, self.crop_resolution_in_name]
 
     def get_outputs(self) -> list[str]:
-        return [self.image_out_name]
+        return [self.image_out_name, self.crop_offset_out_name]
 
     def get_item(self, index: int, requested_name: str = None) -> dict:
         rand = self._get_rand()
@@ -479,13 +481,17 @@ class ScaleCropImage(PipelineModule):
         image = resize(image)
 
         if enable_crop_jitter:
-            image = functional.center_crop(image, crop_resolution)
+            y_offset = (scale_resolution[0] - crop_resolution[0]) // 2
+            x_offset = (scale_resolution[1] - crop_resolution[1]) // 2
         else:
             y_offset = rand.randint(0, scale_resolution[0] - crop_resolution[0])
             x_offset = rand.randint(0, scale_resolution[1] - crop_resolution[1])
-            image = functional.crop(image, y_offset, x_offset, crop_resolution[0], crop_resolution[1])
+
+        crop_offset = (y_offset, x_offset)
+        image = functional.crop(image, y_offset, x_offset, crop_resolution[0], crop_resolution[1])
 
         return {
+            self.crop_offset_out_name: crop_offset,
             self.image_out_name: image
         }
 
