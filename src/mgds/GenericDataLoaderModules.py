@@ -1045,7 +1045,7 @@ class DiskCache(PipelineModule):
 
         if self.__is_caching_done():
             if len(self.aggregate_names) > 0:
-                self.aggregate_cache = torch.load(os.path.join(cache_dir, 'aggregate.pt'))
+                self.aggregate_cache = torch.load(os.path.realpath(os.path.join(cache_dir, 'aggregate.pt')))
                 length = len(self.aggregate_cache)
             else:
                 length = len(os.listdir(cache_dir))
@@ -1064,10 +1064,10 @@ class DiskCache(PipelineModule):
                 for name in self.aggregate_names:
                     aggregate_item[name] = self.get_previous_item(name, index)
 
-                torch.save(split_item, os.path.join(cache_dir, str(index) + '.pt'))
+                torch.save(split_item, os.path.realpath(os.path.join(cache_dir, str(index) + '.pt')))
                 self.aggregate_cache.append(aggregate_item)
 
-            torch.save(self.aggregate_cache, os.path.join(cache_dir, 'aggregate.pt'))
+            torch.save(self.aggregate_cache, os.path.realpath(os.path.join(cache_dir, 'aggregate.pt')))
 
         self.cache_length = length
 
@@ -1087,7 +1087,7 @@ class DiskCache(PipelineModule):
             item[name] = aggregate_item[name]
 
         if requested_name in self.split_names:
-            split_item = torch.load(os.path.join(self.__current_cache_dir(), str(index) + '.pt'))
+            split_item = torch.load(os.path.realpath(os.path.join(self.__current_cache_dir(), str(index) + '.pt')))
 
             for name in self.split_names:
                 item[name] = split_item[name]
