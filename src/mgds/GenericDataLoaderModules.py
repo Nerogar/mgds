@@ -1056,6 +1056,9 @@ class DiskCache(PipelineModule):
             self.aggregate_cache = []
 
             for index in tqdm(range(length), desc='caching'):
+                if index % 100 == 0:
+                    self._torch_gc()
+
                 split_item = {}
                 aggregate_item = {}
 
@@ -1121,6 +1124,9 @@ class RamCache(PipelineModule):
         length = self.length()
         self.cache = []
         for index in tqdm(range(length), desc='caching'):
+            if index % 100 == 0:
+                self._torch_gc()
+
             item = {}
 
             for name in self.names:

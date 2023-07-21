@@ -1,3 +1,4 @@
+import gc
 import random
 from abc import abstractmethod, ABCMeta
 from random import Random
@@ -90,6 +91,11 @@ class PipelineModule(metaclass=ABCMeta):
     def _get_rand(self, index: int = -1) -> Random:
         seed = hash((self.__base_seed, self.__module_index, self.pipeline.current_epoch, index))
         return Random(seed)
+
+    def _torch_gc(self):
+        torch.cuda.synchronize()
+        gc.collect()
+        torch.cuda.empty_cache()
 
     @abstractmethod
     def length(self) -> int:
