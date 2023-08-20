@@ -758,7 +758,12 @@ class RandomRotate(PipelineModule):
         for name in self.names:
             previous_item = self.get_previous_item(name, index)
             if enabled:
+                orig_dtype = previous_item.dtype
+                if orig_dtype == torch.bfloat16:
+                    previous_item = previous_item.to(dtype=torch.float32)
                 previous_item = functional.rotate(previous_item, angle, interpolation=InterpolationMode.BILINEAR)
+                previous_item = previous_item.to(dtype=orig_dtype)
+
             item[name] = previous_item
 
         return item
@@ -1346,7 +1351,11 @@ class RandomMaskRotateCrop(PipelineModule):
 
     @staticmethod
     def __rotate(tensor: Tensor, center: list[int], angle: float) -> Tensor:
-        return functional.rotate(tensor, angle, interpolation=InterpolationMode.BILINEAR, center=center)
+        orig_dtype = tensor.dtype
+        if orig_dtype == torch.bfloat16:
+            tensor = tensor.to(dtype=torch.float32)
+        tensor = functional.rotate(tensor, angle, interpolation=InterpolationMode.BILINEAR, center=center)
+        return tensor.to(dtype=orig_dtype)
 
     @staticmethod
     def __crop(tensor: Tensor, y_min: int, y_max: int, x_min: int, x_max: int) -> Tensor:
