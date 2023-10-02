@@ -385,7 +385,7 @@ class RescaleImageChannels(PipelineModule):
         return self.get_previous_length(self.image_in_name)
 
     def get_inputs(self) -> list[str]:
-        return [self.image_out_name]
+        return [self.image_in_name]
 
     def get_outputs(self) -> list[str]:
         return [self.image_out_name]
@@ -979,9 +979,9 @@ class RandomHue(PipelineModule):
         return item
 
 
-class Downscale(PipelineModule):
-    def __init__(self, in_name: str, out_name: str, factor: int):
-        super(Downscale, self).__init__()
+class ScaleImage(PipelineModule):
+    def __init__(self, in_name: str, out_name: str, factor: float):
+        super(ScaleImage, self).__init__()
         self.in_name = in_name
         self.out_name = out_name
         self.factor = factor
@@ -998,39 +998,7 @@ class Downscale(PipelineModule):
     def get_item(self, index: int, requested_name: str = None) -> dict:
         image = self.get_previous_item(self.in_name, index)
 
-        size = (int(image.shape[1] / self.factor), int(image.shape[2] / self.factor))
-
-        t = transforms.Compose([
-            transforms.Resize(size, interpolation=transforms.InterpolationMode.BILINEAR),
-        ])
-
-        image = t(image)
-
-        return {
-            self.out_name: image
-        }
-
-
-class Upscale(PipelineModule):
-    def __init__(self, in_name: str, out_name: str, factor: int):
-        super(Upscale, self).__init__()
-        self.in_name = in_name
-        self.out_name = out_name
-        self.factor = factor
-
-    def length(self) -> int:
-        return self.get_previous_length(self.in_name)
-
-    def get_inputs(self) -> list[str]:
-        return [self.in_name]
-
-    def get_outputs(self) -> list[str]:
-        return [self.out_name]
-
-    def get_item(self, index: int, requested_name: str = None) -> dict:
-        image = self.get_previous_item(self.in_name, index)
-
-        size = (int(image.shape[1] * self.factor), int(image.shape[2] * self.factor))
+        size = (round(image.shape[1] * self.factor), round(image.shape[2] * self.factor))
 
         t = transforms.Compose([
             transforms.Resize(size, interpolation=transforms.InterpolationMode.BILINEAR),
