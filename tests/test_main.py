@@ -1,6 +1,6 @@
 import os.path
 
-from src.mgds.DebugDataLoaderModules import SaveImage, DecodeVAE
+from src.mgds.DebugDataLoaderModules import SaveImage, DecodeVAE, DecodeTokens, SaveText
 from src.mgds.DiffusersDataLoaderModules import *
 from src.mgds.GenericDataLoaderModules import *
 from src.mgds.MGDS import MGDS, TrainDataLoader, OutputPipelineModule
@@ -8,11 +8,11 @@ from src.mgds.TransformersDataLoaderModules import *
 
 DEVICE = 'cuda'
 DTYPE = torch.float32
-BATCH_SIZE = 4
+BATCH_SIZE = 1
 
 
 def test():
-    depth_model_path = '..\\..\\models\\diffusers-base\\sd-v2-0-depth'
+    depth_model_path = '..\\models\\diffusers-base\\sd-v2-0-depth'
 
     vae = AutoencoderKL.from_pretrained(os.path.join(depth_model_path, 'vae')).to(DEVICE)
     image_depth_processor = DPTImageProcessor.from_pretrained(os.path.join(depth_model_path, 'feature_extractor'))
@@ -41,6 +41,7 @@ def test():
         Downscale(in_name='mask', out_name='latent_mask', factor=8),
         EncodeVAE(in_name='conditioning_image', out_name='latent_conditioning_image_distribution', vae=vae),
         Downscale(in_name='depth', out_name='latent_depth', factor=8),
+        ShuffleTags(text_in_name='prompt', enabled_in_name='concept.enable_tag_shuffling', delimiter_in_name='concept.tag_delimiter', keep_tags_count_in_name='concept.keep_tags_count', text_out_name='prompt'),
         Tokenize(in_name='prompt', tokens_out_name='tokens', mask_out_name='tokens_mask', max_token_length=77, tokenizer=tokenizer),
         # DiskCache(cache_dir='cache', split_names=['latent_image_distribution', 'latent_mask', 'latent_conditioning_image_distribution', 'latent_depth', 'tokens'], aggregate_names=['crop_resolution']),
         SampleVAEDistribution(in_name='latent_image_distribution', out_name='latent_image', mode='mean'),
@@ -51,9 +52,11 @@ def test():
     debug_modules = [
         DecodeVAE(in_name='latent_image', out_name='decoded_image', vae=vae),
         DecodeVAE(in_name='latent_conditioning_image', out_name='decoded_conditioning_image', vae=vae),
+        DecodeTokens(in_name='tokens', out_name='decoded_text', tokenizer=tokenizer),
         SaveImage(image_in_name='decoded_image', original_path_in_name='image_path', path='debug', in_range_min=-1, in_range_max=1),
         SaveImage(image_in_name='mask', original_path_in_name='image_path', path='debug', in_range_min=0, in_range_max=1),
         SaveImage(image_in_name='decoded_conditioning_image', original_path_in_name='image_path', path='debug', in_range_min=-1, in_range_max=1),
+        SaveText(text_in_name='decoded_text', original_path_in_name='image_path', path='debug'),
         # SaveImage(image_in_name='depth', original_path_in_name='image_path', path='debug', in_range_min=-1, in_range_max=1),
         # SaveImage(image_in_name='latent_mask', original_path_in_name='image_path', path='debug', in_range_min=0, in_range_max=1),
         # SaveImage(image_in_name='latent_depth', original_path_in_name='image_path', path='debug', in_range_min=-1, in_range_max=1),
@@ -71,19 +74,22 @@ def test():
         concepts=[
             {
                 'name': 'DS',
-                'path': '..\\..\\datasets\\dataset',
+                'path': '..\\datasets\\dataset1',
                 'random_circular_crop': True,
                 'random_mask_rotate_crop': True,
                 'random_flip': True,
                 'include_subdirectories': True,
+                'enable_tag_shuffling': True,
+                'tag_delimiter': ',',
+                'keep_tags_count': 3,
             },
-            {
-                'name': 'DS4',
-                'path': '..\\..\\datasets\\dataset4',
-                'random_circular_crop': False,
-                'random_mask_rotate_crop': False,
-                'random_flip': False,
-            },
+            # {
+            #     'name': 'DS4',
+            #     'path': '..\\..\\datasets\\dataset4',
+            #     'random_circular_crop': False,
+            #     'random_mask_rotate_crop': False,
+            #     'random_flip': False,
+            # },
         ],
         settings={},
         definition=[
