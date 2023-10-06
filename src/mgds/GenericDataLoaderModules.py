@@ -514,11 +514,15 @@ class LoadText(PipelineModule):
     def get_item(self, index: int, requested_name: str = None) -> dict:
         path = self.get_previous_item(self.path_in_name, index)
 
-        text = ''
-        if os.path.exists(path):
+        try:
             with open(path, encoding='utf-8') as f:
                 text = f.readline().strip()
                 f.close()
+        except FileNotFoundError:
+            text = ''
+        except:
+            print("could not load text, it might be corrupted: " + path)
+            raise
 
         return {
             self.text_out_name: text
