@@ -1001,7 +1001,7 @@ class ScaleImage(PipelineModule):
         size = (round(image.shape[1] * self.factor), round(image.shape[2] * self.factor))
 
         t = transforms.Compose([
-            transforms.Resize(size, interpolation=transforms.InterpolationMode.BILINEAR),
+            transforms.Resize(size, interpolation=transforms.InterpolationMode.BILINEAR, antialias=True),
         ])
 
         image = t(image)
