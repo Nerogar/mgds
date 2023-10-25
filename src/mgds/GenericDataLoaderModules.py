@@ -477,7 +477,7 @@ class ScaleCropImage(PipelineModule):
         crop_resolution = self.get_previous_item(self.crop_resolution_in_name, index)
         enable_crop_jitter = self.get_previous_item(self.enable_crop_jitter_in_name, index)
 
-        resize = transforms.Resize(scale_resolution, interpolation=transforms.InterpolationMode.BILINEAR)
+        resize = transforms.Resize(scale_resolution, interpolation=transforms.InterpolationMode.BILINEAR, antialias=True)
         image = resize(image)
 
         if enable_crop_jitter:
