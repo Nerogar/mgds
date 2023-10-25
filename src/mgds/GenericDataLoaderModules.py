@@ -481,11 +481,11 @@ class ScaleCropImage(PipelineModule):
         image = resize(image)
 
         if enable_crop_jitter:
-            y_offset = (scale_resolution[0] - crop_resolution[0]) // 2
-            x_offset = (scale_resolution[1] - crop_resolution[1]) // 2
-        else:
             y_offset = rand.randint(0, scale_resolution[0] - crop_resolution[0])
             x_offset = rand.randint(0, scale_resolution[1] - crop_resolution[1])
+        else:
+            y_offset = (scale_resolution[0] - crop_resolution[0]) // 2
+            x_offset = (scale_resolution[1] - crop_resolution[1]) // 2
 
         crop_offset = (y_offset, x_offset)
         image = functional.crop(image, y_offset, x_offset, crop_resolution[0], crop_resolution[1])
