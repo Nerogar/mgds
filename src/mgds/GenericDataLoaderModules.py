@@ -1099,11 +1099,8 @@ class DiskCache(PipelineModule):
         cache_dir = self.__current_cache_dir()
 
         if self.__is_caching_done():
-            if len(self.aggregate_names) > 0:
-                self.aggregate_cache = torch.load(os.path.realpath(os.path.join(cache_dir, 'aggregate.pt')))
-                length = len(self.aggregate_cache)
-            else:
-                length = len(os.listdir(cache_dir))
+            self.aggregate_cache = torch.load(os.path.realpath(os.path.join(cache_dir, 'aggregate.pt')))
+            length = len(self.aggregate_cache)
         else:
             os.makedirs(cache_dir, exist_ok=True)
 
