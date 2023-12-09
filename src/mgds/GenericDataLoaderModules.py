@@ -175,7 +175,7 @@ class AspectBucketing(PipelineModule):
 
         self.possible_resolutions, self.possible_aspects = self.create_buckets(self.target_resolutions, self.quantization)
         self.flattened_possible_resolutions = list(set(sum(self.possible_resolutions, [])))
-        self.possible_aspects = np.array(self.possible_aspects)
+        self.possible_aspects = [np.array(x) for x in self.possible_aspects]
 
     def length(self) -> int:
         return self.get_previous_length(self.resolution_in_name)
