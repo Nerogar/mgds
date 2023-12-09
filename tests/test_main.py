@@ -8,7 +8,7 @@ from src.mgds.TransformersDataLoaderModules import *
 
 DEVICE = 'cuda'
 DTYPE = torch.float32
-BATCH_SIZE = 1
+BATCH_SIZE = 4
 
 
 def test():
@@ -30,7 +30,7 @@ def test():
         RandomCircularMaskShrink(mask_name='mask', shrink_probability=1.0, shrink_factor_min=0.2, shrink_factor_max=1.0, enabled_in_name='concept.random_circular_crop'),
         RandomMaskRotateCrop(mask_name='mask', additional_names=['image', 'depth'], min_size=512, min_padding_percent=10, max_padding_percent=30, max_rotate_angle=20, enabled_in_name='concept.random_mask_rotate_crop'),
         CalcAspect(image_in_name='image', resolution_out_name='original_resolution'),
-        AspectBucketing(target_resolution=512, resolution_in_name='original_resolution', scale_resolution_out_name='scale_resolution', crop_resolution_out_name='crop_resolution', possible_resolutions_out_name='possible_resolutions', quantization=8),
+        AspectBucketing(target_resolution=[512, 768, 1024], resolution_in_name='original_resolution', scale_resolution_out_name='scale_resolution', crop_resolution_out_name='crop_resolution', possible_resolutions_out_name='possible_resolutions', quantization=8),
         ScaleCropImage(image_in_name='image', scale_resolution_in_name='scale_resolution', crop_resolution_in_name='crop_resolution', enable_crop_jitter_in_name='concept.enable_crop_jitter', image_out_name='image', crop_offset_out_name='crop_offset'),
         ScaleCropImage(image_in_name='mask', scale_resolution_in_name='scale_resolution', crop_resolution_in_name='crop_resolution', enable_crop_jitter_in_name='concept.enable_crop_jitter', image_out_name='mask', crop_offset_out_name='crop_offset'),
         ScaleCropImage(image_in_name='depth', scale_resolution_in_name='scale_resolution', crop_resolution_in_name='crop_resolution', enable_crop_jitter_in_name='concept.enable_crop_jitter', image_out_name='depth', crop_offset_out_name='crop_offset'),
@@ -38,12 +38,12 @@ def test():
         GenerateMaskedConditioningImage(image_in_name='image', mask_in_name='mask', image_out_name='conditioning_image', image_range_min=0, image_range_max=1),
         RandomFlip(names=['image', 'mask', 'depth', 'conditioning_image'], enabled_in_name='concept.random_flip'),
         EncodeVAE(in_name='image', out_name='latent_image_distribution', vae=vae),
-        Downscale(in_name='mask', out_name='latent_mask', factor=8),
+        ScaleImage(in_name='mask', out_name='latent_mask', factor=1./8.),
         EncodeVAE(in_name='conditioning_image', out_name='latent_conditioning_image_distribution', vae=vae),
-        Downscale(in_name='depth', out_name='latent_depth', factor=8),
+        ScaleImage(in_name='depth', out_name='latent_depth', factor=1./8.),
         ShuffleTags(text_in_name='prompt', enabled_in_name='concept.enable_tag_shuffling', delimiter_in_name='concept.tag_delimiter', keep_tags_count_in_name='concept.keep_tags_count', text_out_name='prompt'),
         Tokenize(in_name='prompt', tokens_out_name='tokens', mask_out_name='tokens_mask', max_token_length=77, tokenizer=tokenizer),
-        # DiskCache(cache_dir='cache', split_names=['latent_image_distribution', 'latent_mask', 'latent_conditioning_image_distribution', 'latent_depth', 'tokens'], aggregate_names=['crop_resolution']),
+        DiskCache(cache_dir='cache', split_names=['latent_image_distribution', 'latent_mask', 'latent_conditioning_image_distribution', 'latent_depth', 'tokens'], aggregate_names=['crop_resolution'], cached_epochs=10),
         SampleVAEDistribution(in_name='latent_image_distribution', out_name='latent_image', mode='mean'),
         SampleVAEDistribution(in_name='latent_conditioning_image_distribution', out_name='latent_conditioning_image', mode='mean'),
         RandomLatentMaskRemove(latent_mask_name='latent_mask', latent_conditioning_image_name='latent_conditioning_image', replace_probability=0.1, vae=vae, possible_resolutions_in_name='possible_resolutions')
@@ -74,7 +74,7 @@ def test():
         concepts=[
             {
                 'name': 'DS',
-                'path': '..\\datasets\\dataset1',
+                'path': '..\\datasets\\dataset5-dark',
                 'random_circular_crop': True,
                 'random_mask_rotate_crop': True,
                 'random_flip': True,

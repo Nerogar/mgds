@@ -155,7 +155,7 @@ class CalcAspect(PipelineModule):
 class AspectBucketing(PipelineModule):
     def __init__(
             self,
-            target_resolution: int,
+            target_resolution: int | list[int],
             quantization: int,
             resolution_in_name: str,
             scale_resolution_out_name: str,
@@ -164,7 +164,7 @@ class AspectBucketing(PipelineModule):
     ):
         super(AspectBucketing, self).__init__()
 
-        self.target_resolution = target_resolution
+        self.target_resolutions = [target_resolution] if isinstance(target_resolution, int) else target_resolution
         self.quantization = quantization
 
         self.resolution_in_name = resolution_in_name
@@ -173,7 +173,9 @@ class AspectBucketing(PipelineModule):
         self.crop_resolution_out_name = crop_resolution_out_name
         self.possible_resolutions_out_name = possible_resolutions_out_name
 
-        self.possible_resolutions, self.possible_aspects = self.create_buckets(target_resolution, self.quantization)
+        self.possible_resolutions, self.possible_aspects = self.create_buckets(self.target_resolutions, self.quantization)
+        self.flattened_possible_resolutions = list(set(sum(self.possible_resolutions, [])))
+        self.possible_aspects = np.array(self.possible_aspects)
 
     def length(self) -> int:
         return self.get_previous_length(self.resolution_in_name)
@@ -185,9 +187,9 @@ class AspectBucketing(PipelineModule):
         return [self.scale_resolution_out_name, self.crop_resolution_out_name, self.possible_resolutions_out_name]
 
     @staticmethod
-    def create_buckets(target_resolution: int, quantization: int) -> (np.ndarray, np.ndarray):
+    def create_buckets(target_resolutions: list[int], quantization: int) -> (np.ndarray, np.ndarray):
         # all possible target aspect ratios
-        possible_resolutions = np.array([
+        all_possible_input_aspects = [
             (1.0, 1.0),
             (1.0, 1.25),
             (1.0, 1.5),
@@ -197,44 +199,54 @@ class AspectBucketing(PipelineModule):
             (1.0, 3.0),
             (1.0, 3.5),
             (1.0, 4.0),
-        ])
+        ]
 
-        # normalize to the same pixel count
-        possible_resolutions = [(
-            h / math.sqrt(h * w) * target_resolution,
-            w / math.sqrt(h * w) * target_resolution
-        ) for (h, w) in possible_resolutions]
+        possible_resolutions = []
+        possible_aspects = []
 
-        # add inverted dimensions
-        possible_resolutions = possible_resolutions + [(w, h) for (h, w) in possible_resolutions]
+        for target_resolution in target_resolutions:
+            # normalize to the same pixel count
+            new_resolutions = [(
+                h / math.sqrt(h * w) * target_resolution,
+                w / math.sqrt(h * w) * target_resolution
+            ) for (h, w) in all_possible_input_aspects]
 
-        # quantization
-        possible_resolutions = [(
-            round(h / quantization) * quantization,
-            round(w / quantization) * quantization,
-        ) for (h, w) in possible_resolutions]
+            # add inverted dimensions
+            new_resolutions = new_resolutions + [(w, h) for (h, w) in new_resolutions]
 
-        # remove duplicates
-        possible_resolutions = list(set(possible_resolutions))
+            # quantization
+            new_resolutions = [(
+                round(h / quantization) * quantization,
+                round(w / quantization) * quantization,
+            ) for (h, w) in new_resolutions]
 
-        possible_aspects = np.array([h / w for (h, w) in possible_resolutions])
+            # remove duplicates
+            new_resolutions = list(set(new_resolutions))
+
+            # add to lists
+            possible_resolutions.append(new_resolutions)
+            possible_aspects.append([h / w for (h, w) in new_resolutions])
+
         return possible_resolutions, possible_aspects
 
-    def get_bucket(self, h: int, w: int):
+    def get_bucket(self, rand: Random, h: int, w: int):
+        resolution_index = rand.randint(0, len(self.possible_resolutions) - 1)
+
         aspect = h / w
-        bucket_index = np.argmin(abs(self.possible_aspects - aspect))
-        return self.possible_resolutions[bucket_index]
+        bucket_index = np.argmin(abs(self.possible_aspects[resolution_index] - aspect))
+        return self.possible_resolutions[resolution_index][bucket_index]
 
     def get_meta(self, name: str) -> Any:
         if name == self.possible_resolutions_out_name:
-            return self.possible_resolutions
+            return self.flattened_possible_resolutions
         else:
             return None
 
     def get_item(self, index: int, requested_name: str = None) -> dict:
+        rand = self._get_rand(index)
         resolution = self.get_previous_item(self.resolution_in_name, index)
 
-        target_resolution = self.get_bucket(resolution[0], resolution[1])
+        target_resolution = self.get_bucket(rand, resolution[0], resolution[1])
 
         aspect = resolution[0] / resolution[1]
         target_aspect = target_resolution[0] / target_resolution[1]
@@ -261,7 +273,7 @@ class AspectBucketing(PipelineModule):
 class SingleAspectCalculation(PipelineModule):
     def __init__(
             self,
-            target_resolution: int,
+            target_resolution: int | list[int],
             resolution_in_name: str,
             scale_resolution_out_name: str,
             crop_resolution_out_name: str,
@@ -269,7 +281,7 @@ class SingleAspectCalculation(PipelineModule):
     ):
         super(SingleAspectCalculation, self).__init__()
 
-        self.target_resolution = target_resolution
+        self.target_resolutions = [target_resolution] if isinstance(target_resolution, int) else target_resolution
 
         self.resolution_in_name = resolution_in_name
 
@@ -288,14 +300,16 @@ class SingleAspectCalculation(PipelineModule):
 
     def get_meta(self, name: str) -> Any:
         if name == self.possible_resolutions_out_name:
-            return [(self.target_resolution, self.target_resolution)]
+            return [(x, x) for x in self.target_resolutions]
         else:
             return None
 
     def get_item(self, index: int, requested_name: str = None) -> dict:
+        rand = self._get_rand(index)
         resolution = self.get_previous_item(self.resolution_in_name, index)
 
-        target_resolution = (self.target_resolution, self.target_resolution)
+        resolution_index = rand.randint(0, len(self.target_resolutions) - 1)
+        target_resolution = (self.target_resolutions[resolution_index], self.target_resolutions[resolution_index])
 
         aspect = resolution[0] / resolution[1]
         target_aspect = target_resolution[0] / target_resolution[1]
@@ -1181,7 +1195,7 @@ class AspectBatchSorting(PipelineModule):
     def get_outputs(self) -> list[str]:
         return self.names
 
-    def shuffle(self) -> list[int]:
+    def __shuffle(self) -> list[int]:
         rand = self._get_rand()
 
         bucket_dict = {key: value.copy() for (key, value) in self.bucket_dict.items()}
@@ -1239,7 +1253,7 @@ class AspectBatchSorting(PipelineModule):
         if self.sort_resolutions_for_each_epoch:
             self.__sort_resolutions()
 
-        self.index_list = self.shuffle()
+        self.index_list = self.__shuffle()
 
     def get_item(self, index: int, requested_name: str = None) -> dict:
         index = self.index_list[index]
