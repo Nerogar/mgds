@@ -1,14 +1,41 @@
 import os.path
 
-from src.mgds.DebugDataLoaderModules import SaveImage, DecodeVAE, DecodeTokens, SaveText
-from src.mgds.DiffusersDataLoaderModules import *
-from src.mgds.GenericDataLoaderModules import *
-from src.mgds.MGDS import MGDS, TrainDataLoader, OutputPipelineModule
-from src.mgds.TransformersDataLoaderModules import *
+import torch
+from diffusers import AutoencoderKL
+from tqdm import tqdm
+from transformers import DPTImageProcessor, DPTForDepthEstimation, CLIPTokenizer
+
+from mgds.pipelineModules.AspectBatchSorting import AspectBatchSorting
+from mgds.pipelineModules.AspectBucketing import AspectBucketing
+from mgds.pipelineModules.CalcAspect import CalcAspect
+from mgds.pipelineModules.CollectPaths import CollectPaths
+from mgds.pipelineModules.DecodeTokens import DecodeTokens
+from mgds.pipelineModules.DecodeVAE import DecodeVAE
+from mgds.pipelineModules.DiskCache import DiskCache
+from mgds.pipelineModules.EncodeVAE import EncodeVAE
+from mgds.pipelineModules.GenerateDepth import GenerateDepth
+from mgds.pipelineModules.GenerateImageLike import GenerateImageLike
+from mgds.pipelineModules.GenerateMaskedConditioningImage import GenerateMaskedConditioningImage
+from mgds.pipelineModules.LoadImage import LoadImage
+from mgds.pipelineModules.LoadText import LoadText
+from mgds.pipelineModules.ModifyPath import ModifyPath
+from mgds.pipelineModules.RandomCircularMaskShrink import RandomCircularMaskShrink
+from mgds.pipelineModules.RandomFlip import RandomFlip
+from mgds.pipelineModules.RandomLatentMaskRemove import RandomLatentMaskRemove
+from mgds.pipelineModules.RandomMaskRotateCrop import RandomMaskRotateCrop
+from mgds.pipelineModules.SampleVAEDistribution import SampleVAEDistribution
+from mgds.pipelineModules.SaveImage import SaveImage
+from mgds.pipelineModules.SaveText import SaveText
+from mgds.pipelineModules.ScaleCropImage import ScaleCropImage
+from mgds.pipelineModules.ScaleImage import ScaleImage
+from mgds.pipelineModules.ShuffleTags import ShuffleTags
+from mgds.pipelineModules.Tokenize import Tokenize
+from src.mgds.MGDS import MGDS, TrainDataLoader
+from mgds.OutputPipelineModule import OutputPipelineModule
 
 DEVICE = 'cuda'
 DTYPE = torch.float32
-BATCH_SIZE = 4
+BATCH_SIZE = 1
 
 
 def test():
@@ -43,7 +70,7 @@ def test():
         ScaleImage(in_name='depth', out_name='latent_depth', factor=1./8.),
         ShuffleTags(text_in_name='prompt', enabled_in_name='concept.enable_tag_shuffling', delimiter_in_name='concept.tag_delimiter', keep_tags_count_in_name='concept.keep_tags_count', text_out_name='prompt'),
         Tokenize(in_name='prompt', tokens_out_name='tokens', mask_out_name='tokens_mask', max_token_length=77, tokenizer=tokenizer),
-        DiskCache(cache_dir='cache', split_names=['latent_image_distribution', 'latent_mask', 'latent_conditioning_image_distribution', 'latent_depth', 'tokens'], aggregate_names=['crop_resolution'], cached_epochs=10),
+        DiskCache(cache_dir='cache', split_names=['latent_image_distribution', 'latent_mask', 'latent_conditioning_image_distribution', 'latent_depth', 'tokens'], aggregate_names=['crop_resolution', 'image_path'], variations_in_name='concept.variations', repeats_in_name='concept.repeats', variations_group_in_name='concept'),
         SampleVAEDistribution(in_name='latent_image_distribution', out_name='latent_image', mode='mean'),
         SampleVAEDistribution(in_name='latent_conditioning_image_distribution', out_name='latent_conditioning_image', mode='mean'),
         RandomLatentMaskRemove(latent_mask_name='latent_mask', latent_conditioning_image_name='latent_conditioning_image', replace_probability=0.1, vae=vae, possible_resolutions_in_name='possible_resolutions')
@@ -63,7 +90,7 @@ def test():
     ]
 
     output_modules = [
-        AspectBatchSorting(resolution_in_name='crop_resolution', names=['latent_image', 'latent_conditioning_image', 'latent_mask', 'latent_depth', 'tokens'], batch_size=BATCH_SIZE, sort_resolutions_for_each_epoch=True),
+        AspectBatchSorting(resolution_in_name='crop_resolution', names=['latent_image', 'latent_conditioning_image', 'latent_mask', 'latent_depth', 'tokens'], batch_size=BATCH_SIZE),
         OutputPipelineModule(names=['latent_image', 'latent_conditioning_image', 'latent_mask', 'latent_depth', 'tokens'])
     ]
 
@@ -82,6 +109,8 @@ def test():
                 'enable_tag_shuffling': True,
                 'tag_delimiter': ',',
                 'keep_tags_count': 3,
+                'variations': 3,
+                'repeats': 1.5,
             },
             # {
             #     'name': 'DS4',

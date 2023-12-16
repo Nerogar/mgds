@@ -1,8 +1,20 @@
-from src.mgds.DebugDataLoaderModules import SaveImage, DecodeVAE
-from src.mgds.DiffusersDataLoaderModules import *
-from src.mgds.GenericDataLoaderModules import *
-from src.mgds.MGDS import MGDS, TrainDataLoader, OutputPipelineModule
-from src.mgds.TransformersDataLoaderModules import *
+import torch
+from diffusers import AutoencoderKL
+from tqdm import tqdm
+
+from mgds.pipelineModules.AspectBatchSorting import AspectBatchSorting
+from mgds.pipelineModules.AspectBucketing import AspectBucketing
+from mgds.pipelineModules.CalcAspect import CalcAspect
+from mgds.pipelineModules.CollectPaths import CollectPaths
+from mgds.pipelineModules.DecodeVAE import DecodeVAE
+from mgds.pipelineModules.EncodeVAE import EncodeVAE
+from mgds.pipelineModules.LoadImage import LoadImage
+from mgds.pipelineModules.ModifyPath import ModifyPath
+from mgds.pipelineModules.SampleVAEDistribution import SampleVAEDistribution
+from mgds.pipelineModules.SaveImage import SaveImage
+from mgds.pipelineModules.ScaleCropImage import ScaleCropImage
+from src.mgds.MGDS import MGDS, TrainDataLoader
+from mgds.OutputPipelineModule import OutputPipelineModule
 
 DEVICE = 'cuda'
 DTYPE = torch.float32
@@ -36,7 +48,7 @@ def test():
     ]
 
     output_modules = [
-        AspectBatchSorting(resolution_in_name='crop_resolution', names=['latent_image'], batch_size=BATCH_SIZE, sort_resolutions_for_each_epoch=True),
+        AspectBatchSorting(resolution_in_name='crop_resolution', names=['latent_image'], batch_size=BATCH_SIZE),
         OutputPipelineModule(names=['latent_image'])
     ]
 
