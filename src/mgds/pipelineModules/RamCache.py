@@ -1,7 +1,7 @@
 import hashlib
 import json
 import math
-from typing import Any
+from typing import Any, Callable
 
 from tqdm import tqdm
 
@@ -19,6 +19,7 @@ class RamCache(
             sort_names: list[str] | None = None,
             repeats_in_name: str | None = None,
             variations_group_in_name: str | list[str] | None = None,
+            before_cache_fun: Callable[[], None] | None = None,
     ):
         super(RamCache, self).__init__()
 
@@ -28,6 +29,8 @@ class RamCache(
         self.repeats_in_name = repeats_in_name
         self.variations_group_in_name = \
             [variations_group_in_name] if isinstance(variations_group_in_name, str) else variations_group_in_name
+
+        self.before_cache_fun = before_cache_fun
 
         self.cache = None
         self.variations_initialized = False
@@ -107,6 +110,8 @@ class RamCache(
     def start(self, variation: int):
         if not self.variations_initialized:
             self.__init_variations()
+
+        self.before_cache_fun()
 
         self.cache = []
         length = sum(x for x in self.group_output_samples.values())

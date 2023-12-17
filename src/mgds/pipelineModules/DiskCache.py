@@ -2,7 +2,7 @@ import hashlib
 import json
 import math
 import os
-from typing import Any
+from typing import Any, Callable
 
 import torch
 from tqdm import tqdm
@@ -24,6 +24,7 @@ class DiskCache(
             variations_in_name: str | None = None,
             repeats_in_name: str | None = None,
             variations_group_in_name: str | list[str] | None = None,
+            before_cache_fun: Callable[[], None] | None = None,
     ):
         super(DiskCache, self).__init__()
         self.cache_dir = cache_dir
@@ -36,6 +37,8 @@ class DiskCache(
         self.repeats_in_name = repeats_in_name
         self.variations_group_in_name = \
             [variations_group_in_name] if isinstance(variations_group_in_name, str) else variations_group_in_name
+
+        self.before_cache_fun = before_cache_fun
 
         self.group_variations = {}
         self.group_indices = {}
@@ -137,6 +140,7 @@ class DiskCache(
         for group_key, variations in self.group_variations.items():
             self.aggregate_cache[group_key] = [None for _ in range(variations)]
 
+        before_cache_fun_called = False
         for group_key in self.group_variations.keys():
             start_index = self.group_output_samples[group_key] * out_variation
             end_index = self.group_output_samples[group_key] * (out_variation + 1) - 1
@@ -148,6 +152,10 @@ class DiskCache(
             for in_variation in [(x % variations) for x in range(start_variation, end_variation + 1, 1)]:
                 cache_dir = self.__get_cache_dir(group_key, in_variation)
                 if not self.__is_caching_done(group_key, in_variation):
+                    if not before_cache_fun_called:
+                        before_cache_fun_called = True
+                        self.before_cache_fun()
+
                     os.makedirs(cache_dir, exist_ok=True)
 
                     aggregate_cache = []
