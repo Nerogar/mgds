@@ -36,6 +36,15 @@ class PipelineModule(metaclass=ABCMeta):
         self.__item_cache = {}
         self.__length_cache = -1
 
+    def __raise_variation_error(
+            self,
+            module: 'PipelineModule',
+            name: str,
+            current_variation: int,
+            requested_variation: int,
+    ):
+        raise Exception(f"wrong variation requested by {self} from {str(module)}, name: {name}, current_variation: {current_variation}, requested_variation: {requested_variation}")
+
     def _get_previous_item(self, variation: int, name: str, index: int):
         split_name = name.split('.')
         item_name = split_name[0]
@@ -59,11 +68,11 @@ class PipelineModule(metaclass=ABCMeta):
                         item = module.get_item(variation, index, item_name)
                     if isinstance(module, SingleVariationRandomAccessPipelineModule):
                         if variation != module.current_variation:
-                            raise Exception(f"wrong variation requested from {str(module)}, name: {name}")
+                            self.__raise_variation_error(module, name, module.current_variation, variation)
                         item = module.get_item(index, item_name)
                     if isinstance(module, SerialPipelineModule):
                         if variation != module.current_variation:
-                            raise Exception(f"wrong variation requested from {str(module)}, name: {name}")
+                            self.__raise_variation_error(module, name, module.current_variation, variation)
                         item = module.get_item(index, item_name)
                     module.__variation_cache_index = variation
                     module.__item_cache_index = index
@@ -77,11 +86,11 @@ class PipelineModule(metaclass=ABCMeta):
                         item = module.get_item(variation, index, item_name)
                     if isinstance(module, SingleVariationRandomAccessPipelineModule):
                         if variation != module.current_variation:
-                            raise Exception(f"wrong variation requested from {str(module)}, name: {name}")
+                            self.__raise_variation_error(module, name, module.current_variation, variation)
                         item = module.get_item(index, item_name)
                     if isinstance(module, SerialPipelineModule):
                         if variation != module.current_variation:
-                            raise Exception(f"wrong variation requested from {str(module)}, name: {name}")
+                            self.__raise_variation_error(module, name, module.current_variation, variation)
                         item = module.get_item(index, item_name)
                     module.__item_cache.update(item)
                     item = item[item_name]
@@ -120,11 +129,11 @@ class PipelineModule(metaclass=ABCMeta):
                     return module.get_meta(variation, name)
                 if isinstance(module, SingleVariationRandomAccessPipelineModule):
                     if variation != module.current_variation:
-                        raise Exception(f"wrong variation requested from {str(module)}, name: {name}")
+                        self.__raise_variation_error(module, name, module.current_variation, variation)
                     return module.get_meta(name)
                 if isinstance(module, SerialPipelineModule):
                     if variation != module.current_variation:
-                        raise Exception(f"wrong variation requested from {str(module)}, name: {name}")
+                        self.__raise_variation_error(module, name, module.current_variation, variation)
                     return module.get_meta(name)
 
     def _get_rand(self, variation: int, index: int = -1) -> Random:

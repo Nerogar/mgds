@@ -20,7 +20,6 @@ class DiskCache(
             cache_dir: str,
             split_names: list[str] | None = None,
             aggregate_names: list[str] | None = None,
-            sort_names: list[str] | None = None,
             variations_in_name: str | None = None,
             repeats_in_name: str | None = None,
             variations_group_in_name: str | list[str] | None = None,
@@ -31,7 +30,6 @@ class DiskCache(
 
         self.split_names = [] if split_names is None else split_names
         self.aggregate_names = [] if aggregate_names is None else aggregate_names
-        self.sort_names = [] if sort_names is None else sort_names
 
         self.variations_in_name = variations_in_name
         self.repeats_in_name = repeats_in_name
@@ -56,10 +54,10 @@ class DiskCache(
             return sum(x for x in self.group_output_samples.values())
 
     def get_inputs(self) -> list[str]:
-        return self.split_names + self.aggregate_names + self.sort_names
+        return self.split_names + self.aggregate_names
 
     def get_outputs(self) -> list[str]:
-        return self.split_names + self.aggregate_names + self.sort_names
+        return self.split_names + self.aggregate_names
 
     def __string_key(self, data: list[Any]) -> str:
         json_data = json.dumps(data, sort_keys=True, ensure_ascii=True, separators=(',', ':'), indent=None)
@@ -216,8 +214,5 @@ class DiskCache(
 
             for name in self.split_names:
                 item[name] = split_item[name]
-
-        elif requested_name in self.sort_names:
-            item[requested_name] = self._get_previous_item(in_variation, requested_name, in_index)
 
         return item

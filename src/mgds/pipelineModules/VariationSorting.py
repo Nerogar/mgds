@@ -1,49 +1,43 @@
 import hashlib
 import json
 import math
-from typing import Any, Callable
-
-from tqdm import tqdm
+from typing import Any
 
 from mgds.PipelineModule import PipelineModule
-from mgds.pipelineModuleTypes.SingleVariationRandomAccessPipelineModule import SingleVariationRandomAccessPipelineModule
+from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
 
 
-class RamCache(
+class VariationSorting(
     PipelineModule,
-    SingleVariationRandomAccessPipelineModule,
+    RandomAccessPipelineModule,
 ):
     def __init__(
             self,
-            cache_names: list[str],
+            names: list[str],
             repeats_in_name: str | None = None,
             variations_group_in_name: str | list[str] | None = None,
-            before_cache_fun: Callable[[], None] | None = None,
     ):
-        super(RamCache, self).__init__()
+        super(VariationSorting, self).__init__()
 
-        self.cache_names = cache_names
+        self.names = names
 
         self.repeats_in_name = repeats_in_name
         self.variations_group_in_name = \
             [variations_group_in_name] if isinstance(variations_group_in_name, str) else variations_group_in_name
 
-        self.before_cache_fun = before_cache_fun
-
-        self.cache = None
         self.variations_initialized = False
 
     def length(self) -> int:
         if not self.variations_initialized:
-            return self._get_previous_length(self.cache_names[0])
+            return self._get_previous_length(self.names[0])
         else:
             return sum(x for x in self.group_output_samples.values())
 
     def get_inputs(self) -> list[str]:
-        return self.cache_names
+        return self.names
 
     def get_outputs(self) -> list[str]:
-        return self.cache_names
+        return self.names
 
     def __string_key(self, data: list[Any]) -> str:
         json_data = json.dumps(data, sort_keys=True, ensure_ascii=True, separators=(',', ':'), indent=None)
@@ -56,7 +50,7 @@ class RamCache(
         Data is written into three variables.
             self.group_variations, mapping group keys to the number of variations of that group
             self.group_indices, mapping group keys to a list of input indices contained in the group
-            self.group_output_samples, mapping group keys to the number of indices in the cache output for each group
+            self.group_output_samples, mapping group keys to the number of indices in the output for each group
         """
         if self.repeats_in_name is not None:
             group_indices = {}
@@ -79,7 +73,7 @@ class RamCache(
                 num = int(math.floor(len(group_indices[group_key]) * repeats))
                 group_output_samples[group_key] = num
         else:
-            first_previous_name = self.cache[0]
+            first_previous_name = self.names[0]
 
             group_indices = {'': [in_index for in_index in range(self._get_previous_length(first_previous_name))]}
             group_output_samples = {'': len(group_indices[''])}
@@ -109,22 +103,10 @@ class RamCache(
         if not self.variations_initialized:
             self.__init_variations()
 
-        self.before_cache_fun()
 
-        self.cache = []
-        length = sum(x for x in self.group_output_samples.values())
-        for index in tqdm(range(length), desc='caching'):
-            if index % 100 == 0:
-                self._torch_gc()
-
-            group_key, in_variation, group_index, in_index = self.__get_input_index(self.current_variation, index)
-
-            item = {}
-
-            for name in self.cache_names:
-                item[name] = self._get_previous_item(in_variation, name, in_index)
-
-            self.cache.append(item)
-
-    def get_item(self, index: int, requested_name: str = None) -> dict:
-        return self.cache[index]
+    def get_item(self, variation:int, index: int, requested_name: str = None) -> dict:
+        group_key, in_variation, group_index, in_index = self.__get_input_index(variation, index)
+        value = self._get_previous_item(variation, requested_name, in_index)
+        return {
+            requested_name: value
+        }
