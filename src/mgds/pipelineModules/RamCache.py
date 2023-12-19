@@ -18,6 +18,7 @@ class RamCache(
             cache_names: list[str],
             repeats_in_name: str | None = None,
             variations_group_in_name: str | list[str] | None = None,
+            group_enabled_in_name: str | None = None,
             before_cache_fun: Callable[[], None] | None = None,
     ):
         super(RamCache, self).__init__()
@@ -25,8 +26,10 @@ class RamCache(
         self.cache_names = cache_names
 
         self.repeats_in_name = repeats_in_name
-        self.variations_group_in_name = \
+        self.variations_group_in_names = \
             [variations_group_in_name] if isinstance(variations_group_in_name, str) else variations_group_in_name
+
+        self.group_enabled_in_name = group_enabled_in_name
 
         self.before_cache_fun = before_cache_fun
 
@@ -40,7 +43,10 @@ class RamCache(
             return sum(x for x in self.group_output_samples.values())
 
     def get_inputs(self) -> list[str]:
-        return self.cache_names
+        return self.cache_names \
+            + [self.repeats_in_name] if self.repeats_in_name else [] \
+            + self.variations_group_in_names if self.repeats_in_name else [] \
+            + [self.group_enabled_in_name] if self.repeats_in_name else []
 
     def get_outputs(self) -> list[str]:
         return self.cache_names
@@ -63,16 +69,20 @@ class RamCache(
             group_repeats = {}
 
             for in_index in range(self._get_previous_length(self.repeats_in_name)):
+                if self.group_enabled_in_name and not self._get_previous_item(0, self.group_enabled_in_name, in_index):
+                    continue
+
                 repeats = self._get_previous_item(0, self.repeats_in_name, in_index)
                 group_key = self.__string_key(
-                    [self._get_previous_item(0, name, in_index) for name in self.variations_group_in_name]
+                    [self._get_previous_item(0, name, in_index) for name in self.variations_group_in_names]
                 )
 
                 if group_key not in group_indices:
                     group_indices[group_key] = []
+                group_indices[group_key].append(in_index)
+
                 if group_key not in group_repeats:
                     group_repeats[group_key] = repeats
-                group_indices[group_key].append(in_index)
 
             group_output_samples = {}
             for group_key, repeats in group_repeats.items():
