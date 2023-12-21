@@ -12,7 +12,7 @@ class CollectPaths(
 ):
     def __init__(
             self,
-            concept_in_name: str, path_in_name: str, name_in_name: str, include_subdirectories_in_name: str,
+            concept_in_name: str, path_in_name: str, include_subdirectories_in_name: str,
             path_out_name: str, concept_out_name: str,
             extensions: [str], include_postfix: [str], exclude_postfix: [str],
     ):
@@ -20,7 +20,6 @@ class CollectPaths(
 
         self.concept_in_name = concept_in_name
         self.path_in_name = path_in_name
-        self.name_in_name = name_in_name
         self.include_subdirectories_in_name = include_subdirectories_in_name
 
         self.path_out_name = path_out_name
@@ -31,8 +30,7 @@ class CollectPaths(
         self.exclude_postfix = exclude_postfix
 
         self.paths = []
-        self.concept_name = []
-        self.concepts = {}
+        self.concepts = []
 
     def length(self) -> int:
         return len(self.paths)
@@ -60,7 +58,6 @@ class CollectPaths(
             concept = self._get_previous_item(variation, self.concept_in_name, index)
             include_subdirectories = self._get_previous_item(variation, self.include_subdirectories_in_name, index)
             path = concept[self.path_in_name]
-            concept_name = concept[self.name_in_name]
 
             file_names = sorted(self.__list_files(path, include_subdirectories))
 
@@ -76,11 +73,10 @@ class CollectPaths(
                     os.path.splitext(name)[0].endswith(postfix) for postfix in self.exclude_postfix), file_names))
 
             self.paths.extend(file_names)
-            self.concept_name.extend([concept_name] * len(file_names))
-            self.concepts[concept_name] = concept
+            self.concepts.extend([concept] * len(file_names))
 
     def get_item(self, variation: int, index: int, requested_name: str = None) -> dict:
         return {
             self.path_out_name: self.paths[index],
-            self.concept_out_name: self.concepts[self.concept_name[index]],
+            self.concept_out_name: self.concepts[index],
         }
