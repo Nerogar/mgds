@@ -16,7 +16,6 @@ class AspectBatchSorting(
 
         self.bucket_dict = {}
         self.index_list = []
-        self.index_list = []
 
     def length(self) -> int:
         return len(self.index_list)
