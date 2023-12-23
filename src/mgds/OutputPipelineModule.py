@@ -6,23 +6,34 @@ class OutputPipelineModule(
     PipelineModule,
     SerialPipelineModule,
 ):
-    def __init__(self, names: list[str]):
+    def __init__(
+            self,
+            names: list[str | tuple[str, str]],
+    ):
         super(OutputPipelineModule, self).__init__()
-        self.names = names
+        self.input_names = []
+        self.output_names = []
+        for name in names:
+            if isinstance(name, tuple):
+                self.input_names.append(name[0])
+                self.output_names.append(name[1])
+            else:
+                self.input_names.append(name)
+                self.output_names.append(name)
 
     def length(self) -> int:
-        return self._get_previous_length(self.names[0])
+        return self._get_previous_length(self.input_names[0])
 
     def get_inputs(self) -> list[str]:
-        return self.names
+        return self.input_names
 
     def get_outputs(self) -> list[str]:
-        return self.names
+        return self.output_names
 
     def get_item(self, index: int, requested_name: str = None) -> dict:
         item = {}
 
-        for name in self.names:
-            item[name] = self._get_previous_item(self.current_variation, name, index)
+        for input_name, output_name in zip(self.input_names, self.output_names):
+            item[output_name] = self._get_previous_item(self.current_variation, input_name, index)
 
         return item
