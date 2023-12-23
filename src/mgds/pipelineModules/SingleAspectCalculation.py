@@ -75,9 +75,10 @@ class SingleAspectCalculation(
         if self.enable_target_resolutions_override_in_name is not None:
             enable_resolution_override = self._get_previous_item(
                 variation, self.enable_target_resolutions_override_in_name, index)
-            target_resolutions = self._get_previous_item(variation, self.target_resolutions_override_in_name, index)
             if enable_resolution_override:
-                target_resolutions = [int(res.strip()) for res in target_resolutions.split(',')]
+                target_resolutions = self._get_previous_item(variation, self.target_resolutions_override_in_name, index)
+
+        target_resolutions = [int(res.strip()) for res in target_resolutions.split(',')]
 
         target_resolution = rand.choice(target_resolutions)
         target_resolution = (target_resolution, target_resolution)
