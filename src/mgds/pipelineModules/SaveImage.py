@@ -1,4 +1,5 @@
 import os
+from typing import Callable
 
 from torchvision import transforms
 from tqdm import tqdm
@@ -18,6 +19,7 @@ class SaveImage(
             path: str,
             in_range_min: float,
             in_range_max: float,
+            before_save_fun: Callable[[], None] | None = None,
     ):
         super(SaveImage, self).__init__()
         self.image_in_name = image_in_name
@@ -25,6 +27,7 @@ class SaveImage(
         self.path = path
         self.in_range_min = in_range_min
         self.in_range_max = in_range_max
+        self.before_save_fun = before_save_fun
 
     def length(self) -> int:
         return self._get_previous_length(self.image_in_name)
@@ -39,6 +42,9 @@ class SaveImage(
         path = os.path.join(self.path, "epoch-" + str(variation))
         if not os.path.exists(path):
             os.makedirs(path)
+
+        if self.before_save_fun is not None:
+            self.before_save_fun()
 
         for index in tqdm(range(self._get_previous_length(self.original_path_in_name)),
                           desc='writing debug images for \'' + self.image_in_name + '\''):

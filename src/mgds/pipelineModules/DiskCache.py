@@ -162,7 +162,7 @@ class DiskCache(
             for in_variation in [(x % variations) for x in range(start_variation, end_variation + 1, 1)]:
                 cache_dir = self.__get_cache_dir(group_key, in_variation)
                 if not self.__is_caching_done(group_key, in_variation):
-                    if not before_cache_fun_called:
+                    if not before_cache_fun_called and self.before_cache_fun is not None:
                         before_cache_fun_called = True
                         self.before_cache_fun()
 

@@ -1,4 +1,5 @@
 import os
+from typing import Callable
 
 from tqdm import tqdm
 
@@ -10,11 +11,18 @@ class SaveText(
     PipelineModule,
     SerialPipelineModule,
 ):
-    def __init__(self, text_in_name: str, original_path_in_name: str, path: str):
+    def __init__(
+            self,
+            text_in_name: str,
+            original_path_in_name: str,
+            path: str,
+            before_save_fun: Callable[[], None] | None = None,
+    ):
         super(SaveText, self).__init__()
         self.text_in_name = text_in_name
         self.original_path_in_name = original_path_in_name
         self.path = path
+        self.before_save_fun = before_save_fun
 
     def length(self) -> int:
         return self._get_previous_length(self.text_in_name)
@@ -29,6 +37,9 @@ class SaveText(
         path = os.path.join(self.path, "epoch-" + str(variation))
         if not os.path.exists(path):
             os.makedirs(path)
+
+        if self.before_save_fun is not None:
+            self.before_save_fun()
 
         for index in tqdm(range(self._get_previous_length(self.original_path_in_name)),
                           desc='writing debug text for \'' + self.text_in_name + '\''):
