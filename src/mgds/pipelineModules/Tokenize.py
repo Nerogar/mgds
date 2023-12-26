@@ -1,4 +1,4 @@
-from transformers import CLIPTokenizer
+from transformers import CLIPTokenizer, T5Tokenizer
 
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
@@ -13,7 +13,7 @@ class Tokenize(
             in_name: str,
             tokens_out_name: str,
             mask_out_name: str,
-            tokenizer: CLIPTokenizer,
+            tokenizer: CLIPTokenizer | T5Tokenizer,
             max_token_length: int,
     ):
         super(Tokenize, self).__init__()

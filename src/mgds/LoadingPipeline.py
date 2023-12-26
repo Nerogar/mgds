@@ -76,21 +76,22 @@ class LoadingPipeline:
     def start_next_epoch(self):
         self.__current_epoch += 1
 
-        for module in self.modules:
-            # At the start of each epoch, the previous cache is cleared.
-            # This prevents duplicating samples when training on single images.
-            module.clear_item_cache()
+        with torch.inference_mode():
+            for module in self.modules:
+                # At the start of each epoch, the previous cache is cleared.
+                # This prevents duplicating samples when training on single images.
+                module.clear_item_cache()
 
-            if isinstance(module, RandomAccessPipelineModule):
-                if not module.started:
+                if isinstance(module, RandomAccessPipelineModule):
+                    if not module.started:
+                        module.start(self.__current_epoch)
+                    module.started = True
+                elif isinstance(module, SingleVariationRandomAccessPipelineModule):
+                    module.current_variation = self.__current_epoch
                     module.start(self.__current_epoch)
-                module.started = True
-            elif isinstance(module, SingleVariationRandomAccessPipelineModule):
-                module.current_variation = self.__current_epoch
-                module.start(self.__current_epoch)
-            elif isinstance(module, SerialPipelineModule):
-                module.current_variation = self.__current_epoch
-                module.start(self.__current_epoch)
+                elif isinstance(module, SerialPipelineModule):
+                    module.current_variation = self.__current_epoch
+                    module.start(self.__current_epoch)
 
         self.__last_initialized_epoch = self.__current_epoch
 
@@ -99,4 +100,5 @@ class LoadingPipeline:
         if self.__current_epoch == self.__initial_epoch:
             index += self.__initial_epoch_sample
 
-        return self.__output_module.get_item(index)
+        with torch.inference_mode():
+            return self.__output_module.get_item(index)
