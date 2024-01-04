@@ -47,6 +47,7 @@ class Tokenize(
         mask = tokenizer_output.attention_mask.to(self.pipeline.device)
 
         tokens = tokens.squeeze()
+        mask = mask.squeeze()
 
         return {
             self.tokens_out_name: tokens,
