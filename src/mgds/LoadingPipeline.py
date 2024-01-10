@@ -8,8 +8,6 @@ from mgds.pipelineModuleTypes.SingleVariationRandomAccessPipelineModule import S
 
 class LoadingPipeline:
     device: torch.device
-    dtype: torch.dtype
-    allow_mixed_precision: bool
     modules: list[PipelineModule]
     __output_module: 'OutputPipelineModule'
     __current_epoch: int
@@ -21,8 +19,6 @@ class LoadingPipeline:
     def __init__(
             self,
             device: torch.device,
-            dtype: torch.dtype,
-            allow_mixed_precision: bool,
             modules: list[PipelineModule],
             batch_size: int,
             seed: int,
@@ -30,8 +26,6 @@ class LoadingPipeline:
             initial_epoch_sample: int = 0,
     ):
         self.device = device
-        self.dtype = dtype
-        self.allow_mixed_precision = allow_mixed_precision
         self.modules = list(filter(lambda x: x is not None, self.__flatten(modules)))
         for module in self.modules:
             if type(module).__name__ == 'OutputPipelineModule':

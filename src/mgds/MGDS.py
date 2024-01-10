@@ -11,15 +11,11 @@ from mgds.SettingsPipelineModule import SettingsPipelineModule
 
 class MGDS(Dataset):
     device: torch.device
-    dtype: torch.dtype
-    allow_mixed_precision: bool
     loading_pipeline: LoadingPipeline
 
     def __init__(
             self,
             device: torch.device,
-            dtype: torch.dtype,
-            allow_mixed_precision: bool,
             concepts: list[dict],
             settings: dict,
             definition: [PipelineModule],
@@ -29,13 +25,9 @@ class MGDS(Dataset):
             initial_epoch_sample: int = 0
     ):
         self.device = device
-        self.dtype = dtype
-        self.allow_mixed_precision = allow_mixed_precision
         seed = (random.randint(-(1 << 30), 1 << 30) if seed == -1 else seed)
         self.loading_pipeline = LoadingPipeline(
             device,
-            dtype,
-            allow_mixed_precision,
             [ConceptPipelineModule(concepts), SettingsPipelineModule(settings)] + definition,
             batch_size,
             seed,

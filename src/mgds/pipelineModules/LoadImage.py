@@ -41,7 +41,7 @@ class LoadImage(
             image = image.convert(self.mode)
 
             t = transforms.ToTensor()
-            image_tensor = t(image).to(device=self.pipeline.device, dtype=self.pipeline.dtype)
+            image_tensor = t(image).to(device=self.pipeline.device)
 
             image_tensor = image_tensor * (self.range_max - self.range_min) + self.range_min
         except FileNotFoundError:

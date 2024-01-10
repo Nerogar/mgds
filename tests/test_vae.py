@@ -54,8 +54,6 @@ def test():
 
     ds = MGDS(
         device=torch.device(DEVICE),
-        dtype=torch.float16,
-        allow_mixed_precision=True,
         concepts=[
             {
                 'name': 'DS',

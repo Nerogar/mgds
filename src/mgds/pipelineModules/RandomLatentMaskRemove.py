@@ -1,4 +1,5 @@
 from contextlib import nullcontext
+from typing import Callable
 
 import torch
 from diffusers import AutoencoderKL
@@ -18,7 +19,8 @@ class RandomLatentMaskRemove(
             possible_resolutions_in_name: str,
             replace_probability: float,
             vae: AutoencoderKL | None,
-            override_allow_mixed_precision: bool | None = None,
+            autocast_context: torch.autocast | None = None,
+            before_cache_fun: Callable[[], None] | None = None,
     ):
         super(RandomLatentMaskRemove, self).__init__()
         self.latent_mask_name = latent_mask_name
@@ -26,7 +28,11 @@ class RandomLatentMaskRemove(
         self.possible_resolutions_in_name = possible_resolutions_in_name
         self.replace_probability = replace_probability
         self.vae = vae
-        self.override_allow_mixed_precision = override_allow_mixed_precision
+
+        self.autocast_context = nullcontext() if autocast_context is None else autocast_context
+        self.autocast_enabled = isinstance(self.autocast_context, torch.autocast)
+
+        self.before_cache_fun = before_cache_fun
 
         self.inputs_outputs = [latent_mask_name]
         if latent_conditioning_image_name is not None:
@@ -47,23 +53,21 @@ class RandomLatentMaskRemove(
     def start(self, variation: int):
         possible_resolutions = self._get_previous_meta(variation, self.possible_resolutions_in_name)
 
-        allow_mixed_precision = self.pipeline.allow_mixed_precision if self.override_allow_mixed_precision is None \
-            else self.override_allow_mixed_precision
-
         if self.latent_conditioning_image_name is not None:
-            with torch.no_grad():
-                with torch.autocast(self.pipeline.device.type, self.pipeline.dtype) if allow_mixed_precision \
-                        else nullcontext():
-                    for resolution in possible_resolutions:
-                        blank_conditioning_image = torch.zeros(
-                            resolution,
-                            dtype=self.pipeline.dtype if allow_mixed_precision else self.vae.dtype,
-                            device=self.pipeline.device
-                        )
-                        blank_conditioning_image = blank_conditioning_image\
-                            .unsqueeze(0).unsqueeze(0).expand([-1, 3, -1, -1])
-                        self.blank_conditioning_image_cache[resolution] = self.vae.encode(
-                            blank_conditioning_image).latent_dist.mode().squeeze()
+            with self.autocast_context:
+
+                self.before_cache_fun()
+
+                for resolution in possible_resolutions:
+                    blank_conditioning_image = torch.zeros(
+                        resolution,
+                        dtype=torch.float32,
+                        device=self.pipeline.device
+                    )
+                    blank_conditioning_image = blank_conditioning_image\
+                        .unsqueeze(0).unsqueeze(0).expand([-1, 3, -1, -1])
+                    self.blank_conditioning_image_cache[resolution] = self.vae.encode(
+                        blank_conditioning_image).latent_dist.mode().squeeze()
 
     def get_item(self, variation: int, index: int, requested_name: str = None) -> dict:
         rand = self._get_rand(variation, index)
