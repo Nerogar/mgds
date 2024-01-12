@@ -64,10 +64,11 @@ class EncodeClipText(
         hidden_state = hidden_states[self.hidden_state_output_index]
 
         if self.add_layer_norm:
-            final_layer_norm = self.text_encoder.text_model.final_layer_norm
-            hidden_state = final_layer_norm(
-                hidden_state
-            )
+            with self.autocast_context:
+                final_layer_norm = self.text_encoder.text_model.final_layer_norm
+                hidden_state = final_layer_norm(
+                    hidden_state
+                )
 
         return {
             self.hidden_state_out_name: hidden_state,
