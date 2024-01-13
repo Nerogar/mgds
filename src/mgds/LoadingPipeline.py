@@ -70,7 +70,7 @@ class LoadingPipeline:
     def start_next_epoch(self):
         self.__current_epoch += 1
 
-        with torch.inference_mode():
+        with torch.no_grad():
             for module in self.modules:
                 # At the start of each epoch, the previous cache is cleared.
                 # This prevents duplicating samples when training on single images.
@@ -94,5 +94,5 @@ class LoadingPipeline:
         if self.__current_epoch == self.__initial_epoch:
             index += self.__initial_epoch_sample
 
-        with torch.inference_mode():
+        with torch.no_grad():
             return self.__output_module.get_item(index)
