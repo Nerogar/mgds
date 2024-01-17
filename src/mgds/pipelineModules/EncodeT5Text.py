@@ -31,7 +31,6 @@ class EncodeT5Text(
         self.hidden_state_output_index = hidden_state_output_index
 
         self.autocast_context = nullcontext() if autocast_context is None else autocast_context
-        self.autocast_enabled = isinstance(self.autocast_context, torch.autocast)
 
     def length(self) -> int:
         return self._get_previous_length(self.tokens_in_name)

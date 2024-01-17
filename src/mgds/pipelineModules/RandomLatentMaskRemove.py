@@ -30,7 +30,6 @@ class RandomLatentMaskRemove(
         self.vae = vae
 
         self.autocast_context = nullcontext() if autocast_context is None else autocast_context
-        self.autocast_enabled = isinstance(self.autocast_context, torch.autocast)
 
         self.before_cache_fun = before_cache_fun
 

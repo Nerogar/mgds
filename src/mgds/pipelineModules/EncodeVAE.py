@@ -24,7 +24,6 @@ class EncodeVAE(
         self.vae = vae
 
         self.autocast_context = nullcontext() if autocast_context is None else autocast_context
-        self.autocast_enabled = isinstance(self.autocast_context, torch.autocast)
 
     def length(self) -> int:
         return self._get_previous_length(self.in_name)
@@ -38,8 +37,7 @@ class EncodeVAE(
     def get_item(self, variation: int, index: int, requested_name: str = None) -> dict:
         image = self._get_previous_item(variation, self.in_name, index)
 
-        if not self.autocast_enabled:
-            image = image.to(dtype=self.vae.dtype)
+        image = image.to(dtype=self.vae.dtype)
 
         with self.autocast_context:
             latent_distribution = self.vae.encode(image.unsqueeze(0)).latent_dist

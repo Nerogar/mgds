@@ -27,7 +27,6 @@ class GenerateDepth(
         self.depth_estimator = depth_estimator
 
         self.autocast_context = nullcontext() if autocast_context is None else autocast_context
-        self.autocast_enabled = isinstance(self.autocast_context, torch.autocast)
 
     def length(self) -> int:
         return self._get_previous_length(self.path_in_name)
@@ -51,8 +50,7 @@ class GenerateDepth(
 
         with self.autocast_context:
             image = self.image_depth_processor(image, return_tensors="pt").pixel_values
-            if not self.autocast_enabled:
-                image = image.to(self.depth_estimator.dtype)
+            image = image.to(self.depth_estimator.dtype)
             depth = self.depth_estimator(image).predicted_depth
 
             depth_min = torch.amin(depth, dim=[1, 2], keepdim=True)

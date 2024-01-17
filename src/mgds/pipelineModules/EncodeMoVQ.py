@@ -24,7 +24,6 @@ class EncodeMoVQ(
         self.movq = movq
 
         self.autocast_context = nullcontext() if autocast_context is None else autocast_context
-        self.autocast_enabled = isinstance(self.autocast_context, torch.autocast)
 
     def length(self) -> int:
         return self._get_previous_length(self.in_name)
@@ -38,10 +37,7 @@ class EncodeMoVQ(
     def get_item(self, variation: int, index: int, requested_name: str = None) -> dict:
         image = self._get_previous_item(variation, self.in_name, index)
 
-        image = image.to(device=image.device)
-
-        if not self.autocast_enabled:
-            image = image.to(self.movq.dtype)
+        image = image.to(device=image.device, dtype=self.movq.dtype)
 
         with self.autocast_context:
             latent_image = self.movq.encode(image.unsqueeze(0)).latents
