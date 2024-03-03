@@ -27,9 +27,15 @@ class LoadMultipleTexts(
 
         texts = []
         if os.path.exists(path):
-            with open(path, encoding='utf-8') as f:
-                texts = [line.strip() for line in f]
-                f.close()
+            try:
+                with open(path, encoding='utf-8') as f:
+                    texts = [line.strip() for line in f]
+                    f.close()
+            except FileNotFoundError:
+                texts = [""]
+            except:
+                print("could not load text, it might be corrupted: " + path)
+                raise
 
         texts = list(filter(lambda text: text != "", texts))
 
