@@ -31,9 +31,11 @@ class LoadMultipleTexts(
                 with open(path, encoding='utf-8') as f:
                     texts = [line.strip() for line in f]
                     f.close()
-            except Exception as e:
-                print(f"The following file contains non-unicode characters: {path}.\n{e}")
-                sys.exit(1)
+            except FileNotFoundError:
+                texts = [""]
+            except:
+                print("could not load text, it might be corrupted: " + path)
+                raise
 
         texts = list(filter(lambda text: text != "", texts))
 
