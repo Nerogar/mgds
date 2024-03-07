@@ -16,14 +16,16 @@ class DecodeMoVQ(
             in_name: str,
             out_name: str,
             movq: VQModel,
-            autocast_context: torch.autocast | None = None,
+            autocast_contexts: list[torch.autocast | None] = None,
+            dtype: torch.dtype | None = None,
     ):
         super(DecodeMoVQ, self).__init__()
         self.in_name = in_name
         self.out_name = out_name
         self.movq = movq
 
-        self.autocast_context = nullcontext() if autocast_context is None else autocast_context
+        self.autocast_contexts = [nullcontext()] if autocast_contexts is None else autocast_contexts
+        self.dtype = dtype
 
     def length(self) -> int:
         return self._get_previous_length(self.in_name)
@@ -37,9 +39,10 @@ class DecodeMoVQ(
     def get_item(self, variation: int, index: int, requested_name: str = None) -> dict:
         latent_image = self._get_previous_item(variation, self.in_name, index)
 
-        latent_image = latent_image.to(self.movq.dtype)
+        if self.dtype:
+            latent_image = latent_image.to(self.dtype)
 
-        with self.autocast_context:
+        with self._all_contexts(self.autocast_contexts):
             image = self.movq.decode(latent_image.unsqueeze(0)).sample
             image = image.clamp(-1, 1).squeeze()
 

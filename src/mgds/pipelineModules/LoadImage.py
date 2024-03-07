@@ -1,3 +1,4 @@
+import torch
 from PIL import Image
 from torchvision import transforms
 
@@ -9,13 +10,23 @@ class LoadImage(
     PipelineModule,
     RandomAccessPipelineModule,
 ):
-    def __init__(self, path_in_name: str, image_out_name: str, range_min: float, range_max: float, channels: int = 3):
+    def __init__(
+            self,
+            path_in_name: str,
+            image_out_name: str,
+            range_min: float,
+            range_max: float,
+            channels: int = 3,
+            dtype: torch.dtype | None = None,
+    ):
         super(LoadImage, self).__init__()
         self.path_in_name = path_in_name
         self.image_out_name = image_out_name
 
         self.range_min = range_min
         self.range_max = range_max
+
+        self.dtype = dtype
 
         if channels == 3:
             self.mode = 'RGB'
@@ -42,6 +53,9 @@ class LoadImage(
 
             t = transforms.ToTensor()
             image_tensor = t(image).to(device=self.pipeline.device)
+
+            if self.dtype:
+                image_tensor = image_tensor.to(dtype=self.dtype)
 
             image_tensor = image_tensor * (self.range_max - self.range_min) + self.range_min
         except FileNotFoundError:

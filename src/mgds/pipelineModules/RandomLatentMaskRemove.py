@@ -19,7 +19,8 @@ class RandomLatentMaskRemove(
             possible_resolutions_in_name: str,
             replace_probability: float,
             vae: AutoencoderKL | None,
-            autocast_context: torch.autocast | None = None,
+            autocast_contexts: list[torch.autocast | None] = None,
+            dtype: torch.dtype | None = None,
             before_cache_fun: Callable[[], None] | None = None,
     ):
         super(RandomLatentMaskRemove, self).__init__()
@@ -29,7 +30,8 @@ class RandomLatentMaskRemove(
         self.replace_probability = replace_probability
         self.vae = vae
 
-        self.autocast_context = nullcontext() if autocast_context is None else autocast_context
+        self.autocast_contexts = [nullcontext()] if autocast_contexts is None else autocast_contexts
+        self.dtype = dtype
 
         self.before_cache_fun = before_cache_fun
 
@@ -53,14 +55,14 @@ class RandomLatentMaskRemove(
         possible_resolutions = self._get_previous_meta(variation, self.possible_resolutions_in_name)
 
         if self.latent_conditioning_image_name is not None:
-            with self.autocast_context:
+            with self._all_contexts(self.autocast_contexts):
 
                 self.before_cache_fun()
 
                 for resolution in possible_resolutions:
                     blank_conditioning_image = torch.zeros(
                         resolution,
-                        dtype=torch.float32,
+                        dtype=self.dtype,
                         device=self.pipeline.device
                     )
                     blank_conditioning_image = blank_conditioning_image\

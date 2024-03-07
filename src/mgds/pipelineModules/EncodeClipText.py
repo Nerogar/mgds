@@ -20,7 +20,8 @@ class EncodeClipText(
             text_encoder: CLIPTextModel | CLIPTextModelWithProjection,
             add_layer_norm: bool,
             hidden_state_output_index: int | None = None,
-            autocast_context: torch.autocast | None = None,
+            autocast_contexts: list[torch.autocast | None] = None,
+            dtype: torch.dtype | None = None,
     ):
         super(EncodeClipText, self).__init__()
         self.in_name = in_name
@@ -31,7 +32,8 @@ class EncodeClipText(
         self.add_layer_norm = add_layer_norm
         self.hidden_state_output_index = hidden_state_output_index
 
-        self.autocast_context = nullcontext() if autocast_context is None else autocast_context
+        self.autocast_contexts = [nullcontext()] if autocast_contexts is None else autocast_contexts
+        self.dtype = dtype
 
     def length(self) -> int:
         return self._get_previous_length(self.in_name)
@@ -55,7 +57,10 @@ class EncodeClipText(
         else:
             tokens_attention_mask = None
 
-        with self.autocast_context:
+        with self._all_contexts(self.autocast_contexts):
+            if tokens_attention_mask and self.dtype:
+                tokens_attention_mask = tokens_attention_mask.to(dtype=self.dtype)
+
             text_encoder_output = self.text_encoder(
                 tokens,
                 attention_mask=tokens_attention_mask,
@@ -75,7 +80,7 @@ class EncodeClipText(
         hidden_state = hidden_states[self.hidden_state_output_index]
 
         if self.add_layer_norm:
-            with self.autocast_context:
+            with self._all_contexts(self.autocast_contexts):
                 final_layer_norm = self.text_encoder.text_model.final_layer_norm
                 hidden_state = final_layer_norm(
                     hidden_state

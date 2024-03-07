@@ -1,5 +1,6 @@
 import gc
 from abc import ABCMeta, abstractmethod
+from contextlib import ExitStack
 from random import Random
 
 import torch
@@ -135,6 +136,12 @@ class PipelineModule(metaclass=ABCMeta):
                     if variation != module.current_variation:
                         self.__raise_variation_error(module, name, module.current_variation, variation)
                     return module.get_meta(name)
+
+    def _all_contexts(self, autocast_contexts: list[torch.autocast | None]) -> ExitStack:
+        stack = ExitStack()
+        for context in autocast_contexts:
+            stack.enter_context(context)
+        return stack
 
     def _get_rand(self, variation: int, index: int = -1) -> Random:
         seed = hash((self.__base_seed, self.__module_index, variation, index))
