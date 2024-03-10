@@ -58,7 +58,7 @@ class EncodeClipText(
             tokens_attention_mask = None
 
         with self._all_contexts(self.autocast_contexts):
-            if tokens_attention_mask and self.dtype:
+            if tokens_attention_mask is not None and self.dtype:
                 tokens_attention_mask = tokens_attention_mask.to(dtype=self.dtype)
 
             text_encoder_output = self.text_encoder(
