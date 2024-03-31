@@ -1,3 +1,4 @@
+import concurrent
 import hashlib
 import json
 import math
@@ -45,6 +46,7 @@ class DiskCache(
         self.group_indices = {}
         self.group_output_samples = {}
         self.variations_initialized = False
+        self.executor = concurrent.futures.ThreadPoolExecutor(8)
 
         if len(self.split_names) + len(self.aggregate_names) == 0:
             raise ValueError('No cache items supplied')
@@ -168,23 +170,36 @@ class DiskCache(
 
                     os.makedirs(cache_dir, exist_ok=True)
 
+                    aggregate_cache_ = []
                     aggregate_cache = []
+                    fs = []
 
                     for group_index, in_index in enumerate(tqdm(self.group_indices[group_key], desc='caching')):
                         if in_index % 100 == 0:
+                            for f in concurrent.futures.as_completed(fs):
+                                aggregate_cache_.append(f.result())
+                            fs = []
                             self._torch_gc()
 
-                        split_item = {}
-                        aggregate_item = {}
+                        def fn(group_index, in_index, in_variation):
+                            split_item = {}
+                            aggregate_item = {}
 
-                        for name in self.split_names:
-                            split_item[name] = self._get_previous_item(in_variation, name, in_index)
-                        for name in self.aggregate_names:
-                            aggregate_item[name] = self._get_previous_item(in_variation, name, in_index)
+                            for name in self.split_names:
+                                split_item[name] = self._get_previous_item(in_variation, name, in_index)
+                            for name in self.aggregate_names:
+                                aggregate_item[name] = self._get_previous_item(in_variation, name, in_index)
 
-                        torch.save(split_item, os.path.realpath(os.path.join(cache_dir, str(group_index) + '.pt')))
-                        aggregate_cache.append(aggregate_item)
+                            torch.save(split_item, os.path.realpath(os.path.join(cache_dir, str(group_index) + '.pt')))
+                            return (group_index, aggregate_item)
+                            #aggregate_cache.append(aggregate_item)
+                        fs.append(self.executor.submit(fn, group_index, in_index, in_variation))
 
+                    for f in concurrent.futures.as_completed(fs):
+                        aggregate_cache_.append(f.result())
+                    aggregate_cache_.sort(key=lambda x: x[0])
+                    aggregate_cache = list(map(lambda x: x[1], aggregate_cache_))
+                    fs = []
                     torch.save(aggregate_cache, os.path.realpath(os.path.join(cache_dir, 'aggregate.pt')))
 
                 if self.aggregate_cache[group_key][in_variation] is None:
