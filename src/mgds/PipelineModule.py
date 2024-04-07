@@ -1,6 +1,8 @@
+import dataclasses
 import gc
 import threading
 from abc import ABCMeta, abstractmethod
+from concurrent import futures
 from contextlib import ExitStack
 from random import Random
 
@@ -11,21 +13,42 @@ from mgds.pipelineModuleTypes.SerialPipelineModule import SerialPipelineModule
 from mgds.pipelineModuleTypes.SingleVariationRandomAccessPipelineModule import SingleVariationRandomAccessPipelineModule
 
 
+@dataclasses.dataclass
+class PipelineState:
+    """Container for state shared amongst all pipeline modules in a pipeline.
+
+    Each element must either be thread-safe itself or have a thread-safe way
+    for it to be accessed.
+    """
+    # Executor that any pipeline module will use to fan out concurrency.
+    # Defaults to 2x CPUs.
+    executor: futures.Executor = dataclasses.field(
+        default_factory=futures.ThreadPoolExecutor)
+
+    # Limiter on the number of simultaneous threads that can access the GPU.
+    # Allows for a lot of threads in executor, but can limit actions like VAE-
+    # and CLIP-encoding to a smaller size. Defaults to 1.
+    gpu_lock: threading.Semaphore = dataclasses.field(
+        default_factory=threading.Semaphore)
+
+
 class PipelineModule(metaclass=ABCMeta):
     pipeline: 'LoadingPipeline'
 
     __base_seed: int
     __module_index: int
+    _state: PipelineState
 
     def __init__(self):
         super(PipelineModule, self).__init__()
         self.clear_item_cache()
 
-    def init(self, pipeline: 'LoadingPipeline', base_seed: int, module_index: int):
+    def init(self, pipeline: 'LoadingPipeline', base_seed: int, module_index: int, state: PipelineState):
         self.pipeline = pipeline
 
         self.__base_seed = base_seed
         self.__module_index = module_index
+        self._state = state
 
     # Bits for handling the cache.
     class Cache(threading.local):

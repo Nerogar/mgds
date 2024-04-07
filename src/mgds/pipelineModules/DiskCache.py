@@ -46,7 +46,6 @@ class DiskCache(
         self.group_indices = {}
         self.group_output_samples = {}
         self.variations_initialized = False
-        self.executor = concurrent.futures.ThreadPoolExecutor(8)
 
         if len(self.split_names) + len(self.aggregate_names) == 0:
             raise ValueError('No cache items supplied')
@@ -193,7 +192,7 @@ class DiskCache(
                             torch.save(split_item, os.path.realpath(os.path.join(cache_dir, str(group_index) + '.pt')))
                             return (group_index, aggregate_item)
                             #aggregate_cache.append(aggregate_item)
-                        fs.append(self.executor.submit(fn, group_index, in_index, in_variation))
+                        fs.append(self._state.executor.submit(fn, group_index, in_index, in_variation))
 
                     for f in concurrent.futures.as_completed(fs):
                         aggregate_cache_.append(f.result())

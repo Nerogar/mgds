@@ -1,6 +1,6 @@
 import torch
 
-from mgds.PipelineModule import PipelineModule
+from mgds.PipelineModule import PipelineModule, PipelineState
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
 from mgds.pipelineModuleTypes.SerialPipelineModule import SerialPipelineModule
 from mgds.pipelineModuleTypes.SingleVariationRandomAccessPipelineModule import SingleVariationRandomAccessPipelineModule
@@ -24,6 +24,7 @@ class LoadingPipeline:
             seed: int,
             initial_epoch: int = 0,
             initial_epoch_sample: int = 0,
+            state: PipelineState|None = None
     ):
         self.device = device
         self.modules = list(filter(lambda x: x is not None, self.__flatten(modules)))
@@ -31,8 +32,16 @@ class LoadingPipeline:
             if type(module).__name__ == 'OutputPipelineModule':
                 self.__output_module = module
 
+        if not state:
+            # FIXME: Default values for testing; after testing is done, we'll
+            # remove this and force state to be non-None. Alternatively, we
+            # could hold the PipelineState here in LoadingPipeline, since
+            # it's given as an argument to each module.
+            from concurrent import futures
+            from threading import Semaphore
+            state = PipelineState(futures.ThreadPoolExecutor(8), Semaphore(4))
         for index, module in enumerate(self.modules):
-            module.init(self, seed, index)
+            module.init(self, seed, index, state)
 
         self.__batch_size = batch_size
         self.__initial_epoch = initial_epoch
