@@ -25,12 +25,6 @@ class PipelineState:
     executor: futures.Executor = dataclasses.field(
         default_factory=futures.ThreadPoolExecutor)
 
-    # Limiter on the number of simultaneous threads that can access the GPU.
-    # Allows for a lot of threads in executor, but can limit actions like VAE-
-    # and CLIP-encoding to a smaller size. Defaults to 1.
-    gpu_lock: threading.Semaphore = dataclasses.field(
-        default_factory=threading.Semaphore)
-
 
 class PipelineModule(metaclass=ABCMeta):
     pipeline: 'LoadingPipeline'
