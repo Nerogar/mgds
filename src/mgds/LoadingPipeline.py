@@ -22,9 +22,9 @@ class LoadingPipeline:
             modules: list[PipelineModule],
             batch_size: int,
             seed: int,
+            state: PipelineState,
             initial_epoch: int = 0,
-            initial_epoch_sample: int = 0,
-            state: PipelineState|None = None
+            initial_epoch_sample: int = 0
     ):
         self.device = device
         self.modules = list(filter(lambda x: x is not None, self.__flatten(modules)))
@@ -32,14 +32,6 @@ class LoadingPipeline:
             if type(module).__name__ == 'OutputPipelineModule':
                 self.__output_module = module
 
-        if not state:
-            # FIXME: Default values for testing; after testing is done, we'll
-            # remove this and force state to be non-None. Alternatively, we
-            # could hold the PipelineState here in LoadingPipeline, since
-            # it's given as an argument to each module.
-            from concurrent import futures
-            from threading import Semaphore
-            state = PipelineState(futures.ThreadPoolExecutor(8), Semaphore(4))
         for index, module in enumerate(self.modules):
             module.init(self, seed, index, state)
 
