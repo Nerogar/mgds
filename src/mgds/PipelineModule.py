@@ -1,4 +1,5 @@
 import gc
+import threading
 from abc import ABCMeta, abstractmethod
 from contextlib import ExitStack
 from random import Random
@@ -16,11 +17,6 @@ class PipelineModule(metaclass=ABCMeta):
     __base_seed: int
     __module_index: int
 
-    __variation_cache_index: int
-    __item_cache_index: int
-    __item_cache: dict
-    __length_cache: int
-
     def __init__(self):
         super(PipelineModule, self).__init__()
         self.clear_item_cache()
@@ -31,11 +27,16 @@ class PipelineModule(metaclass=ABCMeta):
         self.__base_seed = base_seed
         self.__module_index = module_index
 
+    # Bits for handling the cache.
+    class Cache(threading.local):
+        def __init__(self):
+            self.variation_cache_index = -1
+            self.item_cache_index = -1
+            self.item_cache = {}
+            self.length_cache = -1
+
     def clear_item_cache(self):
-        self.__variation_cache_index = -1
-        self.__item_cache_index = -1
-        self.__item_cache = {}
-        self.__length_cache = -1
+        self.__local_cache = self.Cache()
 
     def __raise_variation_error(
             self,
@@ -57,14 +58,14 @@ class PipelineModule(metaclass=ABCMeta):
             module = self.pipeline.modules[previous_module_index]
             if item_name in module.get_outputs():
                 # item is cached
-                if module.__variation_cache_index == variation \
-                        and module.__item_cache_index == index \
-                        and item_name in module.__item_cache.keys():
-                    item = module.__item_cache[item_name]
+                if module.__local_cache.variation_cache_index == variation \
+                        and module.__local_cache.item_cache_index == index \
+                        and item_name in module.__local_cache.item_cache.keys():
+                    item = module.__local_cache.item_cache[item_name]
 
                 # the wrong index is cached, clear cache and recalculate
-                elif module.__variation_cache_index != variation \
-                        or module.__item_cache_index != index:
+                elif module.__local_cache.variation_cache_index != variation \
+                        or module.__local_cache.item_cache_index != index:
                     if isinstance(module, RandomAccessPipelineModule):
                         item = module.get_item(variation, index, item_name)
                     if isinstance(module, SingleVariationRandomAccessPipelineModule):
@@ -75,14 +76,14 @@ class PipelineModule(metaclass=ABCMeta):
                         if variation != module.current_variation:
                             self.__raise_variation_error(module, name, module.current_variation, variation)
                         item = module.get_item(index, item_name)
-                    module.__variation_cache_index = variation
-                    module.__item_cache_index = index
-                    module.__item_cache = item
+                    module.__local_cache.variation_cache_index = variation
+                    module.__local_cache.item_cache_index = index
+                    module.__local_cache.item_cache = item
                     item = item[item_name]
 
                 # the item is cached and the index is correct, but the item_name is not part of the cache
                 # recalculate and add to the cache
-                elif item_name not in module.__item_cache.keys():
+                elif item_name not in module.__local_cache.item_cache.keys():
                     if isinstance(module, RandomAccessPipelineModule):
                         item = module.get_item(variation, index, item_name)
                     if isinstance(module, SingleVariationRandomAccessPipelineModule):
@@ -93,7 +94,7 @@ class PipelineModule(metaclass=ABCMeta):
                         if variation != module.current_variation:
                             self.__raise_variation_error(module, name, module.current_variation, variation)
                         item = module.get_item(index, item_name)
-                    module.__item_cache.update(item)
+                    module.__local_cache.item_cache.update(item)
                     item = item[item_name]
 
                 # if the item was found, break the loop
@@ -118,9 +119,9 @@ class PipelineModule(metaclass=ABCMeta):
         for previous_module_index in range(self.__module_index - 1, -1, -1):
             module = self.pipeline.modules[previous_module_index]
             if item_name in module.get_outputs():
-                if module.__length_cache < 0:
-                    module.__length_cache = module.length()
-                return module.__length_cache
+                if module.__local_cache.length_cache < 0:
+                    module.__local_cache.length_cache = module.length()
+                return module.__local_cache.length_cache
 
     def _get_previous_meta(self, variation: int, name: str):
         for previous_module_index in range(self.__module_index - 1, -1, -1):
