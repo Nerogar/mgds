@@ -169,17 +169,10 @@ class DiskCache(
 
                     os.makedirs(cache_dir, exist_ok=True)
 
-                    aggregate_cache_ = []
-                    aggregate_cache = []
-                    fs = []
+                    size = len(self.group_indices[group_key])
+                    aggregate_cache = [None]*size
 
-                    for group_index, in_index in enumerate(tqdm(self.group_indices[group_key], desc='caching')):
-                        if in_index % 100 == 0:
-                            for f in concurrent.futures.as_completed(fs):
-                                aggregate_cache_.append(f.result())
-                            fs = []
-                            self._torch_gc()
-
+                    with tqdm(total=size, smoothing=0.1, desc='caching') as bar:
                         def fn(group_index, in_index, in_variation):
                             split_item = {}
                             aggregate_item = {}
@@ -190,15 +183,17 @@ class DiskCache(
                                 aggregate_item[name] = self._get_previous_item(in_variation, name, in_index)
 
                             torch.save(split_item, os.path.realpath(os.path.join(cache_dir, str(group_index) + '.pt')))
-                            return (group_index, aggregate_item)
-                            #aggregate_cache.append(aggregate_item)
-                        fs.append(self._state.executor.submit(fn, group_index, in_index, in_variation))
+                            aggregate_cache[group_index] = aggregate_item
 
-                    for f in concurrent.futures.as_completed(fs):
-                        aggregate_cache_.append(f.result())
-                    aggregate_cache_.sort(key=lambda x: x[0])
-                    aggregate_cache = list(map(lambda x: x[1], aggregate_cache_))
-                    fs = []
+                        fs = (self._state.executor.submit(
+                            fn, group_index, in_index, in_variation)
+                              for (group_index, in_index)
+                              in enumerate(self.group_indices[group_key]))
+                        for i, _ in enumerate(concurrent.futures.as_completed(fs)):
+                            if i % 100 == 0:
+                                self._torch_gc()
+                            bar.update(1)
+
                     torch.save(aggregate_cache, os.path.realpath(os.path.join(cache_dir, 'aggregate.pt')))
 
                 if self.aggregate_cache[group_key][in_variation] is None:
