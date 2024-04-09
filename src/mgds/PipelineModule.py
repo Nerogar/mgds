@@ -1,4 +1,3 @@
-import dataclasses
 import gc
 import threading
 from abc import ABCMeta, abstractmethod
@@ -13,7 +12,6 @@ from mgds.pipelineModuleTypes.SerialPipelineModule import SerialPipelineModule
 from mgds.pipelineModuleTypes.SingleVariationRandomAccessPipelineModule import SingleVariationRandomAccessPipelineModule
 
 
-@dataclasses.dataclass
 class PipelineState:
     """Container for state shared amongst all pipeline modules in a pipeline.
 
@@ -22,8 +20,10 @@ class PipelineState:
     """
     # Executor that any pipeline module will use to fan out concurrency.
     # Defaults to 2x CPUs.
-    executor: futures.Executor = dataclasses.field(
-        default_factory=futures.ThreadPoolExecutor)
+    executor: futures.Executor
+
+    def __init__(self, max_threads: int|None = None):
+        self.executor = futures.ThreadPoolExecutor(max_threads)
 
 
 class PipelineModule(metaclass=ABCMeta):
