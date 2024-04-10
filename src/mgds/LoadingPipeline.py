@@ -1,3 +1,5 @@
+from typing import Iterator
+
 import torch
 
 from mgds.PipelineModule import PipelineModule
@@ -6,15 +8,16 @@ from mgds.pipelineModuleTypes.SerialPipelineModule import SerialPipelineModule
 from mgds.pipelineModuleTypes.SingleVariationRandomAccessPipelineModule import SingleVariationRandomAccessPipelineModule
 
 
-class LoadingPipeline:
+class LoadingPipeline(Iterator):
     device: torch.device
     modules: list[PipelineModule]
-    __output_module: 'OutputPipelineModule'
+    __output_module: SerialPipelineModule
     __current_epoch: int
+    __current_index: int
     __last_initialized_epoch: int
     __batch_size: int
     __initial_epoch: int
-    __initial_epoch_sample: int
+    __initial_index: int
 
     def __init__(
             self,
@@ -23,7 +26,7 @@ class LoadingPipeline:
             batch_size: int,
             seed: int,
             initial_epoch: int = 0,
-            initial_epoch_sample: int = 0,
+            initial_index: int = 0,
     ):
         self.device = device
         self.modules = list(filter(lambda x: x is not None, self.__flatten(modules)))
@@ -36,7 +39,7 @@ class LoadingPipeline:
 
         self.__batch_size = batch_size
         self.__initial_epoch = initial_epoch
-        self.__initial_epoch_sample = initial_epoch_sample - (initial_epoch_sample % batch_size)
+        self.__initial_index = initial_index - (initial_index % batch_size)
 
         self.__current_epoch = initial_epoch - 1
         self.__last_initialized_epoch = -1
@@ -50,22 +53,12 @@ class LoadingPipeline:
         else:
             return [data]
 
-    def length(self) -> int:
-        """
-        Returns the exact length of a current epoch. This number can change between epochs.
-        """
-        if self.__current_epoch == self.__initial_epoch:
-            # for the initial epoch, initial_epoch_sample defines the amount of samples to skip
-            return max(0, self.__output_module.length() - self.__initial_epoch_sample)
-        else:
-            return self.__output_module.length()
-
     def approximate_length(self) -> int:
         """
-        Returns an approximated length of a full epoch.
-        The number may not be exact, because the length can change between epochs.
+        Returns the approximated length of a full epoch.
+        The number might not be exact, because the length can change between epochs.
         """
-        return max(0, self.__output_module.length())
+        return max(0, self.__output_module.approximate_length())
 
     def start_next_epoch(self):
         self.__current_epoch += 1
@@ -85,14 +78,20 @@ class LoadingPipeline:
                     module.start(self.__current_epoch)
                 elif isinstance(module, SerialPipelineModule):
                     module.current_variation = self.__current_epoch
-                    module.start(self.__current_epoch)
+                    if self.__current_epoch == self.__initial_epoch:
+                        module.current_index = self.__initial_index
+                        module.start(self.__current_epoch, self.__initial_index)
+                    else:
+                        module.current_index = 0
+                        module.start(self.__current_epoch, 0)
 
         self.__last_initialized_epoch = self.__current_epoch
 
-    def get_item(self, index: int) -> dict:
-        # for the initial epoch, initial_epoch_sample defines the amount of samples to skip
-        if self.__current_epoch == self.__initial_epoch:
-            index += self.__initial_epoch_sample
+    def __next__(self):
+        if not self.__output_module.has_next():
+            raise StopIteration
 
         with torch.no_grad():
-            return self.__output_module.get_item(index)
+            item = self.__output_module.get_next_item()
+            self.__output_module.current_index += 1
+            return item

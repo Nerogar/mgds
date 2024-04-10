@@ -33,7 +33,7 @@ class RandomLatentMaskRemove(
         self.autocast_contexts = [nullcontext()] if autocast_contexts is None else autocast_contexts
         self.dtype = dtype
 
-        self.before_cache_fun = before_cache_fun
+        self.before_cache_fun = lambda: None if before_cache_fun is None else before_cache_fun
 
         self.inputs_outputs = [latent_mask_name]
         if latent_conditioning_image_name is not None:

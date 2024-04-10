@@ -24,7 +24,7 @@ class SaveText(
         self.path = path
         self.before_save_fun = before_save_fun
 
-    def length(self) -> int:
+    def approximate_length(self) -> int:
         return self._get_previous_length(self.text_in_name)
 
     def get_inputs(self) -> list[str]:
@@ -33,7 +33,7 @@ class SaveText(
     def get_outputs(self) -> list[str]:
         return []
 
-    def start(self, variation: int):
+    def start(self, variation: int, start_index: int):
         path = os.path.join(self.path, "epoch-" + str(variation))
         if not os.path.exists(path):
             os.makedirs(path)
@@ -51,5 +51,8 @@ class SaveText(
             with open(os.path.join(path, str(index) + '-' + name + '-' + self.text_in_name + '.txt'), "w") as f:
                 f.write(text)
 
-    def get_item(self, index: int, requested_name: str = None) -> dict:
+    def get_next_item(self) -> dict:
         return {}
+
+    def has_next(self) -> bool:
+        return False

@@ -9,6 +9,13 @@ class RandomAccessPipelineModule(
         super(RandomAccessPipelineModule, self).__init__()
         self.started = False
 
+    @abstractmethod
+    def length(self) -> int:
+        """
+        Returns the number of items this module can return.
+        """
+        pass
+
     def start(self, variation: int):
         """
         Called once when the pipeline is started.

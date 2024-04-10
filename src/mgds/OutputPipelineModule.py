@@ -21,7 +21,7 @@ class OutputPipelineModule(
                 self.input_names.append(name)
                 self.output_names.append(name)
 
-    def length(self) -> int:
+    def approximate_length(self) -> int:
         return self._get_previous_length(self.input_names[0])
 
     def get_inputs(self) -> list[str]:
@@ -30,10 +30,13 @@ class OutputPipelineModule(
     def get_outputs(self) -> list[str]:
         return self.output_names
 
-    def get_item(self, index: int, requested_name: str = None) -> dict:
+    def get_next_item(self) -> dict:
         item = {}
 
         for input_name, output_name in zip(self.input_names, self.output_names):
-            item[output_name] = self._get_previous_item(self.current_variation, input_name, index)
+            item[output_name] = self._get_previous_item(self.current_variation, input_name, self.current_index)
 
         return item
+
+    def has_next(self) -> bool:
+        return self._has_previous_next(self.input_names[0])

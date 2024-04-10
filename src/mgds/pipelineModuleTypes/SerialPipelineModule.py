@@ -8,12 +8,22 @@ class SerialPipelineModule(
     def __init__(self):
         super(SerialPipelineModule, self).__init__()
         self.current_variation = -1
+        self.current_index = -1
 
-    def start(self, variation: int):
+    @abstractmethod
+    def approximate_length(self) -> int:
+        """
+        Returns the approximate number of items this module can return.
+        The number may not be exact if the exact number of items is not known.
+        """
+        pass
+
+    def start(self, variation: int, start_index: int):
         """
         Called once before each variation, starting with the first variation.
 
         :param variation: the variation that is started
+        :param start_index: the index to start iteration from
         """
         pass
 
@@ -27,15 +37,17 @@ class SerialPipelineModule(
         return None
 
     @abstractmethod
-    def get_item(self, index: int, requested_name: str = None) -> dict:
+    def get_next_item(self) -> dict:
         """
-        Called to return an item or partial item from this module.
-        If `requested_name` is None, the entire item should be returned.
-        If `requested_name` is a string, only the specified key needs to be returned,
-        but the whole item can be returned if it improves performance to return everything at once.
+        Called to return the next item from this module.
 
-        :param index: the item index to return
-        :param requested_name: the requested item key
-        :return: an item or partial item
+        :return: an item
+        """
+        pass
+
+    @abstractmethod
+    def has_next(self) -> bool:
+        """
+        Returns True if this module can return at least one more item.
         """
         pass

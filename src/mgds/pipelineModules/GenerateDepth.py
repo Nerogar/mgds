@@ -52,6 +52,7 @@ class GenerateDepth(
 
         with self._all_contexts(self.autocast_contexts):
             image = self.image_depth_processor(image, return_tensors="pt").pixel_values
+            image = image.to(device=self.pipeline.device)
             if self.dtype:
                 image = image.to(self.dtype)
             depth = self.depth_estimator(image).predicted_depth

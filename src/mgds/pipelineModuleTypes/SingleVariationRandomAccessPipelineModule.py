@@ -9,6 +9,13 @@ class SingleVariationRandomAccessPipelineModule(
         super(SingleVariationRandomAccessPipelineModule, self).__init__()
         self.current_variation = -1
 
+    @abstractmethod
+    def length(self) -> int:
+        """
+        Returns the number of items this module can return.
+        """
+        pass
+
     def start(self, variation: int):
         """
         Called once before each variation, starting with the first variation.

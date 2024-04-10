@@ -1,7 +1,7 @@
 import random
 
 import torch
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, IterableDataset
 
 from mgds.ConceptPipelineModule import ConceptPipelineModule
 from mgds.LoadingPipeline import LoadingPipeline
@@ -9,7 +9,7 @@ from mgds.PipelineModule import PipelineModule
 from mgds.SettingsPipelineModule import SettingsPipelineModule
 
 
-class MGDS(Dataset):
+class MGDS(IterableDataset):
     device: torch.device
     loading_pipeline: LoadingPipeline
 
@@ -35,11 +35,8 @@ class MGDS(Dataset):
             initial_epoch_sample,
         )
 
-    def __len__(self):
-        return self.loading_pipeline.length()
-
-    def __getitem__(self, index):
-        return self.loading_pipeline.get_item(index)
+    def __iter__(self):
+        return self.loading_pipeline
 
     def approximate_length(self) -> int:
         return self.loading_pipeline.approximate_length()

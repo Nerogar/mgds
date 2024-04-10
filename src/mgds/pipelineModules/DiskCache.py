@@ -39,7 +39,7 @@ class DiskCache(
 
         self.group_enabled_in_name = group_enabled_in_name
 
-        self.before_cache_fun = before_cache_fun
+        self.before_cache_fun = lambda: None if before_cache_fun is None else before_cache_fun
 
         self.group_variations = {}
         self.group_indices = {}

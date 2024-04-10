@@ -29,7 +29,7 @@ class SaveImage(
         self.in_range_max = in_range_max
         self.before_save_fun = before_save_fun
 
-    def length(self) -> int:
+    def approximate_length(self) -> int:
         return self._get_previous_length(self.image_in_name)
 
     def get_inputs(self) -> list[str]:
@@ -38,7 +38,7 @@ class SaveImage(
     def get_outputs(self) -> list[str]:
         return [self.image_in_name]
 
-    def start(self, variation: int):
+    def start(self, variation: int, start_index: int):
         path = os.path.join(self.path, "epoch-" + str(variation))
         if not os.path.exists(path):
             os.makedirs(path)
@@ -62,5 +62,8 @@ class SaveImage(
             image = t(image_tensor)
             image.save(os.path.join(path, str(index) + '-' + name + '-' + self.image_in_name + ext))
 
-    def get_item(self, index: int, requested_name: str = None) -> dict:
+    def get_next_item(self) -> dict:
         return {}
+
+    def has_next(self) -> bool:
+        return False
