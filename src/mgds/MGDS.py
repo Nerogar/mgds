@@ -5,7 +5,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from mgds.ConceptPipelineModule import ConceptPipelineModule
 from mgds.LoadingPipeline import LoadingPipeline
-from mgds.PipelineModule import PipelineModule
+from mgds.PipelineModule import PipelineModule, PipelineState
 from mgds.SettingsPipelineModule import SettingsPipelineModule
 
 
@@ -20,6 +20,7 @@ class MGDS(Dataset):
             settings: dict,
             definition: [PipelineModule],
             batch_size: int,
+            state: PipelineState,
             seed: int = 42,
             initial_epoch: int = 0,
             initial_epoch_sample: int = 0
@@ -31,6 +32,7 @@ class MGDS(Dataset):
             [ConceptPipelineModule(concepts), SettingsPipelineModule(settings)] + definition,
             batch_size,
             seed,
+            state,
             initial_epoch,
             initial_epoch_sample,
         )

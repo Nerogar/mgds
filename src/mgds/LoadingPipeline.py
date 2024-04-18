@@ -1,6 +1,6 @@
 import torch
 
-from mgds.PipelineModule import PipelineModule
+from mgds.PipelineModule import PipelineModule, PipelineState
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
 from mgds.pipelineModuleTypes.SerialPipelineModule import SerialPipelineModule
 from mgds.pipelineModuleTypes.SingleVariationRandomAccessPipelineModule import SingleVariationRandomAccessPipelineModule
@@ -22,8 +22,9 @@ class LoadingPipeline:
             modules: list[PipelineModule],
             batch_size: int,
             seed: int,
+            state: PipelineState,
             initial_epoch: int = 0,
-            initial_epoch_sample: int = 0,
+            initial_epoch_sample: int = 0
     ):
         self.device = device
         self.modules = list(filter(lambda x: x is not None, self.__flatten(modules)))
@@ -32,7 +33,7 @@ class LoadingPipeline:
                 self.__output_module = module
 
         for index, module in enumerate(self.modules):
-            module.init(self, seed, index)
+            module.init(self, seed, index, state)
 
         self.__batch_size = batch_size
         self.__initial_epoch = initial_epoch
