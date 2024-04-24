@@ -22,7 +22,8 @@ class DiskCache(
             split_names: list[str] | None = None,
             aggregate_names: list[str] | None = None,
             variations_in_name: str | None = None,
-            repeats_in_name: str | None = None,
+            balancing_in_name: str | None = None,
+            balancing_strategy_in_name: str | None = None,
             variations_group_in_name: str | list[str] | None = None,
             group_enabled_in_name: str | None = None,
             before_cache_fun: Callable[[], None] | None = None,
@@ -34,7 +35,8 @@ class DiskCache(
         self.aggregate_names = [] if aggregate_names is None else aggregate_names
 
         self.variations_in_name = variations_in_name
-        self.repeats_in_name = repeats_in_name
+        self.balancing_in_name = balancing_in_name
+        self.balancing_strategy_in_name = balancing_strategy_in_name
         self.variations_group_in_names = \
             [variations_group_in_name] if isinstance(variations_group_in_name, str) else variations_group_in_name
 
@@ -60,9 +62,10 @@ class DiskCache(
     def get_inputs(self) -> list[str]:
         return self.split_names + self.aggregate_names \
             + [self.variations_in_name] if self.variations_in_name else [] \
-            + [self.repeats_in_name] if self.repeats_in_name else [] \
-            + self.variations_group_in_names if self.repeats_in_name else [] \
-            + [self.group_enabled_in_name] if self.repeats_in_name else []
+            + [self.balancing_in_name] if self.variations_in_name else [] \
+            + [self.balancing_strategy_in_name] if self.variations_in_name else [] \
+            + self.variations_group_in_names if self.variations_in_name else [] \
+            + [self.group_enabled_in_name] if self.variations_in_name else []
 
     def get_outputs(self) -> list[str]:
         return self.split_names + self.aggregate_names
@@ -83,14 +86,16 @@ class DiskCache(
         if self.variations_in_name is not None:
             group_variations = {}
             group_indices = {}
-            group_repeats = {}
+            group_balancing = {}
+            group_balancing_strategy = {}
 
             for in_index in range(self._get_previous_length(self.variations_in_name)):
                 if self.group_enabled_in_name and not self._get_previous_item(0, self.group_enabled_in_name, in_index):
                     continue
 
                 variations = self._get_previous_item(0, self.variations_in_name, in_index)
-                repeats = self._get_previous_item(0, self.repeats_in_name, in_index)
+                balancing = self._get_previous_item(0, self.balancing_in_name, in_index)
+                balancing_strategy = self._get_previous_item(0, self.balancing_strategy_in_name, in_index)
                 group_key = self.__string_key(
                     [self._get_previous_item(0, name, in_index) for name in self.variations_group_in_names]
                 )
@@ -102,13 +107,19 @@ class DiskCache(
                     group_indices[group_key] = []
                 group_indices[group_key].append(in_index)
 
-                if group_key not in group_repeats:
-                    group_repeats[group_key] = repeats
+                if group_key not in group_balancing:
+                    group_balancing[group_key] = balancing
+
+                if group_key not in group_balancing_strategy:
+                    group_balancing_strategy[group_key] = balancing_strategy
 
             group_output_samples = {}
-            for group_key, repeats in group_repeats.items():
-                num = int(math.floor(len(group_indices[group_key]) * repeats))
-                group_output_samples[group_key] = num
+            for group_key, balancing in group_balancing.items():
+                balancing_strategy = group_balancing_strategy[group_key]
+                if balancing_strategy == 'REPEATS':
+                    group_output_samples[group_key] = int(math.floor(len(group_indices[group_key]) * balancing))
+                if balancing_strategy == 'SAMPLES':
+                    group_output_samples[group_key] = int(balancing)
         else:
             first_previous_name = self.split_names[0] if len(self.split_names) > 0 else self.aggregate_names[0]
 
