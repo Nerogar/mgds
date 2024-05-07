@@ -34,6 +34,9 @@ class OutputPipelineModule(
         item = {}
 
         for input_name, output_name in zip(self.input_names, self.output_names):
+            if self._get_previous_length(input_name) <= self.current_index:
+                raise StopIteration
+
             item[output_name] = self._get_previous_item(self.current_variation, input_name, self.current_index)
 
         return item

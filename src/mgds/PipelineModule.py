@@ -153,7 +153,7 @@ class PipelineModule(metaclass=ABCMeta):
             if item_name in module.get_outputs():
                 if module.__local_cache.length_cache < 0:
                     if isinstance(module, SerialPipelineModule):
-                        module.__length_cache = module.approximate_length()
+                        module.__local_cache.length_cache = module.approximate_length()
                     else:
                         module.__local_cache.length_cache = module.length()
                 return module.__local_cache.length_cache
