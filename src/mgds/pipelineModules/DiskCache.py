@@ -49,9 +49,6 @@ class DiskCache(
         self.group_output_samples = {}
         self.variations_initialized = False
 
-        if len(self.split_names) + len(self.aggregate_names) == 0:
-            raise ValueError('No cache items supplied')
-
     def length(self) -> int:
         if not self.variations_initialized:
             name = self.split_names[0] if len(self.split_names) > 0 else self.aggregate_names[0]
