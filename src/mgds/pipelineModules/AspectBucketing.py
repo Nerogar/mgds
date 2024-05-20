@@ -36,8 +36,8 @@ class AspectBucketing(
         self.crop_resolution_out_name = crop_resolution_out_name
         self.possible_resolutions_out_name = possible_resolutions_out_name
 
-        self.possible_resolutions = {}
-        self.possible_aspects = {}
+        self.bucket_resolutions = {}
+        self.bucket_aspects = {}
         self.flattened_possible_resolutions = []
 
     def length(self) -> int:
@@ -54,8 +54,16 @@ class AspectBucketing(
     def get_outputs(self) -> list[str]:
         return [self.scale_resolution_out_name, self.crop_resolution_out_name, self.possible_resolutions_out_name]
 
-    @staticmethod
-    def __create_buckets(target_resolutions: list[int], quantization: int) -> (np.ndarray, np.ndarray):
+    def __quantize_resolution(self, resolution: tuple[int, int], quantization: int) -> tuple[int, int]:
+        return (
+            round(resolution[0] / quantization) * quantization,
+            round(resolution[1] / quantization) * quantization,
+        )
+
+    def __create_automatic_buckets(
+            self,
+            target_resolutions: list[int],
+    ) -> tuple[dict[int, list[tuple[int, int]]], dict[int, list[float]]]:
         # all possible target aspect ratios
         all_possible_input_aspects = [
             (1.0, 1.0),
@@ -83,10 +91,8 @@ class AspectBucketing(
             new_resolutions = new_resolutions + [(w, h) for (h, w) in new_resolutions]
 
             # quantization
-            new_resolutions = [(
-                round(h / quantization) * quantization,
-                round(w / quantization) * quantization,
-            ) for (h, w) in new_resolutions]
+            new_resolutions = [self.__quantize_resolution(resolution, self.quantization) for resolution in
+                               new_resolutions]
 
             # remove duplicates
             new_resolutions = list(set(new_resolutions))
@@ -97,10 +103,10 @@ class AspectBucketing(
 
         return possible_resolutions, possible_aspects
 
-    def __get_bucket(self, rand: Random, h: int, w: int, target_resolution: int):
+    def __get_bucket(self, rand: Random, h: int, w: int, target_resolution: int) -> tuple[int, int]:
         aspect = h / w
-        bucket_index = np.argmin(abs(self.possible_aspects[target_resolution] - aspect))
-        return self.possible_resolutions[target_resolution][bucket_index]
+        bucket_index = np.argmin(abs(self.bucket_aspects[target_resolution] - aspect))
+        return self.bucket_resolutions[target_resolution][bucket_index]
 
     def get_meta(self, variation: int, name: str) -> Any:
         if name == self.possible_resolutions_out_name:
@@ -110,26 +116,41 @@ class AspectBucketing(
 
     def start(self, variation: int):
         possible_target_resolutions = set()
+        possible_fixed_resolutions = set()
 
         for index in range(self._get_previous_length(self.target_resolutions_in_name)):
             resolutions = self._get_previous_item(variation, self.target_resolutions_in_name, index)
-            if isinstance(resolutions, int):
-                possible_target_resolutions.add(resolutions)
-            elif isinstance(resolutions, str):
+            if 'x' in resolutions and ',' not in resolutions:
+                res = resolutions.strip().split('x')
+                possible_fixed_resolutions.add(
+                    self.__quantize_resolution(
+                        (int(res[1]), int(res[0])), self.quantization
+                    )
+                )
+            else:
                 possible_target_resolutions |= set([int(res.strip()) for res in resolutions.split(',')])
 
         if self.target_resolutions_override_in_name is not None:
             for index in range(self._get_previous_length(self.target_resolutions_override_in_name)):
                 resolutions = self._get_previous_item(variation, self.target_resolutions_override_in_name, index)
-                if isinstance(resolutions, int):
-                    possible_target_resolutions.add(resolutions)
-                elif isinstance(resolutions, str):
+                if 'x' in resolutions and ',' not in resolutions:
+                    res = resolutions.strip().split('x')
+                    possible_fixed_resolutions.add(
+                        self.__quantize_resolution(
+                            (int(res[1]), int(res[0])), self.quantization
+                        )
+                    )
+                else:
                     possible_target_resolutions |= set([int(res.strip()) for res in resolutions.split(',')])
 
-        self.possible_resolutions, self.possible_aspects = \
-            self.__create_buckets(list(possible_target_resolutions), self.quantization)
-        self.flattened_possible_resolutions = list(set(sum(self.possible_resolutions.values(), [])))
-        self.possible_aspects = {k: np.array(v) for (k, v) in self.possible_aspects.items()}
+        self.bucket_resolutions, self.bucket_aspects = \
+            self.__create_automatic_buckets(list(possible_target_resolutions))
+
+        self.flattened_possible_resolutions = list(
+            set(sum(self.bucket_resolutions.values(), [])) | possible_fixed_resolutions
+        )
+
+        self.bucket_aspects = {k: np.array(v) for (k, v) in self.bucket_aspects.items()}
 
     def get_item(self, variation: int, index: int, requested_name: str = None) -> dict:
         rand = self._get_rand(variation, index)
@@ -142,10 +163,16 @@ class AspectBucketing(
             if enable_resolution_override:
                 target_resolutions = self._get_previous_item(variation, self.target_resolutions_override_in_name, index)
 
-        target_resolutions = [int(res.strip()) for res in target_resolutions.split(',')]
+        if 'x' in target_resolutions and ',' not in target_resolutions:
+            res = target_resolutions.strip().split('x')
+            target_resolution = self.__quantize_resolution(
+                (int(res[1]), int(res[0])), self.quantization
+            )
+        else:
+            target_resolutions = [int(res.strip()) for res in target_resolutions.split(',')]
 
-        target_resolution = rand.choice(target_resolutions)
-        target_resolution = self.__get_bucket(rand, resolution[0], resolution[1], target_resolution)
+            target_resolution = rand.choice(target_resolutions)
+            target_resolution = self.__get_bucket(rand, resolution[0], resolution[1], target_resolution)
 
         aspect = resolution[0] / resolution[1]
         target_aspect = target_resolution[0] / target_resolution[1]
