@@ -18,6 +18,7 @@ class LoadingPipeline(Iterator):
     __batch_size: int
     __initial_epoch: int
     __initial_index: int
+    __mark_reset_serial_modules: bool
 
     def __init__(
             self,
@@ -45,6 +46,8 @@ class LoadingPipeline(Iterator):
         self.__current_epoch = initial_epoch - 1
         self.__last_initialized_epoch = -1
 
+        self.__mark_reset_serial_modules = False
+
     def __flatten(self, data: list | object) -> list:
         if isinstance(data, list):
             new_list = []
@@ -60,6 +63,21 @@ class LoadingPipeline(Iterator):
         The number might not be exact, because the length can change between epochs.
         """
         return max(0, self.__output_module.approximate_length())
+
+    def reset_serial_modules_before(self, module_index: int):
+        with torch.no_grad():
+            for module in self.modules[:module_index + 1]:
+                # At the start of each epoch, the previous cache is cleared.
+                # This prevents duplicating samples when training on single images.
+                module.clear_item_cache()
+
+                if isinstance(module, SerialPipelineModule):
+                    if self.__current_epoch == self.__initial_epoch:
+                        module.current_index = self.__initial_index
+                        module.start(self.__current_epoch, self.__initial_index)
+                    else:
+                        module.current_index = 0
+                        module.start(self.__current_epoch, 0)
 
     def start_next_epoch(self):
         self.__current_epoch += 1
@@ -88,7 +106,13 @@ class LoadingPipeline(Iterator):
 
         self.__last_initialized_epoch = self.__current_epoch
 
+        self.__mark_reset_serial_modules = True
+
     def __next__(self):
+        if self.__mark_reset_serial_modules:
+            self.__mark_reset_serial_modules = False
+            self.reset_serial_modules_before(len(self.modules) - 1)
+
         if not self.__output_module.has_next():
             raise StopIteration
 

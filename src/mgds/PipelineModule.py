@@ -102,7 +102,10 @@ class PipelineModule(metaclass=ABCMeta):
                         if variation != module.current_variation:
                             self.__raise_variation_error(module, name, module.current_variation, variation)
                         if index != module.current_index:
-                            self.__raise_index_error(module, name, module.current_index, index)
+                            if index == 0:
+                                self.pipeline.reset_serial_modules_before(previous_module_index)
+                            else:
+                                self.__raise_index_error(module, name, module.current_index, index)
                         item = module.get_next_item()
                         module.current_index += 1
                     module.__local_cache.variation_cache_index = variation
@@ -119,13 +122,6 @@ class PipelineModule(metaclass=ABCMeta):
                         if variation != module.current_variation:
                             self.__raise_variation_error(module, name, module.current_variation, variation)
                         item = module.get_item(index, item_name)
-                    if isinstance(module, SerialPipelineModule):
-                        if variation != module.current_variation:
-                            self.__raise_variation_error(module, name, module.current_variation, variation)
-                        if index != module.current_index:
-                            self.__raise_index_error(module, name, module.current_index, index)
-                        item = module.get_next_item()
-                        module.current_index += 1
                     module.__local_cache.item_cache.update(item)
                     item = item[item_name]
 

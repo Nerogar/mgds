@@ -4,12 +4,12 @@ from typing import Callable
 from tqdm import tqdm
 
 from mgds.PipelineModule import PipelineModule
-from mgds.pipelineModuleTypes.SerialPipelineModule import SerialPipelineModule
+from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
 
 
 class SaveText(
     PipelineModule,
-    SerialPipelineModule,
+    RandomAccessPipelineModule,
 ):
     def __init__(
             self,
@@ -33,7 +33,10 @@ class SaveText(
     def get_outputs(self) -> list[str]:
         return []
 
-    def start(self, variation: int, start_index: int):
+    def length(self) -> int:
+        return 0
+
+    def start(self, variation: int):
         path = os.path.join(self.path, "epoch-" + str(variation))
         if not os.path.exists(path):
             os.makedirs(path)
@@ -51,8 +54,5 @@ class SaveText(
             with open(os.path.join(path, str(index) + '-' + name + '-' + self.text_in_name + '.txt'), "w") as f:
                 f.write(text)
 
-    def get_next_item(self) -> dict:
+    def get_item(self, variation: int, index: int, requested_name: str = None) -> dict:
         return {}
-
-    def has_next(self) -> bool:
-        return False
