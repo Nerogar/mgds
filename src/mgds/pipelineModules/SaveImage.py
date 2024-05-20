@@ -1,6 +1,7 @@
 import os
 from typing import Callable
 
+import torch
 from torchvision import transforms
 from tqdm import tqdm
 
@@ -59,7 +60,7 @@ class SaveImage(
 
             image_tensor = (image_tensor - self.in_range_min) / (self.in_range_max - self.in_range_min)
 
-            image = t(image_tensor)
+            image = t(image_tensor.to(dtype=torch.float32))
             image.save(os.path.join(path, str(index) + '-' + name + '-' + self.image_in_name + ext))
 
     def get_next_item(self) -> dict:
