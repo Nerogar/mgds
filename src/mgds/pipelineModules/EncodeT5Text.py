@@ -13,7 +13,7 @@ class EncodeT5Text(
     def __init__(
             self,
             tokens_in_name: str,
-            tokens_attention_mask_in_name: str,
+            tokens_attention_mask_in_name: str | None,
             hidden_state_out_name: str,
             pooled_out_name: str | None,
             text_encoder: T5EncoderModel,
@@ -48,10 +48,13 @@ class EncodeT5Text(
 
     def get_item(self, variation: int, index: int, requested_name: str = None) -> dict:
         tokens = self._get_previous_item(variation, self.tokens_in_name, index)
-        tokens_attention_mask = self._get_previous_item(variation, self.tokens_attention_mask_in_name, index)
-
         tokens = tokens.unsqueeze(0)
-        tokens_attention_mask = tokens_attention_mask.unsqueeze(0)
+
+        if self.tokens_attention_mask_in_name is not None:
+            tokens_attention_mask = self._get_previous_item(variation, self.tokens_attention_mask_in_name, index)
+            tokens_attention_mask = tokens_attention_mask.unsqueeze(0)
+        else:
+            tokens_attention_mask = None
 
         with self._all_contexts(self.autocast_contexts):
             if tokens_attention_mask is not None and self.dtype:
@@ -64,7 +67,7 @@ class EncodeT5Text(
                 return_dict=True,
             )
 
-        hidden_states = text_encoder_output.hidden_states[:-1]
+        hidden_states = text_encoder_output.hidden_states
         if self.pooled_out_name:
             pooled_state = text_encoder_output.text_embeds
         else:
@@ -75,7 +78,7 @@ class EncodeT5Text(
 
         hidden_state = hidden_states[self.hidden_state_output_index]
 
-        if self.add_layer_norm:
+        if self.hidden_state_output_index != -1 and self.add_layer_norm:
             with self._all_contexts(self.autocast_contexts):
                 final_layer_norm = self.text_encoder.encoder.final_layer_norm
                 hidden_state = final_layer_norm(
