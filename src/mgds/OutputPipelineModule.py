@@ -39,6 +39,9 @@ class OutputPipelineModule(
 
             item[output_name] = self._get_previous_item(self.current_variation, input_name, self.current_index)
 
+        # filter out None values
+        item = {k: v for k, v in item.items() if v is not None}
+
         return item
 
     def has_next(self) -> bool:
