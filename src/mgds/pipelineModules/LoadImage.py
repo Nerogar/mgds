@@ -1,6 +1,7 @@
 import torch
 from PIL import Image
 from torchvision import transforms
+from torchvision.io import ImageReadMode, read_image
 
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
@@ -30,8 +31,9 @@ class LoadImage(
 
         if channels == 3:
             self.mode = 'RGB'
+            self.mode = ImageReadMode.RGB
         elif channels == 1:
-            self.mode = 'L'
+            self.mode = ImageReadMode.GRAY
         else:
             raise ValueError('Only 1 and 3 channels are supported.')
 
@@ -48,15 +50,13 @@ class LoadImage(
         path = self._get_previous_item(variation, self.path_in_name, index)
 
         try:
-            image = Image.open(path)
-            image = image.convert(self.mode)
-
-            t = transforms.ToTensor()
-            image_tensor = t(image).to(device=self.pipeline.device)
+            image_tensor = read_image(path, self.mode).to(device=self.pipeline.device)
 
             if self.dtype:
                 image_tensor = image_tensor.to(dtype=self.dtype)
 
+            # Transform 0 - 255 to 0-1
+            image_tensor = image_tensor / 255
             image_tensor = image_tensor * (self.range_max - self.range_min) + self.range_min
         except FileNotFoundError:
             image_tensor = None
