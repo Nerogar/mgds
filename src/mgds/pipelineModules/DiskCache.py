@@ -199,7 +199,7 @@ class DiskCache(
                               in enumerate(self.group_indices[group_key]))
                         for i, f in enumerate(concurrent.futures.as_completed(fs)):
                             f.result()
-                            if i % 100 == 0:
+                            if i % 250 == 0:
                                 self._torch_gc()
                             bar.update(1)
 
