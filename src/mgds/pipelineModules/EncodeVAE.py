@@ -42,8 +42,19 @@ class EncodeVAE(
         if self.dtype:
             image = image.to(dtype=self.dtype)
 
-        with self._all_contexts(self.autocast_contexts):
-            latent_distribution = self.vae.encode(image.unsqueeze(0)).latent_dist
+        # With high concurrency, we can occasionally get memory spikes here
+        # that prevent allocation even if we're nowhere near the memory limit
+        # of the GPU. So try a few times.
+        retries = 0
+        while True:
+            try:
+                with self._all_contexts(self.autocast_contexts):
+                    latent_distribution = self.vae.encode(image.unsqueeze(0)).latent_dist
+                    break
+            except RuntimeError:
+                retries += 1
+                if retries > 3:
+                    raise
 
         return {
             self.out_name: latent_distribution

@@ -198,8 +198,13 @@ class DiskCache(
                               for (group_index, in_index)
                               in enumerate(self.group_indices[group_key]))
                         for i, f in enumerate(concurrent.futures.as_completed(fs)):
-                            f.result()
-                            if i % 100 == 0:
+                            try:
+                                f.result()
+                            except:
+                                self._state.executor.shutdown(
+                                    wait=True, cancel_futures=True)
+                                raise
+                            if i % 250 == 0:
                                 self._torch_gc()
                             bar.update(1)
 
