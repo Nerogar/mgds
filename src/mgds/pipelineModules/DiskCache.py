@@ -151,6 +151,11 @@ class DiskCache(
 
         return cache_exists and caching_done
 
+    def __clone_for_cache(self, x: Any):
+        if isinstance(x, torch.Tensor):
+            return x.clone()
+        return x
+
     def __refresh_cache(self, out_variation: int):
         if not self.variations_initialized:
             self.__init_variations()
@@ -187,9 +192,9 @@ class DiskCache(
 
                             with torch.no_grad():
                                 for name in self.split_names:
-                                    split_item[name] = self._get_previous_item(in_variation, name, in_index)
+                                    split_item[name] = self.__clone_for_cache(self._get_previous_item(in_variation, name, in_index))
                                 for name in self.aggregate_names:
-                                    aggregate_item[name] = self._get_previous_item(in_variation, name, in_index)
+                                    aggregate_item[name] = self.__clone_for_cache(self._get_previous_item(in_variation, name, in_index))
 
                             torch.save(split_item, os.path.realpath(os.path.join(cache_dir, str(group_index) + '.pt')))
                             aggregate_cache[group_index] = aggregate_item
