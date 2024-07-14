@@ -185,10 +185,11 @@ class DiskCache(
                             split_item = {}
                             aggregate_item = {}
 
-                            for name in self.split_names:
-                                split_item[name] = self._get_previous_item(in_variation, name, in_index)
-                            for name in self.aggregate_names:
-                                aggregate_item[name] = self._get_previous_item(in_variation, name, in_index)
+                            with torch.no_grad():
+                                for name in self.split_names:
+                                    split_item[name] = self._get_previous_item(in_variation, name, in_index)
+                                for name in self.aggregate_names:
+                                    aggregate_item[name] = self._get_previous_item(in_variation, name, in_index)
 
                             torch.save(split_item, os.path.realpath(os.path.join(cache_dir, str(group_index) + '.pt')))
                             aggregate_cache[group_index] = aggregate_item
