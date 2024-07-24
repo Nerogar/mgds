@@ -48,7 +48,7 @@ class GenerateImageLike(
         image = Image.new(mode=self.mode, size=(original_image.shape[2], original_image.shape[1]), color=self.color)
 
         t = transforms.ToTensor()
-        image_tensor = t(image).to(device=self.pipeline.device)
+        image_tensor = t(image).to(device=self.pipeline.device, dtype=original_image.dtype)
 
         image_tensor = image_tensor * (self.range_max - self.range_min) + self.range_min
 
