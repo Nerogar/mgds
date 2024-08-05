@@ -1,5 +1,5 @@
 import torch
-from PIL import Image
+from PIL import Image, ImageOps
 from torchvision import transforms
 from torchvision.io import ImageReadMode, read_image
 
@@ -51,7 +51,8 @@ class LoadImage(
         path = self._get_previous_item(variation, self.path_in_name, index)
 
         try:
-            image_tensor = read_image(path, self.mode).to(device=self.pipeline.device)
+            image_tensor = read_image(path, self.mode, apply_exif_orientation=True) \
+                .to(device=self.pipeline.device)
 
             if self.dtype:
                 image_tensor = image_tensor.to(dtype=self.dtype)
@@ -80,6 +81,7 @@ class LoadImage(
         """
         try:
             image = Image.open(path)
+            image = ImageOps.exif_transpose(image)
             image = image.convert(self.pillow_mode)
 
             t = transforms.ToTensor()
