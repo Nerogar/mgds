@@ -70,7 +70,11 @@ class EncodeClipText(
 
         hidden_states = text_encoder_output.hidden_states
         if self.pooled_out_name:
-            pooled_state = text_encoder_output.text_embeds
+            if hasattr(text_encoder_output, "text_embeds"):
+                pooled_state = text_encoder_output.text_embeds
+            if hasattr(text_encoder_output, "pooler_output"):
+                pooled_state = text_encoder_output.pooler_output
+
         else:
             pooled_state = None
 
