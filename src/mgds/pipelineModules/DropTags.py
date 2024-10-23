@@ -3,6 +3,7 @@ from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipe
 import csv
 import re
 import os
+import functools
 
 
 class DropTags(
@@ -42,7 +43,7 @@ class DropTags(
 
     def get_outputs(self) -> list[str]:
         return [self.text_out_name]
-
+    
     def get_item(self, variation: int, index: int, requested_name: str = None) -> dict:
         text = self._get_previous_item(variation, self.text_in_name, index)
         delimiter = self._get_previous_item(variation, self.delimiter_in_name, index)
@@ -55,6 +56,23 @@ class DropTags(
         regex_enabled = self._get_previous_item(variation, self.regex_enabled_in_name, index)
         rand = self._get_rand(variation, index)
 
+        #convert special_tags to list depending on whether it's a newline-separated csv/txt file or a delimiter-separated string
+        #cached to reduce file read operations
+        @functools.lru_cache
+        def cache_special_tags(sptags, delim):
+            if (sptags.endswith(".txt") and os.path.isfile(sptags)):
+                with open(sptags) as special_tags_file:
+                    return [line.rstrip('\n') for line in special_tags_file]
+            elif (sptags.endswith(".csv") and os.path.isfile(sptags)):
+                with open(sptags, 'r') as special_tags_file:
+                    splist = []
+                    for row in csv.reader(special_tags_file):
+                        splist.append(row[0])
+                    return splist
+            else:
+                return [tag.strip() for tag in sptags.split(delim)]
+    
+
         if enabled and (probability > 0):
             #convert inputs to lists and set up final output list (pruned) and white/blacklist (special)
             tags = [tag.strip() for tag in text.split(delimiter)]
@@ -64,16 +82,7 @@ class DropTags(
             special_tags_prelist = []
             special_tags_list = []
 
-            #convert special_tags to list depending on whether it's a newline-separated csv/txt file or a delimiter-separated string
-            if (special_tags.endswith(".txt") and os.path.isfile(special_tags)):
-                with open(special_tags) as special_tags_file:
-                    special_tags_prelist = [line.rstrip('\n') for line in special_tags_file]
-            elif (special_tags.endswith(".csv") and os.path.isfile(special_tags)):
-                with open(special_tags, 'r') as special_tags_file:
-                    for row in csv.reader(special_tags_file):
-                        special_tags_prelist.append(row[0])
-            else:
-                special_tags_prelist = [tag.strip() for tag in special_tags.split(delimiter)]
+            special_tags_prelist = cache_special_tags(special_tags, delimiter)
 
             #match any regex expressions in the special tags prelist to tags in the dropout list and create a new list of all matching tags
             #if any sort of (tag weighting:1.2) or {other|special|syntax} is added in the future this may need to be changed
