@@ -47,7 +47,7 @@ class DropTags(
     #convert special_tags to list depending on whether it's a newline-separated csv/txt file or a delimiter-separated string
     #cached to reduce file read operations
     @functools.lru_cache
-    def get_special_tags(sptags, delim):
+    def get_special_tags(self, sptags, delim):
         if (sptags.endswith(".txt") and os.path.isfile(sptags)):
             with open(sptags) as special_tags_file:
                 return [line.rstrip('\n') for line in special_tags_file]
@@ -60,10 +60,8 @@ class DropTags(
         else:
             return [tag.strip() for tag in sptags.split(delim)]
 
-    #parse regex expressions, create new special list based on matches
-    #cached to possibly improve performance
-    @functools.lru_cache    
-    def parse_regex(splist_in, taglist):
+    #parse regex expressions, create new special list based on matches   
+    def parse_regex(self, splist_in, taglist):
         splist_out = []
         regex_spchars = set(".^$*+?!\{\}\[\]|()\\")
         for c in splist_in:
@@ -79,7 +77,7 @@ class DropTags(
         return splist_out    
     
     #change probability evaluated against random() depending on mode
-    def probability_weighted(p, mode, i, len):
+    def probability_weighted(self, p, mode, i, len):
         if mode == "RANDOM":
             return float(p)
         elif mode == "RANDOM WEIGHTED":
