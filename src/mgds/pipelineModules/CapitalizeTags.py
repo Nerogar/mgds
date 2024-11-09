@@ -11,7 +11,7 @@ class CapitalizeTags(
             self,
             text_in_name: str,
             enabled_in_name: str,
-            probability_in_name: float,         #from 0-1, probability capitalization adjustment will be applied to each tag
+            probability_in_name: str,         #from 0-1, probability capitalization adjustment will be applied to each tag
             capitalize_mode_in_name: str,       #comma-separated list of which caps changes can be applied, accepts "capslock, title, first, random"
             delimiter_in_name: str,
             convert_lowercase_in_name: str,     #whether to apply lowercase to entire caption before any other caps changes
@@ -44,12 +44,11 @@ class CapitalizeTags(
         convert_lowercase = self._get_previous_item(variation, self.convert_lowercase_in_name, index)
         rand = self._get_rand(variation, index)
 
-
         #if convert_lower is enabled always convert caption to lowercase before any other changes
         if convert_lowercase:
             text = text.lower()
 
-        #randomly pick one of the capitialization methods for each tag
+        #randomly pick one of the capitalization methods for each tag
         if enabled and (probability > 0):
             text_list = []
             for s in [tag.strip() for tag in text.split(delimiter)]:

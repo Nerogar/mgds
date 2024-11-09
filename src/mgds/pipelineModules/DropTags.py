@@ -86,14 +86,15 @@ class DropTags(
         return splist_out    
     
     #change probability evaluated against random() depending on mode
-    def probability_weighted(self, p: float, mode: str, i: int, len: int) -> float:
+
+    def probability_weighted(self, p: float, mode: str, i: int, input_length: int) -> float:
         if mode == "RANDOM":
             return p
         elif mode == "RANDOM WEIGHTED":
-            return p*(i/len)
-        else:   #if unexpected "mode" given default to return p directly
+            return p * (i / input_length)
+        else:  # if unexpected "mode" given default to return p directly
             return p
-    
+
     def get_item(self, variation: int, index: int, requested_name: str = None) -> dict:
         text = self._get_previous_item(variation, self.text_in_name, index)
         delimiter = self._get_previous_item(variation, self.delimiter_in_name, index)
@@ -127,7 +128,6 @@ class DropTags(
 
             #remove duplicates
             special_tags_list = list(set(special_tags_list))
-                    
 
             if dropout_mode == "FULL" and rand.random() < probability:
                 #keep only whitelist tags if random < probability, or any non-blacklist tags
