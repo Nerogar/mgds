@@ -50,25 +50,29 @@ class LoadImage(
     def get_item(self, variation: int, index: int, requested_name: str = None) -> dict:
         path = self._get_previous_item(variation, self.path_in_name, index)
 
-        try:
-            image_tensor = read_image(path, self.mode, apply_exif_orientation=True) \
-                .to(device=self.pipeline.device)
-
-            if self.dtype:
-                image_tensor = image_tensor.to(dtype=self.dtype)
-
-            # Transform 0 - 255 to 0-1
-            image_tensor = image_tensor / 255
-            image_tensor = image_tensor * (self.range_max - self.range_min) + self.range_min
-        except FileNotFoundError:
-            image_tensor = None
-        except RuntimeError:
-            # Torch builtins couldn't load it because not all image formats and
-            # variations there are supported. Fall back to pillow.
+        # temporary workaround for a torchvision memory leak https://github.com/pytorch/vision/issues/8710
+        if path.endswith('.webp'):
             image_tensor = self._load_pillow(path)
-        except:
-            print("could not load image, it might be corrupted: " + path)
-            raise
+        else:
+            try:
+                image_tensor = read_image(path, self.mode, apply_exif_orientation=True) \
+                    .to(device=self.pipeline.device)
+
+                if self.dtype:
+                    image_tensor = image_tensor.to(dtype=self.dtype)
+
+                # Transform 0 - 255 to 0-1
+                image_tensor = image_tensor / 255
+                image_tensor = image_tensor * (self.range_max - self.range_min) + self.range_min
+            except FileNotFoundError:
+                image_tensor = None
+            except RuntimeError:
+                # Torch builtins couldn't load it because not all image formats and
+                # variations there are supported. Fall back to pillow.
+                image_tensor = self._load_pillow(path)
+            except:
+                print("could not load image, it might be corrupted: " + path)
+                raise
 
         return {
             self.image_out_name: image_tensor
