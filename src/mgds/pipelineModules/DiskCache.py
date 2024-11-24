@@ -156,6 +156,21 @@ class DiskCache(
             return x.clone()
         return x
 
+    """
+    Utility func to standardize splitting up items into scalable
+    subdirs. This allows better scaling than 100,000 items in
+    a single subdirectory. Currently we divide by 10,000
+
+     index "12" returns "0", "0/12.pt"
+     index "21034" returns "2", "2/21034.pt"
+     index "56712345" returns "5671", "5671/56712345.pt"
+    """
+    def __item_subpaths(self, indexnum) -> tuple[str,str]:
+        dirnum=str(indexnum // 10000)
+        filename=str(indexnum) + '.pt'
+        return dirnum, dirnum + '/' + filename
+        
+
     def __refresh_cache(self, out_variation: int):
         if not self.variations_initialized:
             self.__init_variations()
@@ -196,7 +211,9 @@ class DiskCache(
                                 for name in self.aggregate_names:
                                     aggregate_item[name] = self.__clone_for_cache(self._get_previous_item(in_variation, name, in_index))
 
-                            torch.save(split_item, os.path.realpath(os.path.join(cache_dir, str(group_index) + '.pt')))
+                            dirname,itempath = self.__item_subpaths(group_index)
+                            os.makedirs(os.path.realpath(os.path.join(cache_dir, dirname)), exist_ok=True)
+                            torch.save(split_item, os.path.realpath(os.path.join(cache_dir, itempath)))
                             aggregate_cache[group_index] = aggregate_item
 
                         fs = (self._state.executor.submit(
@@ -250,7 +267,9 @@ class DiskCache(
                 item[name] = aggregate_item[name]
 
         elif requested_name in self.split_names:
-            cache_path = os.path.join(self.__get_cache_dir(group_key, in_variation), str(group_index) + '.pt')
+            _, item_path = self.__item_subpaths(group_index)
+
+            cache_path = os.path.join(self.__get_cache_dir(group_key, in_variation), item_path)
             split_item = torch.load(os.path.realpath(cache_path), weights_only=False)
 
             for name in self.split_names:
