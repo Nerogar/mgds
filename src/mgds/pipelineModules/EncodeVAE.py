@@ -1,7 +1,7 @@
 from contextlib import nullcontext
 
 import torch
-from diffusers import AutoencoderKL
+from diffusers import AutoencoderKL, AutoencoderDC
 
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
@@ -15,7 +15,7 @@ class EncodeVAE(
             self,
             in_name: str,
             out_name: str,
-            vae: AutoencoderKL,
+            vae: AutoencoderKL | AutoencoderDC,
             autocast_contexts: list[torch.autocast | None] = None,
             dtype: torch.dtype | None = None,
     ):
@@ -49,7 +49,11 @@ class EncodeVAE(
         while True:
             try:
                 with self._all_contexts(self.autocast_contexts):
-                    latent_distribution = self.vae.encode(image.unsqueeze(0)).latent_dist
+                    vae_output = self.vae.encode(image.unsqueeze(0))
+                    if hasattr(vae_output, "latent_dist"):
+                        output = vae_output.latent_dist
+                    if hasattr(vae_output, "latent"):
+                        output = vae_output.latent.squeeze()
                     break
             except RuntimeError:
                 retries += 1
@@ -57,5 +61,5 @@ class EncodeVAE(
                     raise
 
         return {
-            self.out_name: latent_distribution
+            self.out_name: output
         }
