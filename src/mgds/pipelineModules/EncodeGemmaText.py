@@ -72,7 +72,7 @@ class EncodeGemmaText(
 
         if self.hidden_state_output_index != -1 and self.add_layer_norm:
             with self._all_contexts(self.autocast_contexts):
-                final_layer_norm = self.text_encoder.encoder.final_layer_norm
+                final_layer_norm = self.text_encoder.norm
                 hidden_state = final_layer_norm(
                     hidden_state
                 )
