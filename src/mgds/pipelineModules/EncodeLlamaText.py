@@ -63,6 +63,7 @@ class EncodeLlamaText(
                 attention_mask=tokens_attention_mask,
                 output_hidden_states=True,
                 return_dict=True,
+                use_cache=False,
             )
 
         hidden_states = text_encoder_output.hidden_states
