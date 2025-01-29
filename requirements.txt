@@ -1,10 +1,10 @@
---extra-index-url https://download.pytorch.org/whl/cu118
-torch==2.0.1+cu118
-torchvision==0.15.2+cu118
+--extra-index-url https://download.pytorch.org/whl/cu124
+torch==2.5.1+cu124
+torchvision==0.20.1+cu124
 numpy==1.23.5
-opencv-python==4.7.0.72
-pillow==9.3.0
-tqdm==4.64.1
-safetensors==0.3.1
-git+https://github.com/huggingface/diffusers.git@78922ed#egg=diffusers
-git+https://github.com/huggingface/transformers.git@656e869#egg=transformers
+opencv-python==4.10.0.84
+pillow==11.0.0
+tqdm==4.66.6
+safetensors==0.4.5
+transformers==4.47.0
+-e git+https://github.com/huggingface/diffusers.git@f35a387#egg=diffusers
