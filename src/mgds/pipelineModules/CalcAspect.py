@@ -23,7 +23,7 @@ class CalcAspect(
     def get_item(self, variation: int, index: int, requested_name: str = None) -> dict:
         image = self._get_previous_item(variation, self.image_in_name, index)
 
-        height, width = image.shape[1], image.shape[2]
+        height, width = image.shape[-2], image.shape[-1]
 
         return {
             self.resolution_out_name: (height, width),
