@@ -13,22 +13,22 @@ class LoadVideo(
     def __init__(
             self,
             path_in_name: str,
+            target_frame_count_in_name: str,
             video_out_name: str,
             range_min: float,
             range_max: float,
-            target_frame_count: int,
             target_frame_rate: float,
             supported_extensions: set[str],
             dtype: torch.dtype | None = None,
     ):
         super().__init__()
         self.path_in_name = path_in_name
+        self.target_frame_count_in_name = target_frame_count_in_name
         self.video_out_name = video_out_name
 
         self.range_min = range_min
         self.range_max = range_max
 
-        self.target_frame_count = target_frame_count
         self.target_frame_rate = target_frame_rate
 
         self.supported_extensions = supported_extensions
@@ -67,6 +67,7 @@ class LoadVideo(
     def get_item(self, variation: int, index: int, requested_name: str = None) -> dict:
         rand = self._get_rand(variation, index)
         path = self._get_previous_item(variation, self.path_in_name, index)
+        target_frame_count = self._get_previous_item(variation, self.target_frame_count_in_name, index)
 
         ext = os.path.splitext(path)[1]
         if ext.lower() in self.supported_extensions:
@@ -77,7 +78,7 @@ class LoadVideo(
                 frame_count, frame_rate = self.duration_cache[path]
 
                 duration = (frame_count - 1) / frame_rate
-                target_duration = (self.target_frame_count - 1) / self.target_frame_rate
+                target_duration = (target_frame_count - 1) / self.target_frame_rate
 
                 start_offset = rand.uniform(0, duration - target_duration)
                 start_offset_frame = int(start_offset * frame_rate)
@@ -90,7 +91,7 @@ class LoadVideo(
                     decoded.__next__()
 
                 frames = []
-                while len(frames) < self.target_frame_count:
+                while len(frames) < target_frame_count:
                     frame = decoded.__next__()
                     frames.append(torch.from_numpy(frame.to_rgb().to_ndarray()).movedim(2, 0))
 
