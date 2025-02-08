@@ -69,6 +69,8 @@ class LoadVideo(
         path = self._get_previous_item(variation, self.path_in_name, index)
         target_frame_count = self._get_previous_item(variation, self.target_frame_count_in_name, index)
 
+        target_frame_count = int(target_frame_count)
+
         ext = os.path.splitext(path)[1]
         if ext.lower() in self.supported_extensions:
             try:
