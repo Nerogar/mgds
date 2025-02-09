@@ -72,18 +72,17 @@ class DropTags(
     #parse regex expressions, create new special list based on matches   
     def parse_regex(self, splist_in: list[str], taglist: list[str]) -> list[str]:
         splist_out = []
-        regex_spchars = set(".^$*+?!\{\}\[\]|()\\")
+        regex_spchars = set(".^$*+?!{}[]|()\\")
         for c in splist_in:
-            if any((a in regex_spchars) for a in c):    #only do regex matching if tag contains special character
-                c = c.replace("\)", "\\\\\)")
-                c = c.replace("\(", "\\\\\(")   #hopefully fix issues caused by "\(\)" syntax without affecting other regex
-                r = re.compile(c)
+            if any((a in regex_spchars) for a in c):
+                pattern = re.escape(c)
+                r = re.compile(pattern)
                 for s in taglist:
                     if r.fullmatch(s):
                         splist_out.append(s)
             else:
                 splist_out.append(c)
-        return splist_out    
+        return splist_out   
     
     #change probability evaluated against random() depending on mode
 
