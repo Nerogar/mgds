@@ -5,8 +5,6 @@ import torch
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
 
-AV_TIME_BASE = 1_000_000
-
 class LoadVideo(
     PipelineModule,
     RandomAccessPipelineModule,
@@ -56,7 +54,7 @@ class LoadVideo(
         if video_stream.frames > 0:
             frame_count = video_stream.frames
         elif container.duration > 0:
-            frame_count = int(container.duration / AV_TIME_BASE * frame_rate)
+            frame_count = int(container.duration / av.time_base * frame_rate)
         elif 'DURATION' in video_stream.metadata:
             metadata_duration_frames = [frame_rate, frame_rate * 60, frame_rate * 60 * 60]
             metadata_duration = reversed([float(x) for x in video_stream.metadata['DURATION'].split(':')])
@@ -65,7 +63,6 @@ class LoadVideo(
             print(f"could not find length of video, falling back to full decode {path}")
             # fall back to counting frames (and hope the user didn't specify a long video)
             decoded = container.decode(video=0)
-
             frame_count = sum(1 for _ in decoded)
 
         return frame_count, frame_rate
@@ -89,14 +86,18 @@ class LoadVideo(
                 target_duration = (target_frame_count - 1) / self.target_frame_rate
 
                 start_offset = rand.uniform(0, duration - target_duration)
-                start_offset_frame = int(start_offset * frame_rate)
 
                 container = av.open(path)
+                container.seek(int(start_offset * av.time_base))
                 decoded = container.decode(video=0)
 
-                # skip initial frames # TODO: better seeking
-                for _ in range(start_offset_frame):
-                    decoded.__next__()
+                # skip frames until start_offset is reached
+                while True:
+                    frame = next(decoded, None)
+                    if frame is None:
+                        break
+                    if frame.time + (1 / frame_rate) > start_offset:
+                        break
 
                 frames = []
                 while len(frames) < target_frame_count:
@@ -122,7 +123,7 @@ class LoadVideo(
 
             except FileNotFoundError:
                 video_tensor = None
-            except:
+            except Exception as e:
                 print("could not load video, it might be corrupted: " + path)
                 raise
         else:
