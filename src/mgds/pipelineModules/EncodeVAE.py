@@ -54,7 +54,7 @@ class EncodeVAE(
                     if hasattr(vae_output, "latent_dist"):
                         output = vae_output.latent_dist
                     if hasattr(vae_output, "latent"):
-                        output = vae_output.latent.squeeze()
+                        output = vae_output.latent.squeeze(dim=0)
                     break
             except RuntimeError:
                 retries += 1

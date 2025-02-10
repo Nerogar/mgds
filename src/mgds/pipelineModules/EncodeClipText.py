@@ -78,8 +78,8 @@ class EncodeClipText(
         else:
             pooled_state = None
 
-        hidden_states = [hidden_state.squeeze() for hidden_state in hidden_states]
-        pooled_state = None if pooled_state is None else pooled_state.squeeze()
+        hidden_states = [hidden_state.squeeze(dim=0) for hidden_state in hidden_states]
+        pooled_state = None if pooled_state is None else pooled_state.squeeze(dim=0)
 
         hidden_state = hidden_states[self.hidden_state_output_index]
 

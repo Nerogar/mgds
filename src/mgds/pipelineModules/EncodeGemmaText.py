@@ -66,7 +66,7 @@ class EncodeGemmaText(
 
         hidden_states = text_encoder_output.hidden_states
 
-        hidden_states = [hidden_state.squeeze() for hidden_state in hidden_states]
+        hidden_states = [hidden_state.squeeze(dim=0) for hidden_state in hidden_states]
 
         hidden_state = hidden_states[self.hidden_state_output_index]
 

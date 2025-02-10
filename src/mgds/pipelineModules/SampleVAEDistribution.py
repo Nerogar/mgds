@@ -31,7 +31,7 @@ class SampleVAEDistribution(
         else:
             raise Exception('method not supported')
 
-        latent = latent.squeeze()
+        latent = latent.squeeze(dim=0)
 
         return {
             self.out_name: latent

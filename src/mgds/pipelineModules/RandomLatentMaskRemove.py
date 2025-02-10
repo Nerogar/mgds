@@ -68,7 +68,7 @@ class RandomLatentMaskRemove(
                     blank_conditioning_image = blank_conditioning_image\
                         .unsqueeze(0).unsqueeze(0).expand([-1, 3, -1, -1])
                     self.blank_conditioning_image_cache[resolution] = self.vae.encode(
-                        blank_conditioning_image).latent_dist.mode().squeeze()
+                        blank_conditioning_image).latent_dist.mode(dim=0).squeeze()
 
     def get_item(self, variation: int, index: int, requested_name: str = None) -> dict:
         rand = self._get_rand(variation, index)

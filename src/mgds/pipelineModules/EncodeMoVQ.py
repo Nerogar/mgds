@@ -45,7 +45,7 @@ class EncodeMoVQ(
         with self._all_contexts(self.autocast_contexts):
             latent_image = self.movq.encode(image.unsqueeze(0)).latents
 
-        latent_image = latent_image.squeeze()
+        latent_image = latent_image.squeeze(dim=0)
 
         return {
             self.out_name: latent_image,
