@@ -1,5 +1,3 @@
-from tqdm import tqdm
-
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.SingleVariationRandomAccessPipelineModule import SingleVariationRandomAccessPipelineModule
 
@@ -66,7 +64,6 @@ class AspectBatchSorting(
         for index in range(self._get_previous_length(self.resolution_in_name)):
             resolution = self._get_previous_item(self.current_variation, self.resolution_in_name, index)
 
-            resolution = resolution[0], resolution[1]
             resolutions.append(resolution)
 
         # sort samples into dict of lists, with key = resolution
