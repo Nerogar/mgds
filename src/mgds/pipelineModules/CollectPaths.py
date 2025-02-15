@@ -12,7 +12,7 @@ class CollectPaths(
 ):
     def __init__(
             self,
-            concept_in_name: str, path_in_name: str, include_subdirectories_in_name: str,
+            concept_in_name: str, path_in_name: str, include_subdirectories_in_name: str, enabled_in_name: str,
             path_out_name: str, concept_out_name: str,
             extensions: [str], include_postfix: [str], exclude_postfix: [str],
     ):
@@ -21,6 +21,7 @@ class CollectPaths(
         self.concept_in_name = concept_in_name
         self.path_in_name = path_in_name
         self.include_subdirectories_in_name = include_subdirectories_in_name
+        self.enabled_in_name = enabled_in_name
 
         self.path_out_name = path_out_name
         self.concept_out_name = concept_out_name
@@ -54,28 +55,31 @@ class CollectPaths(
         return files
 
     def start(self, variation: int):
-        for index in tqdm(range(self._get_previous_length(self.concept_in_name)), desc='enumerating sample paths'):
-            concept = self._get_previous_item(variation, self.concept_in_name, index)
-            include_subdirectories = self._get_previous_item(variation, self.include_subdirectories_in_name, index)
-            path = concept[self.path_in_name]
+        for in_index in tqdm(range(self._get_previous_length(self.concept_in_name)), desc='enumerating sample paths'):
+            concept = self._get_previous_item(variation, self.concept_in_name, in_index)
+            enabled = concept[self.enabled_in_name]
+            if enabled:
+                include_subdirectories = self._get_previous_item(variation, self.include_subdirectories_in_name, in_index)
+                path = concept[self.path_in_name]
 
-            file_names = sorted(self.__list_files(path, include_subdirectories))
+                file_names = sorted(self.__list_files(path, include_subdirectories))
 
-            file_names = list(filter(lambda name: os.path.splitext(name)[1].lower() in self.extensions, file_names))
+                file_names = list(filter(lambda name: os.path.splitext(name)[1].lower() in self.extensions, file_names))
 
-            if self.include_postfix:
-                file_names = list(filter(
-                    lambda name: any(os.path.splitext(name)[0].endswith(postfix) for postfix in self.include_postfix),
-                    file_names))
+                if self.include_postfix:
+                    file_names = list(filter(
+                        lambda name: any(os.path.splitext(name)[0].endswith(postfix) for postfix in self.include_postfix),
+                        file_names))
 
-            if self.exclude_postfix:
-                file_names = list(filter(lambda name: not any(
-                    os.path.splitext(name)[0].endswith(postfix) for postfix in self.exclude_postfix), file_names))
+                if self.exclude_postfix:
+                    file_names = list(filter(lambda name: not any(
+                        os.path.splitext(name)[0].endswith(postfix) for postfix in self.exclude_postfix), file_names))
 
-            self.paths.extend(file_names)
-            self.concepts.extend([concept] * len(file_names))
+                self.paths.extend(file_names)
+                self.concepts.extend([concept] * len(file_names))
 
     def get_item(self, variation: int, index: int, requested_name: str = None) -> dict:
+        #note: index is not the same index as the index in previous nodes
         return {
             self.path_out_name: self.paths[index],
             self.concept_out_name: self.concepts[index],
