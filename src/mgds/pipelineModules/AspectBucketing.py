@@ -151,7 +151,7 @@ class AspectBucketing(
                     possible_target_resolutions |= set([int(res.strip()) for res in resolutions.split(',')])
 
         for index in range(self._get_previous_length(self.target_frames_in_name)):
-            frames = self._get_previous_item(variation, self.target_resolutions_override_in_name, index)
+            frames = self._get_previous_item(variation, self.target_frames_in_name, index)
             possible_frames.add(int(frames))
 
         self.bucket_resolutions, self.bucket_aspects = \

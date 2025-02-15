@@ -66,7 +66,7 @@ class RandomLatentMaskRemove(
                         device=self.pipeline.device
                     )
                     encoded = self.vae.encode(blank_conditioning_image).latent_dist.mode().squeeze(dim=0)
-                    self.blank_conditioning_image_cache[tuple(encoded.shape)] = encoded
+                    self.blank_conditioning_image_cache[tuple(encoded.shape[1:])] = encoded
 
     def get_item(self, variation: int, index: int, requested_name: str = None) -> dict:
         rand = self._get_rand(variation, index)
@@ -83,7 +83,7 @@ class RandomLatentMaskRemove(
 
         latent_conditioning_image = None
         if replace and self.latent_conditioning_image_name is not None:
-            latent_conditioning_image = self.blank_conditioning_image_cache[latent_resolution]
+            latent_conditioning_image = self.blank_conditioning_image_cache[latent_resolution[1:]]
         elif not replace and self.latent_conditioning_image_name is not None:
             latent_conditioning_image = self._get_previous_item(variation, self.latent_conditioning_image_name, index)
 
