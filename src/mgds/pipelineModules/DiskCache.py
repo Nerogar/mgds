@@ -220,7 +220,7 @@ class DiskCache(
                     self.aggregate_cache[group_key][in_variation] = \
                         torch.load(os.path.realpath(os.path.join(cache_dir, 'aggregate.pt')), weights_only=False)
 
-    def __get_input_index(self, out_variation: int, out_index: int) -> (str, int, int):
+    def __get_input_index(self, out_variation: int, out_index: int) -> tuple[str, int, int, int]:
         offset = 0
         for group_key, group_output_samples in self.group_output_samples.items():
             if out_index >= group_output_samples + offset:
