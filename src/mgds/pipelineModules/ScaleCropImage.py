@@ -48,18 +48,18 @@ class ScaleCropImage(
         item = {}
 
         if enable_crop_jitter:
-            y_offset = rand.randint(0, scale_resolution[-1] - crop_resolution[-1])
-            x_offset = rand.randint(0, scale_resolution[-2] - crop_resolution[-2])
+            y_offset = rand.randint(0, scale_resolution[-2] - crop_resolution[-2])
+            x_offset = rand.randint(0, scale_resolution[-1] - crop_resolution[-1])
         else:
-            y_offset = (scale_resolution[-1] - crop_resolution[-1]) // 2
-            x_offset = (scale_resolution[-2] - crop_resolution[-2]) // 2
+            y_offset = (scale_resolution[-2] - crop_resolution[-2]) // 2
+            x_offset = (scale_resolution[-1] - crop_resolution[-1]) // 2
         crop_offset = (y_offset, x_offset)
 
         for name in self.names:
             image = self._get_previous_item(variation, name, index)
             image = resize(image)
 
-            image = functional.crop(image, y_offset, x_offset, crop_resolution[-1], crop_resolution[-2])
+            image = functional.crop(image, y_offset, x_offset, crop_resolution[-2], crop_resolution[-1])
 
             item[name] = image
 
