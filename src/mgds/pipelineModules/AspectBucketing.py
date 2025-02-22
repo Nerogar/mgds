@@ -13,6 +13,20 @@ class AspectBucketing(
     PipelineModule,
     RandomAccessPipelineModule,
 ):
+
+    # all possible target aspect ratios
+    all_possible_input_aspects = [
+        (1.0, 1.0),
+        (1.0, 1.25),
+        (1.0, 1.5),
+        (1.0, 1.75),
+        (1.0, 2.0),
+        (1.0, 2.5),
+        (1.0, 3.0),
+        (1.0, 3.5),
+        (1.0, 4.0),
+    ]
+
     def __init__(
             self,
             quantization: int,
@@ -70,18 +84,6 @@ class AspectBucketing(
             self,
             target_resolutions: list[int],
     ) -> tuple[dict[int, list[tuple[int, int]]], dict[int, list[float]]]:
-        # all possible target aspect ratios
-        all_possible_input_aspects = [
-            (1.0, 1.0),
-            (1.0, 1.25),
-            (1.0, 1.5),
-            (1.0, 1.75),
-            (1.0, 2.0),
-            (1.0, 2.5),
-            (1.0, 3.0),
-            (1.0, 3.5),
-            (1.0, 4.0),
-        ]
 
         possible_resolutions = {}
         possible_aspects = {}
@@ -91,7 +93,7 @@ class AspectBucketing(
             new_resolutions = [(
                 h / math.sqrt(h * w) * target_resolution,
                 w / math.sqrt(h * w) * target_resolution
-            ) for (h, w) in all_possible_input_aspects]
+            ) for (h, w) in self.all_possible_input_aspects]
 
             # add inverted dimensions
             new_resolutions = new_resolutions + [(w, h) for (h, w) in new_resolutions]
