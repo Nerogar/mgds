@@ -1,3 +1,4 @@
+import itertools
 import math
 from random import Random
 from typing import Any
@@ -19,6 +20,8 @@ class AspectBucketing(
             target_resolution_in_name: str,
             enable_target_resolutions_override_in_name: str,
             target_resolutions_override_in_name: str,
+            target_frames_in_name: str,
+            frame_dim_enabled: bool,
             scale_resolution_out_name: str,
             crop_resolution_out_name: str,
             possible_resolutions_out_name: str,
@@ -31,6 +34,8 @@ class AspectBucketing(
         self.target_resolutions_in_name = target_resolution_in_name
         self.enable_target_resolutions_override_in_name = enable_target_resolutions_override_in_name
         self.target_resolutions_override_in_name = target_resolutions_override_in_name
+        self.target_frames_in_name = target_frames_in_name
+        self.frame_dim_enabled = frame_dim_enabled
 
         self.scale_resolution_out_name = scale_resolution_out_name
         self.crop_resolution_out_name = crop_resolution_out_name
@@ -49,12 +54,13 @@ class AspectBucketing(
             self.target_resolutions_in_name,
             self.enable_target_resolutions_override_in_name,
             self.target_resolutions_override_in_name,
+            self.target_frames_in_name,
         ]
 
     def get_outputs(self) -> list[str]:
         return [self.scale_resolution_out_name, self.crop_resolution_out_name, self.possible_resolutions_out_name]
 
-    def __quantize_resolution(self, resolution: tuple[int, int], quantization: int) -> tuple[int, int]:
+    def __quantize_resolution(self, resolution: tuple[float, float], quantization: int) -> tuple[int, int]:
         return (
             round(resolution[0] / quantization) * quantization,
             round(resolution[1] / quantization) * quantization,
@@ -117,6 +123,7 @@ class AspectBucketing(
     def start(self, variation: int):
         possible_target_resolutions = set()
         possible_fixed_resolutions = set()
+        possible_frames = {1}
 
         for index in range(self._get_previous_length(self.target_resolutions_in_name)):
             resolutions = self._get_previous_item(variation, self.target_resolutions_in_name, index)
@@ -143,12 +150,19 @@ class AspectBucketing(
                 else:
                     possible_target_resolutions |= set([int(res.strip()) for res in resolutions.split(',')])
 
+        for index in range(self._get_previous_length(self.target_frames_in_name)):
+            frames = self._get_previous_item(variation, self.target_frames_in_name, index)
+            possible_frames.add(int(frames))
+
         self.bucket_resolutions, self.bucket_aspects = \
             self.__create_automatic_buckets(list(possible_target_resolutions))
 
         self.flattened_possible_resolutions = list(
             set(sum(self.bucket_resolutions.values(), [])) | possible_fixed_resolutions
         )
+        if self.frame_dim_enabled:
+            self.flattened_possible_resolutions = \
+                list((f, *r) for f, r in itertools.product(possible_frames, self.flattened_possible_resolutions))
 
         self.bucket_aspects = {k: np.array(v) for (k, v) in self.bucket_aspects.items()}
 
@@ -172,23 +186,30 @@ class AspectBucketing(
             target_resolutions = [int(res.strip()) for res in target_resolutions.split(',')]
 
             target_resolution = rand.choice(target_resolutions)
-            target_resolution = self.__get_bucket(rand, resolution[0], resolution[1], target_resolution)
+            target_resolution = self.__get_bucket(rand, resolution[-2], resolution[-1], target_resolution)
 
-        aspect = resolution[0] / resolution[1]
-        target_aspect = target_resolution[0] / target_resolution[1]
+        aspect = resolution[-2] / resolution[-1]
+        target_aspect = target_resolution[-2] / target_resolution[-1]
 
         if aspect > target_aspect:
-            scale = target_resolution[1] / resolution[1]
+            scale = target_resolution[-1] / resolution[-1]
             scale_resolution = (
-                round(resolution[0] * scale),
-                target_resolution[1]
+                *resolution[:-2],
+                round(resolution[-2] * scale),
+                target_resolution[-1]
             )
         else:
-            scale = target_resolution[0] / resolution[0]
+            scale = target_resolution[-2] / resolution[-2]
             scale_resolution = (
-                target_resolution[0],
-                round(resolution[1] * scale)
+                *resolution[:-2],
+                target_resolution[-2],
+                round(resolution[-1] * scale)
             )
+
+        target_resolution = (
+            *resolution[:-2],
+            *target_resolution
+        )
 
         return {
             self.scale_resolution_out_name: scale_resolution,

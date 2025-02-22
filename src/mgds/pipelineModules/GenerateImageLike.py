@@ -1,5 +1,4 @@
-from PIL import Image
-from torchvision import transforms
+import torch
 
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
@@ -16,22 +15,17 @@ class GenerateImageLike(
             color: float | int | tuple[float, float, float],
             range_min: float,
             range_max: float,
-            channels: int = 3,
     ):
         super(GenerateImageLike, self).__init__()
         self.image_in_name = image_in_name
         self.image_out_name = image_out_name
-        self.color = color
+        if isinstance(color, int | float):
+            self.color = [color]
+        else:
+            self.color = color
 
         self.range_min = range_min
         self.range_max = range_max
-
-        if channels == 3 and isinstance(color, tuple):
-            self.mode = 'RGB'
-        elif channels == 1 and (isinstance(color, float) or isinstance(color, int)):
-            self.mode = 'L'
-        else:
-            raise ValueError('Only 1 and 3 channels are supported.')
 
     def length(self) -> int:
         return self._get_previous_length(self.image_in_name)
@@ -45,11 +39,12 @@ class GenerateImageLike(
     def get_item(self, variation: int, index: int, requested_name: str = None) -> dict:
         original_image = self._get_previous_item(variation, self.image_in_name, index)
 
-        image = Image.new(mode=self.mode, size=(original_image.shape[2], original_image.shape[1]), color=self.color)
+        image_tensor = torch.tensor(self.color, device=self.pipeline.device, dtype=torch.float32) / 255
+        while image_tensor.ndim < original_image.ndim:
+            image_tensor = image_tensor.unsqueeze(1)
+        image_tensor = image_tensor.expand((-1, *original_image.shape[1:]))
 
-        t = transforms.ToTensor()
-        image_tensor = t(image).to(device=self.pipeline.device, dtype=original_image.dtype)
-
+        image_tensor = image_tensor.to(dtype=original_image.dtype)
         image_tensor = image_tensor * (self.range_max - self.range_min) + self.range_min
 
         return {

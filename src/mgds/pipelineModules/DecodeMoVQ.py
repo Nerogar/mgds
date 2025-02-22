@@ -44,7 +44,7 @@ class DecodeMoVQ(
 
         with self._all_contexts(self.autocast_contexts):
             image = self.movq.decode(latent_image.unsqueeze(0)).sample
-            image = image.clamp(-1, 1).squeeze()
+            image = image.clamp(-1, 1).squeeze(dim=0)
 
         return {
             self.out_name: image,

@@ -49,27 +49,34 @@ class RandomMaskRotateCrop(
         # 3. getting the max value of this sequence
 
         # y/height direction
-        reduced_mask = (torch.amax(mask, dim=2, keepdim=True) > 0.5).float()
-        height = reduced_mask.shape[1]
+        reduced_mask = (torch.amax(mask, dim=-1, keepdim=True) > 0.5).float()
+        height = reduced_mask.shape[-2]
 
-        ascending_sequence = torch.arange(0, height, 1, device=mask.device, dtype=mask.dtype).unsqueeze(0).unsqueeze(2)
+        ascending_sequence = torch.arange(0, height, 1, device=mask.device, dtype=mask.dtype).unsqueeze(1)
+        while ascending_sequence.ndim < mask.ndim:
+            ascending_sequence = ascending_sequence.unsqueeze(0)
         ascending_mask = reduced_mask * ascending_sequence
 
-        descending_sequence = torch.arange(height, 0, -1, device=mask.device, dtype=mask.dtype).unsqueeze(0).unsqueeze(
-            2)
+        descending_sequence = torch.arange(height, 0, -1, device=mask.device, dtype=mask.dtype).unsqueeze(1)
+        while descending_sequence.ndim < mask.ndim:
+            descending_sequence = descending_sequence.unsqueeze(0)
         descending_mask = reduced_mask * descending_sequence
 
         y_min = height - torch.max(descending_mask).item()
         y_max = torch.max(ascending_mask).item()
 
         # x/width direction
-        reduced_mask = (torch.amax(mask, dim=1, keepdim=True) > 0.5).float()
-        width = reduced_mask.shape[2]
+        reduced_mask = (torch.amax(mask, dim=-2, keepdim=True) > 0.5).float()
+        width = reduced_mask.shape[-1]
 
-        ascending_sequence = torch.arange(0, width, 1, device=mask.device, dtype=mask.dtype).unsqueeze(0).unsqueeze(0)
+        ascending_sequence = torch.arange(0, width, 1, device=mask.device, dtype=mask.dtype).unsqueeze(0)
+        while ascending_sequence.ndim < mask.ndim:
+            ascending_sequence = ascending_sequence.unsqueeze(0)
         ascending_mask = reduced_mask * ascending_sequence
 
-        descending_sequence = torch.arange(width, 0, -1, device=mask.device, dtype=mask.dtype).unsqueeze(0).unsqueeze(0)
+        descending_sequence = torch.arange(width, 0, -1, device=mask.device, dtype=mask.dtype).unsqueeze(0)
+        while descending_sequence.ndim < mask.ndim:
+            descending_sequence = descending_sequence.unsqueeze(0)
         descending_mask = reduced_mask * descending_sequence
 
         x_min = width - torch.max(descending_mask).item()
@@ -98,8 +105,8 @@ class RandomMaskRotateCrop(
         return functional.crop(tensor, y_min, x_min, y_max - y_min, x_max - x_min)
 
     def __apply(self, rand: Random, mask: Tensor, item: dict[str, Tensor]):
-        mask_height = mask.shape[1]
-        mask_width = mask.shape[2]
+        mask_height = mask.shape[-2]
+        mask_width = mask.shape[-1]
 
         # get initial dimensions for rotation
         y_min, y_max, x_min, x_max = self.__get_masked_region(mask)

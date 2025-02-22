@@ -60,8 +60,8 @@ class Tokenize(
         tokens = tokenizer_output.input_ids.to(self.pipeline.device)
         mask = tokenizer_output.attention_mask.to(self.pipeline.device)
 
-        tokens = tokens.squeeze()
-        mask = mask.squeeze()
+        tokens = tokens.squeeze(dim=0)
+        mask = mask.squeeze(dim=0)
 
         return {
             self.tokens_out_name: tokens,

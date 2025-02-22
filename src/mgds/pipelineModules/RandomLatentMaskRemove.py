@@ -61,20 +61,17 @@ class RandomLatentMaskRemove(
 
                 for resolution in possible_resolutions:
                     blank_conditioning_image = torch.zeros(
-                        resolution,
+                        (1, 3, *resolution),  # add batch and channel dim
                         dtype=self.dtype,
                         device=self.pipeline.device
                     )
-                    blank_conditioning_image = blank_conditioning_image\
-                        .unsqueeze(0).unsqueeze(0).expand([-1, 3, -1, -1])
-                    self.blank_conditioning_image_cache[resolution] = self.vae.encode(
-                        blank_conditioning_image).latent_dist.mode().squeeze()
+                    encoded = self.vae.encode(blank_conditioning_image).latent_dist.mode().squeeze(dim=0)
+                    self.blank_conditioning_image_cache[tuple(encoded.shape[1:])] = encoded
 
     def get_item(self, variation: int, index: int, requested_name: str = None) -> dict:
         rand = self._get_rand(variation, index)
         latent_mask = self._get_previous_item(variation, self.latent_mask_name, index)
-        latent_resolution = (latent_mask.shape[1], latent_mask.shape[2])
-        resolution = (latent_mask.shape[1] * 8, latent_mask.shape[2] * 8)
+        latent_resolution = tuple(latent_mask.shape)
 
         if latent_resolution not in self.full_mask_cache:
             self.full_mask_cache[latent_resolution] = torch.ones_like(latent_mask)
@@ -86,7 +83,7 @@ class RandomLatentMaskRemove(
 
         latent_conditioning_image = None
         if replace and self.latent_conditioning_image_name is not None:
-            latent_conditioning_image = self.blank_conditioning_image_cache[resolution]
+            latent_conditioning_image = self.blank_conditioning_image_cache[latent_resolution[1:]]
         elif not replace and self.latent_conditioning_image_name is not None:
             latent_conditioning_image = self._get_previous_item(variation, self.latent_conditioning_image_name, index)
 

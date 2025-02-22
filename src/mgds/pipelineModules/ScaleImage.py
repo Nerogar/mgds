@@ -26,7 +26,7 @@ class ScaleImage(
     def get_item(self, variation: int, index: int, requested_name: str = None) -> dict:
         image = self._get_previous_item(variation, self.in_name, index)
 
-        size = (round(image.shape[1] * self.factor), round(image.shape[2] * self.factor))
+        size = (round(image.shape[-2] * self.factor), round(image.shape[-1] * self.factor))
 
         t = transforms.Compose([
             transforms.Resize(size, interpolation=transforms.InterpolationMode.BILINEAR, antialias=True),

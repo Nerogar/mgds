@@ -23,8 +23,8 @@ class CalcAspect(
     def get_item(self, variation: int, index: int, requested_name: str = None) -> dict:
         image = self._get_previous_item(variation, self.image_in_name, index)
 
-        height, width = image.shape[1], image.shape[2]
+        resolution = tuple(image.shape[1:])  # cuts off channel dimension
 
         return {
-            self.resolution_out_name: (height, width),
+            self.resolution_out_name: resolution,
         }
