@@ -46,7 +46,7 @@ class RandomCircularMaskShrink(
         random = torch.rand(size=mask.shape, generator=generator, dtype=torch.float32, device=mask.device)
         random_mask = torch.flatten(random * mask)
         max_index_flat = torch.argmax(random_mask).item()
-        max_index = (max_index_flat // random.shape[2], max_index_flat % random.shape[2])
+        max_index = (max_index_flat // random.shape[-1], max_index_flat % random.shape[-1])
 
         return max_index
 
@@ -57,7 +57,7 @@ class RandomCircularMaskShrink(
         # 2. adding both gradients together
         # 3. taking the square root of the resulting gradient
 
-        resolution = (mask.shape[1], mask.shape[2])
+        resolution = (mask.shape[-2], mask.shape[-1])
         top = -center[0]
         bottom = resolution[0] - center[0] - 1
         left = -center[1]
