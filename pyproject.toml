@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=64", "setuptools-scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mgds"
+dynamic = ["version"]
+authors = [
+  { name="Nerogar" },
+]
+description = "Modular Pytorch DataSet implementation"
+readme = "README.md"
+requires-python = ">=3.10"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+    "License :: OSI Approved :: Apache License",
+]
+
+[project.urls]
+Homepage = "https://github.com/Nerogar/mgds"
+Issues = "https://github.com/Nerogar/mgds/issues"
+
+[tool.setuptools_scm]
