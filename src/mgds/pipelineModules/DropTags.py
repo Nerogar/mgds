@@ -81,7 +81,7 @@ class DropTags(
             r"_":r"( |_)"
         }
         splist_out = []
-        regex_spchars = set(r".^$*+?!{}[]|()\\")
+        regex_spchars = set(r" _.^$*+?!{}[]|()\\")
         for c in splist_in:
             if any((a in regex_spchars) for a in c):    #only do regex matching if tag contains special character
                 pattern = re.compile("|".join([re.escape(k) for k in sorted(regex_replace,key=len,reverse=True)]))
