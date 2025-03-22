@@ -72,18 +72,26 @@ class DropTags(
     #parse regex expressions, create new special list based on matches   
     def parse_regex(self, splist_in: list[str], taglist: list[str]) -> list[str]:
         splist_out = []
+        regex_spchars = set('.^$*+?{}[]|()\\')
 
         for pattern in splist_in:
-            try:
-                r = re.compile(pattern)
-            except re.error:
-                r = re.compile(re.escape(pattern))
+            regex = None
+
+            if any(c in regex_spchars for c in pattern):
+                try:
+                    regex = re.compile(pattern)
+                except re.error:
+                    regex = None
 
             for tag in taglist:
-                stripped_tag = tag.strip("()")
+                stripped = tag.strip("()")
 
-                if r.fullmatch(tag) or r.fullmatch(stripped_tag):
-                    splist_out.append(tag)
+                if regex:
+                    if regex.fullmatch(tag) or regex.fullmatch(stripped):
+                        splist_out.append(tag)
+                else:
+                    if pattern == tag or pattern == stripped:
+                        splist_out.append(tag)
 
         return splist_out
     
