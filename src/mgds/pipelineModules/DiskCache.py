@@ -218,7 +218,7 @@ class DiskCache(
 
                 if self.aggregate_cache[group_key][in_variation] is None:
                     self.aggregate_cache[group_key][in_variation] = \
-                        torch.load(os.path.realpath(os.path.join(cache_dir, 'aggregate.pt')), weights_only=False, map_location=this.pipeline.device)
+                        torch.load(os.path.realpath(os.path.join(cache_dir, 'aggregate.pt')), weights_only=False, map_location=self.pipeline.device)
 
     def __get_input_index(self, out_variation: int, out_index: int) -> tuple[str, int, int, int]:
         offset = 0
@@ -251,7 +251,7 @@ class DiskCache(
 
         elif requested_name in self.split_names:
             cache_path = os.path.join(self.__get_cache_dir(group_key, in_variation), str(group_index) + '.pt')
-            split_item = torch.load(os.path.realpath(cache_path), weights_only=False, map_location=this.pipeline.device)
+            split_item = torch.load(os.path.realpath(cache_path), weights_only=False, map_location=self.pipeline.device)
 
             for name in self.split_names:
                 item[name] = split_item[name]
