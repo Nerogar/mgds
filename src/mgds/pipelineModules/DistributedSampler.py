@@ -26,7 +26,6 @@ class DistributedSampler(
 
     def get_item(self, index: int, requested_name: str = None) -> dict:
         prev_index = (index * self.world_size) + self.rank
-        print(f"Distributed sampler, prev_index: {prev_index}, index: {index}")
         item = {}
         for name in self.names:
             item[name] = self._get_previous_item(self.current_variation, name, prev_index)
