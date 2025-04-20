@@ -15,7 +15,6 @@ class DistributedSampler(
 
 
     def length(self) -> int:
-        print(f"length input: {self._get_previous_length(self.names[0])}, length output: {self._get_previous_length(self.names[0]) // self.world_size}")
         return self._get_previous_length(self.names[0]) // self.world_size
 
     def get_inputs(self) -> list[str]:
