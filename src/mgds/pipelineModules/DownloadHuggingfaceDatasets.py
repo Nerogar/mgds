@@ -43,7 +43,11 @@ class DownloadHuggingfaceDatasets(
                 path = concept[self.path_in_name]
                 is_local = os.path.isdir(path)
                 if not is_local:
-                    concept[self.path_in_name] = huggingface_hub.snapshot_download(repo_id=path, repo_type="dataset")
+                    concept[self.path_in_name] = huggingface_hub.snapshot_download(
+                        repo_id=path,
+                        repo_type="dataset",
+                        max_workers=16,
+                    )
                 self.concepts.append(concept)
 
     def get_item(self, variation: int, index: int, requested_name: str = None) -> dict:
