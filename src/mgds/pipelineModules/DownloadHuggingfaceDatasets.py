@@ -1,7 +1,5 @@
 import os
 
-from tqdm import tqdm
-
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
 import huggingface_hub
@@ -36,7 +34,7 @@ class DownloadHuggingfaceDatasets(
         return [self.concept_out_name]
 
     def start(self, variation: int):
-        for in_index in tqdm(range(self._get_previous_length(self.concept_in_name)), desc='downloading datasets'):
+        for in_index in range(self._get_previous_length(self.concept_in_name)):
             concept = self._get_previous_item(variation, self.concept_in_name, in_index)
             enabled = concept[self.enabled_in_name]
             if enabled:
