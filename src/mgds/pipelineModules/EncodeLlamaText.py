@@ -32,7 +32,8 @@ class EncodeLlamaText(
         self.text_encoder = text_encoder
         self.hidden_state_output_index = hidden_state_output_index
         self.output_all_hidden_states = output_all_hidden_states
-        self.max_hidden_state_output_index = max(all_hidden_state_output_indices)
+        self.max_hidden_state_output_index = max(all_hidden_state_output_indices) \
+            if all_hidden_state_output_indices is not None else None
         self.crop_start = crop_start
 
         self.autocast_contexts = [nullcontext()] if autocast_contexts is None else autocast_contexts
