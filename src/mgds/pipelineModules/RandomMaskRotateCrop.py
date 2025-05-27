@@ -16,7 +16,7 @@ class RandomMaskRotateCrop(
     def __init__(
             self,
             mask_name: str,
-            additional_names: [str],
+            additional_names: list[str],
             enabled_in_name: str,
             min_size: int,
             min_padding_percent: float,
