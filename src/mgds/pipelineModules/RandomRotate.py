@@ -11,7 +11,7 @@ class RandomRotate(
 ):
     def __init__(
             self,
-            names: [str],
+            names: list[str],
             enabled_in_name: str,
             fixed_enabled_in_name: str,
             max_angle_in_name: str,
@@ -48,12 +48,13 @@ class RandomRotate(
 
         for name in self.names:
             previous_item = self._get_previous_item(variation, name, index)
-            if enabled or fixed_enabled:
-                orig_dtype = previous_item.dtype
-                if orig_dtype == torch.bfloat16:
-                    previous_item = previous_item.to(dtype=torch.float32)
-                previous_item = functional.rotate(previous_item, angle, interpolation=InterpolationMode.BILINEAR)
-                previous_item = previous_item.to(dtype=orig_dtype)
+            if previous_item is not None:
+                if enabled or fixed_enabled:
+                    orig_dtype = previous_item.dtype
+                    if orig_dtype == torch.bfloat16:
+                        previous_item = previous_item.to(dtype=torch.float32)
+                    previous_item = functional.rotate(previous_item, angle, interpolation=InterpolationMode.BILINEAR)
+                    previous_item = previous_item.to(dtype=orig_dtype)
 
             item[name] = previous_item
 
