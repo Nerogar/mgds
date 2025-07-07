@@ -10,7 +10,7 @@ class RandomSaturation(
 ):
     def __init__(
             self,
-            names: [str],
+            names: list[str],
             enabled_in_name: str,
             fixed_enabled_in_name: str,
             max_strength_in_name: str,
@@ -48,8 +48,9 @@ class RandomSaturation(
 
         for name in self.names:
             previous_item = self._get_previous_item(variation, name, index)
-            if enabled or fixed_enabled:
-                previous_item = functional.adjust_saturation(previous_item, strength)
+            if previous_item is not None:
+                if enabled or fixed_enabled:
+                    previous_item = functional.adjust_saturation(previous_item, strength)
             item[name] = previous_item
 
         return item

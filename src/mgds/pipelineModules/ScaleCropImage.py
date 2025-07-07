@@ -57,9 +57,10 @@ class ScaleCropImage(
 
         for name in self.names:
             image = self._get_previous_item(variation, name, index)
-            image = resize(image)
 
-            image = functional.crop(image, y_offset, x_offset, crop_resolution[-2], crop_resolution[-1])
+            if image is not None:
+                image = resize(image)
+                image = functional.crop(image, y_offset, x_offset, crop_resolution[-2], crop_resolution[-1])
 
             item[name] = image
 
