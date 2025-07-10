@@ -9,7 +9,7 @@ class InlineDistributedSampler(
     def __init__(self, names: [str], world_size: int, rank: int):
         super(InlineDistributedSampler, self).__init__()
         self.names = names
-        self.world_size = 2#world_size
+        self.world_size = world_size
         self.rank = rank
 
     def get_inputs(self) -> list[str]:
