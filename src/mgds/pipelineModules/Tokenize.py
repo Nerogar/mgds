@@ -14,7 +14,7 @@ class Tokenize(
             tokens_out_name: str,
             mask_out_name: str,
             tokenizer: CLIPTokenizer | T5Tokenizer | T5TokenizerFast | GemmaTokenizer | LlamaTokenizer,
-            max_token_length: int,
+            max_token_length: int | None,
             format_text: str | None = None,
             additional_format_text_tokens: int | None = None,
     ):
