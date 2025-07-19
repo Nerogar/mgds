@@ -101,7 +101,7 @@ class DropTags(
         if mode == "RANDOM":
             return p
         elif mode == "RANDOM WEIGHTED":
-            return p * (i / input_length)
+            return p * ((i+1) / input_length)
         else:  # if unexpected "mode" given default to return p directly
             return p
 
