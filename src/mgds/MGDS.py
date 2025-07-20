@@ -20,7 +20,7 @@ class MGDS(IterableDataset):
             concepts: list[dict],
             settings: dict,
             definition: [PipelineModule],
-            batch_size: int,
+            batch_size: int, #local batch size
             state: PipelineState,
             seed: int = 42,
             initial_epoch: int = 0,
