@@ -9,7 +9,7 @@ class InlineAspectBatchSorting(
     def __init__(
             self,
             resolution_in_name: str,
-            names: [str],
+            names: list[str],
             batch_size: int,
     ):
         super(InlineAspectBatchSorting, self).__init__()
