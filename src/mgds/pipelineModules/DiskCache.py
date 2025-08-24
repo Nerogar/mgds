@@ -186,7 +186,10 @@ class DiskCache(
                     aggregate_cache = [None]*size
 
                     with tqdm(total=size, smoothing=0.1, desc='caching') as bar:
-                        def fn(group_index, in_index, in_variation):
+                        def fn(group_index, in_index, in_variation, current_device):
+                            #preserve current device for multi-GPU, which is thread-local in torch:
+                            torch.cuda.set_device(current_device)
+
                             split_item = {}
                             aggregate_item = {}
 
@@ -200,7 +203,7 @@ class DiskCache(
                             aggregate_cache[group_index] = aggregate_item
 
                         fs = (self._state.executor.submit(
-                            fn, group_index, in_index, in_variation)
+                            fn, group_index, in_index, in_variation, torch.cuda.current_device())
                               for (group_index, in_index)
                               in enumerate(self.group_indices[group_key]))
                         for i, f in enumerate(concurrent.futures.as_completed(fs)):
