@@ -14,9 +14,10 @@ class Tokenize(
             tokens_out_name: str,
             mask_out_name: str,
             tokenizer: CLIPTokenizer | T5Tokenizer | T5TokenizerFast | GemmaTokenizer | LlamaTokenizer,
-            max_token_length: int,
+            max_token_length: int | None,
             format_text: str | None = None,
             additional_format_text_tokens: int | None = None,
+            expand_mask: int = 0,
     ):
         super(Tokenize, self).__init__()
         self.in_name = in_name
@@ -26,6 +27,7 @@ class Tokenize(
         self.max_token_length = max_token_length
         self.format_text = format_text
         self.additional_format_text_tokens = additional_format_text_tokens
+        self.expand_mask = expand_mask
 
     def length(self) -> int:
         return self._get_previous_length(self.in_name)
@@ -62,6 +64,10 @@ class Tokenize(
 
         tokens = tokens.squeeze(dim=0)
         mask = mask.squeeze(dim=0)
+
+        #unmask n tokens:
+        masked_idx = (mask == 0).nonzero(as_tuple=True)[0]
+        mask[masked_idx[:self.expand_mask]] = 1 #dtype is long
 
         return {
             self.tokens_out_name: tokens,

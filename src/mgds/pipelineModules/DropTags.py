@@ -69,37 +69,39 @@ class DropTags(
         else:
             return [tag.strip() for tag in sptags.split(delim)]
 
-    #parse regex expressions, create new special list based on matches present in caption
+    #parse regex expressions, create new special list based on matches   
     def parse_regex(self, splist_in: list[str], taglist: list[str]) -> list[str]:
-        #modify regex expression to match variations often present in booru tags
-        regex_replace = {
-            r"(":r"(\\\(|\()",      #match either literal \( or (
-            r")":r"(\\\)|\))",      #match either literal \) or )
-            r"\(":r"(\\\(|\()",
-            r"\)":r"(\\\)|\))",
-            r" ":r"( |_)",          #match either space or underscore
-            r"_":r"( |_)"
-        }
         splist_out = []
-        regex_spchars = set(r" _.^$*+?!{}[]|()\\")
-        for c in splist_in:
-            if any((a in regex_spchars) for a in c):    #only do regex matching if tag contains special character
-                pattern = re.compile("|".join([re.escape(k) for k in sorted(regex_replace,key=len,reverse=True)]))
-                c2 = pattern.sub(lambda x: regex_replace[x.group(0)], c)
-                r = re.compile(c2)
-                for s in taglist:
-                    if r.fullmatch(s):
-                        splist_out.append(s)
-            else:
-                splist_out.append(c)
-        return splist_out  
+        regex_spchars = set('.^$*+?{}[]|()\\')
+
+        for pattern in splist_in:
+            regex = None
+
+            if any(c in regex_spchars for c in pattern):
+                try:
+                    regex = re.compile(pattern)
+                except re.error:
+                    regex = None
+
+            for tag in taglist:
+                stripped = tag.strip("()")
+
+                if regex:
+                    if regex.fullmatch(tag) or regex.fullmatch(stripped):
+                        splist_out.append(tag)
+                else:
+                    if pattern == tag or pattern == stripped:
+                        splist_out.append(tag)
+
+        return splist_out
     
     #change probability evaluated against random() depending on mode
+
     def probability_weighted(self, p: float, mode: str, i: int, input_length: int) -> float:
         if mode == "RANDOM":
             return p
         elif mode == "RANDOM WEIGHTED":
-            return p * (i / input_length)
+            return p * ((i+1) / input_length)
         else:  # if unexpected "mode" given default to return p directly
             return p
 

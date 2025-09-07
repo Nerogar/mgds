@@ -8,7 +8,7 @@ class ModifyPath(
     PipelineModule,
     RandomAccessPipelineModule,
 ):
-    def __init__(self, in_name: str, out_name: str, postfix: [str], extension: [str]):
+    def __init__(self, in_name: str, out_name: str, postfix: str, extension: str):
         super(ModifyPath, self).__init__()
 
         self.in_name = in_name

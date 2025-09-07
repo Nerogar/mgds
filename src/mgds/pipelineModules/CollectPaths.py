@@ -14,7 +14,7 @@ class CollectPaths(
             self,
             concept_in_name: str, path_in_name: str, include_subdirectories_in_name: str, enabled_in_name: str,
             path_out_name: str, concept_out_name: str,
-            extensions: [str], include_postfix: [str], exclude_postfix: [str],
+            extensions: list[str], include_postfix: list[str] | None, exclude_postfix: list[str],
     ):
         super(CollectPaths, self).__init__()
 

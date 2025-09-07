@@ -1,10 +1,9 @@
 from contextlib import nullcontext
 
 import torch
-from transformers import LlamaModel
-
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
+from transformers import LlamaModel
 
 
 class EncodeLlamaText(
@@ -19,6 +18,8 @@ class EncodeLlamaText(
             tokens_attention_mask_out_name: str | None,
             text_encoder: LlamaModel,
             hidden_state_output_index: int | None = None,
+            output_all_hidden_states: bool = False,
+            all_hidden_state_output_indices: list[int] | None = None,
             crop_start: int | None = None,
             autocast_contexts: list[torch.autocast | None] = None,
             dtype: torch.dtype | None = None,
@@ -30,6 +31,9 @@ class EncodeLlamaText(
         self.tokens_attention_mask_out_name = tokens_attention_mask_out_name
         self.text_encoder = text_encoder
         self.hidden_state_output_index = hidden_state_output_index
+        self.output_all_hidden_states = output_all_hidden_states
+        self.max_hidden_state_output_index = max(all_hidden_state_output_indices) \
+            if all_hidden_state_output_indices is not None else None
         self.crop_start = crop_start
 
         self.autocast_contexts = [nullcontext()] if autocast_contexts is None else autocast_contexts
@@ -69,12 +73,20 @@ class EncodeLlamaText(
         tokens = tokens.squeeze()
         hidden_states = text_encoder_output.hidden_states
         hidden_states = [hidden_state.squeeze(dim=0) for hidden_state in hidden_states]
-        hidden_state = hidden_states[self.hidden_state_output_index]
+        if self.output_all_hidden_states:
+            hidden_state = hidden_states[1:self.max_hidden_state_output_index + 2]
+        else:
+            hidden_state = hidden_states[self.hidden_state_output_index]
         tokens_attention_mask = tokens_attention_mask.squeeze(dim=0)
 
         if self.crop_start is not None:
             tokens = tokens[self.crop_start:]
-            hidden_state = hidden_state[self.crop_start:]
+
+            if self.output_all_hidden_states:
+                hidden_state = [t[self.crop_start:] for t in hidden_state]
+            else:
+                hidden_state = hidden_state[self.crop_start:]
+
             tokens_attention_mask = tokens_attention_mask[self.crop_start:]
 
         return {

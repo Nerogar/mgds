@@ -33,7 +33,7 @@ class RescaleImageChannels(
         image = self._get_previous_item(variation, self.image_in_name, index)
 
         image = (image - self.in_range_min) \
-                * (self.out_range_max - self.out_range_min / self.in_range_max - self.in_range_min) \
+                * ((self.out_range_max - self.out_range_min) / (self.in_range_max - self.in_range_min)) \
                 + self.out_range_min
 
         return {

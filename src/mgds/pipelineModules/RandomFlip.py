@@ -10,7 +10,7 @@ class RandomFlip(
 ):
     def __init__(
             self,
-            names: [str],
+            names: list[str],
             enabled_in_name: str,
             fixed_enabled_in_name: str,
     ):
@@ -45,8 +45,9 @@ class RandomFlip(
 
         for name in self.names:
             previous_item = self._get_previous_item(variation, name, index)
-            if flip:
-                previous_item = functional.hflip(previous_item)
+            if previous_item is not None:
+                if flip:
+                    previous_item = functional.hflip(previous_item)
             item[name] = previous_item
 
         return item
