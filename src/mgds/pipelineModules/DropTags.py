@@ -146,8 +146,6 @@ class DropTags(
                         pruned_tags.append(s)
                     elif special_tag_mode == "BLACKLIST" and not(s in special_tags_list):
                         pruned_tags.append(s)
-                    else:   #NONE or any other unexpected values
-                        pruned_tags.append(s)
             elif dropout_mode.startswith("RANDOM"):     
                 #iterate through dropout_tags and add to pruned_tags if random > probability
                 if special_tag_mode == "WHITELIST":
