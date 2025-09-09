@@ -119,7 +119,7 @@ class DropTags(
 
         if enabled and (probability > 0):
             #convert inputs to lists and set up final output list (pruned)
-            tags = [tag.strip() for tag in text.split(delimiter)]
+            tags = [tag.strip() for tag in text.split(delimiter) if len(tag.strip()) > 0]
             keep_tags = tags[:keep_tags_count]
             dropout_tags = tags[keep_tags_count:]
             pruned_tags = []
@@ -168,7 +168,7 @@ class DropTags(
                 pruned_tags = dropout_tags
 
             tags = keep_tags + pruned_tags
-            text = delimiter.join(tags)
+            text = (delimiter + " ").join(tags)
 
         return {
             self.text_out_name: text
