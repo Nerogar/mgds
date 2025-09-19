@@ -54,12 +54,9 @@ class EncodeQwenText(
             tokens_attention_mask = None
 
         with self._all_contexts(self.autocast_contexts):
-            if tokens_attention_mask is not None and self.dtype:
-                tokens_attention_mask = tokens_attention_mask.to(dtype=self.dtype)
-
             text_encoder_output = self.text_encoder(
                 tokens,
-                attention_mask=tokens_attention_mask,
+                attention_mask=tokens_attention_mask.to(dtype=self.dtype),
                 output_hidden_states=True,
                 return_dict=True,
                 use_cache=False,
