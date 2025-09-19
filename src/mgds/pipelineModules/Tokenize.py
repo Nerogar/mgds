@@ -1,4 +1,4 @@
-from transformers import CLIPTokenizer, T5Tokenizer, T5TokenizerFast, GemmaTokenizer, LlamaTokenizer
+from transformers import CLIPTokenizer, T5Tokenizer, T5TokenizerFast, GemmaTokenizer, LlamaTokenizer, Qwen2Tokenizer
 
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
@@ -13,11 +13,12 @@ class Tokenize(
             in_name: str,
             tokens_out_name: str,
             mask_out_name: str,
-            tokenizer: CLIPTokenizer | T5Tokenizer | T5TokenizerFast | GemmaTokenizer | LlamaTokenizer,
+            tokenizer: CLIPTokenizer | T5Tokenizer | T5TokenizerFast | GemmaTokenizer | LlamaTokenizer | Qwen2Tokenizer,
             max_token_length: int | None,
             format_text: str | None = None,
             additional_format_text_tokens: int | None = None,
             expand_mask: int = 0,
+            padding: str = 'max_length',
     ):
         super(Tokenize, self).__init__()
         self.in_name = in_name
@@ -28,6 +29,7 @@ class Tokenize(
         self.format_text = format_text
         self.additional_format_text_tokens = additional_format_text_tokens
         self.expand_mask = expand_mask
+        self.padding = padding
 
     def length(self) -> int:
         return self._get_previous_length(self.in_name)
@@ -45,7 +47,7 @@ class Tokenize(
             text = self.format_text.format(text)
             tokenizer_output = self.tokenizer(
                 text,
-                padding='max_length',
+                padding=self.padding,
                 truncation=True,
                 max_length=self.max_token_length + self.additional_format_text_tokens,
                 return_tensors="pt",
@@ -53,7 +55,7 @@ class Tokenize(
         else:
             tokenizer_output = self.tokenizer(
                 text,
-                padding='max_length',
+                padding=self.padding,
                 truncation=True,
                 max_length=self.max_token_length,
                 return_tensors="pt",
@@ -66,8 +68,9 @@ class Tokenize(
         mask = mask.squeeze(dim=0)
 
         #unmask n tokens:
-        masked_idx = (mask == 0).nonzero(as_tuple=True)[0]
-        mask[masked_idx[:self.expand_mask]] = 1 #dtype is long
+        if self.expand_mask > 0:
+            masked_idx = (mask == 0).nonzero(as_tuple=True)[0]
+            mask[masked_idx[:self.expand_mask]] = 1 #dtype is long
 
         return {
             self.tokens_out_name: tokens,

@@ -1,7 +1,7 @@
 from contextlib import nullcontext
 
 import torch
-from diffusers import AutoencoderKL, AutoencoderDC
+from diffusers import AutoencoderKL, AutoencoderDC, AutoencoderKLQwenImage
 from diffusers.models.autoencoders.autoencoder_kl_hunyuan_video import AutoencoderKLHunyuanVideo
 
 from mgds.PipelineModule import PipelineModule
@@ -16,7 +16,7 @@ class EncodeVAE(
             self,
             in_name: str,
             out_name: str,
-            vae: AutoencoderKL | AutoencoderDC | AutoencoderKLHunyuanVideo,
+            vae: AutoencoderKL | AutoencoderDC | AutoencoderKLHunyuanVideo | AutoencoderKLQwenImage,
             autocast_contexts: list[torch.autocast | None] = None,
             dtype: torch.dtype | None = None,
     ):
@@ -50,7 +50,12 @@ class EncodeVAE(
         while True:
             try:
                 with self._all_contexts(self.autocast_contexts):
-                    vae_output = self.vae.encode(image.unsqueeze(0))
+                    image = image.unsqueeze(dim=0) #add batch dimension
+                    if isinstance(self.vae, AutoencoderKLQwenImage) and image.ndim == 4:
+                        #Qwen VAE is prepared for video - add frames dimension
+                        #TODO why isn't this necessary for Hunyuan? Is this code somewhere else?
+                        image = image.unsqueeze(dim=2)
+                    vae_output = self.vae.encode(image)
                     if hasattr(vae_output, "latent_dist"):
                         output = vae_output.latent_dist
                     if hasattr(vae_output, "latent"):
