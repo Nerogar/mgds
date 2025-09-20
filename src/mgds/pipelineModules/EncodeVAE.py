@@ -51,10 +51,6 @@ class EncodeVAE(
             try:
                 with self._all_contexts(self.autocast_contexts):
                     image = image.unsqueeze(dim=0) #add batch dimension
-                    if isinstance(self.vae, AutoencoderKLQwenImage) and image.ndim == 4:
-                        #Qwen VAE is prepared for video - add frames dimension
-                        #TODO why isn't this necessary for Hunyuan? Is this code somewhere else?
-                        image = image.unsqueeze(dim=2)
                     vae_output = self.vae.encode(image)
                     if hasattr(vae_output, "latent_dist"):
                         output = vae_output.latent_dist
