@@ -186,7 +186,10 @@ class DiskCache(
                     aggregate_cache = [None]*size
 
                     with tqdm(total=size, smoothing=0.1, desc='caching') as bar:
-                        def fn(group_index, in_index, in_variation):
+                        def fn(group_index, in_index, in_variation, current_device):
+                            #preserve current device for multi-GPU, which is thread-local in torch:
+                            torch.cuda.set_device(current_device)
+
                             split_item = {}
                             aggregate_item = {}
 
@@ -200,7 +203,7 @@ class DiskCache(
                             aggregate_cache[group_index] = aggregate_item
 
                         fs = (self._state.executor.submit(
-                            fn, group_index, in_index, in_variation)
+                            fn, group_index, in_index, in_variation, torch.cuda.current_device())
                               for (group_index, in_index)
                               in enumerate(self.group_indices[group_key]))
                         for i, f in enumerate(concurrent.futures.as_completed(fs)):
@@ -218,7 +221,7 @@ class DiskCache(
 
                 if self.aggregate_cache[group_key][in_variation] is None:
                     self.aggregate_cache[group_key][in_variation] = \
-                        torch.load(os.path.realpath(os.path.join(cache_dir, 'aggregate.pt')), weights_only=False)
+                        torch.load(os.path.realpath(os.path.join(cache_dir, 'aggregate.pt')), weights_only=False, map_location=self.pipeline.device)
 
     def __get_input_index(self, out_variation: int, out_index: int) -> tuple[str, int, int, int]:
         offset = 0
@@ -251,7 +254,7 @@ class DiskCache(
 
         elif requested_name in self.split_names:
             cache_path = os.path.join(self.__get_cache_dir(group_key, in_variation), str(group_index) + '.pt')
-            split_item = torch.load(os.path.realpath(cache_path), weights_only=False)
+            split_item = torch.load(os.path.realpath(cache_path), weights_only=False, map_location=self.pipeline.device)
 
             for name in self.split_names:
                 item[name] = split_item[name]
