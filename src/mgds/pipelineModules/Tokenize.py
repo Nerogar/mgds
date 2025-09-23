@@ -18,7 +18,6 @@ class Tokenize(
             format_text: str | None = None,
             additional_format_text_tokens: int | None = None,
             expand_mask: int = 0,
-            padding: str = 'max_length',
     ):
         super(Tokenize, self).__init__()
         self.in_name = in_name
@@ -29,7 +28,6 @@ class Tokenize(
         self.format_text = format_text
         self.additional_format_text_tokens = additional_format_text_tokens
         self.expand_mask = expand_mask
-        self.padding = padding
 
     def length(self) -> int:
         return self._get_previous_length(self.in_name)
@@ -47,7 +45,7 @@ class Tokenize(
             text = self.format_text.format(text)
             tokenizer_output = self.tokenizer(
                 text,
-                padding=self.padding,
+                padding='max_length',
                 truncation=True,
                 max_length=self.max_token_length + self.additional_format_text_tokens,
                 return_tensors="pt",
@@ -55,7 +53,7 @@ class Tokenize(
         else:
             tokenizer_output = self.tokenizer(
                 text,
-                padding=self.padding,
+                padding='max_length',
                 truncation=True,
                 max_length=self.max_token_length,
                 return_tensors="pt",
