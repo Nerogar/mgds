@@ -1,7 +1,7 @@
 from contextlib import nullcontext
 
 import torch
-from diffusers import AutoencoderKL, AutoencoderDC
+from diffusers import AutoencoderKL, AutoencoderDC, AutoencoderKLQwenImage
 from diffusers.models.autoencoders.autoencoder_kl_hunyuan_video import AutoencoderKLHunyuanVideo
 
 from mgds.PipelineModule import PipelineModule
@@ -16,7 +16,7 @@ class EncodeVAE(
             self,
             in_name: str,
             out_name: str,
-            vae: AutoencoderKL | AutoencoderDC | AutoencoderKLHunyuanVideo,
+            vae: AutoencoderKL | AutoencoderDC | AutoencoderKLHunyuanVideo | AutoencoderKLQwenImage,
             autocast_contexts: list[torch.autocast | None] = None,
             dtype: torch.dtype | None = None,
     ):

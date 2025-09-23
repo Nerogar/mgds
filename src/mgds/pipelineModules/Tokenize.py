@@ -1,4 +1,4 @@
-from transformers import CLIPTokenizer, T5Tokenizer, T5TokenizerFast, GemmaTokenizer, LlamaTokenizer
+from transformers import CLIPTokenizer, T5Tokenizer, T5TokenizerFast, GemmaTokenizer, LlamaTokenizer, Qwen2Tokenizer
 
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
@@ -13,7 +13,7 @@ class Tokenize(
             in_name: str,
             tokens_out_name: str,
             mask_out_name: str,
-            tokenizer: CLIPTokenizer | T5Tokenizer | T5TokenizerFast | GemmaTokenizer | LlamaTokenizer,
+            tokenizer: CLIPTokenizer | T5Tokenizer | T5TokenizerFast | GemmaTokenizer | LlamaTokenizer | Qwen2Tokenizer,
             max_token_length: int | None,
             format_text: str | None = None,
             additional_format_text_tokens: int | None = None,
@@ -66,8 +66,9 @@ class Tokenize(
         mask = mask.squeeze(dim=0)
 
         #unmask n tokens:
-        masked_idx = (mask == 0).nonzero(as_tuple=True)[0]
-        mask[masked_idx[:self.expand_mask]] = 1 #dtype is long
+        if self.expand_mask > 0:
+            masked_idx = (mask == 0).nonzero(as_tuple=True)[0]
+            mask[masked_idx[:self.expand_mask]] = 1 #dtype is long
 
         return {
             self.tokens_out_name: tokens,
