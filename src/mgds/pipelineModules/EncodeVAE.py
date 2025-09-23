@@ -50,7 +50,7 @@ class EncodeVAE(
         while True:
             try:
                 with self._all_contexts(self.autocast_contexts):
-                    vae_output = self.vae.encode(image.unsqueeze(dim=0))
+                    vae_output = self.vae.encode(image.unsqueeze(0))
                     if hasattr(vae_output, "latent_dist"):
                         output = vae_output.latent_dist
                     if hasattr(vae_output, "latent"):
