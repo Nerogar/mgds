@@ -38,13 +38,13 @@ class ShuffleTags(
         rand = self._get_rand(variation, index)
 
         if enabled:
-            tags = [tag.strip() for tag in text.split(delimiter)]
+            tags = [tag.strip() for tag in text.split(delimiter) if len(tag.strip()) > 0]
             keep_tags = tags[:keep_tags_count]
             shuffle_tags = tags[keep_tags_count:]
             rand.shuffle(shuffle_tags)
             tags = keep_tags + shuffle_tags
 
-            text = ", ".join(tags)
+            text = (delimiter + " ").join(tags)
 
         return {
             self.text_out_name: text

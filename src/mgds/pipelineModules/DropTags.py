@@ -119,7 +119,7 @@ class DropTags(
 
         if enabled and (probability > 0):
             #convert inputs to lists and set up final output list (pruned)
-            tags = [tag.strip() for tag in text.split(delimiter)]
+            tags = [tag.strip() for tag in text.split(delimiter) if len(tag.strip()) > 0]
             keep_tags = tags[:keep_tags_count]
             dropout_tags = tags[keep_tags_count:]
             pruned_tags = []
@@ -146,8 +146,6 @@ class DropTags(
                         pruned_tags.append(s)
                     elif special_tag_mode == "BLACKLIST" and not(s in special_tags_list):
                         pruned_tags.append(s)
-                    else:   #NONE or any other unexpected values
-                        pruned_tags.append(s)
             elif dropout_mode.startswith("RANDOM"):     
                 #iterate through dropout_tags and add to pruned_tags if random > probability
                 if special_tag_mode == "WHITELIST":
@@ -170,7 +168,7 @@ class DropTags(
                 pruned_tags = dropout_tags
 
             tags = keep_tags + pruned_tags
-            text = delimiter.join(tags)
+            text = (delimiter + " ").join(tags)
 
         return {
             self.text_out_name: text
