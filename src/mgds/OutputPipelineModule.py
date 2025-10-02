@@ -1,6 +1,7 @@
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.SerialPipelineModule import SerialPipelineModule
-
+import torch
+import numbers
 
 class OutputPipelineModule(
     PipelineModule,
@@ -37,7 +38,15 @@ class OutputPipelineModule(
             if self._get_previous_length(input_name) <= self.current_index:
                 raise StopIteration
 
-            item[output_name] = self._get_previous_item(self.current_variation, input_name, self.current_index)
+            new_item = self._get_previous_item(self.current_variation, input_name, self.current_index)
+
+            if isinstance(new_item, numbers.Number):
+                new_item = torch.tensor(new_item)
+
+            if torch.is_tensor(new_item):
+                new_item = new_item.to(self.pipeline.device)
+
+            item[output_name] = new_item
 
         # filter out None values
         item = {k: v for k, v in item.items() if v is not None}
