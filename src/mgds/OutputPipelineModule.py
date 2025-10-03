@@ -1,7 +1,6 @@
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.SerialPipelineModule import SerialPipelineModule
 import torch
-import numbers
 
 class OutputPipelineModule(
     PipelineModule,
@@ -40,7 +39,7 @@ class OutputPipelineModule(
 
             new_item = self._get_previous_item(self.current_variation, input_name, self.current_index)
 
-            if isinstance(new_item, numbers.Number):
+            if isinstance(new_item, (int, float)):
                 new_item = torch.tensor(new_item)
 
             if torch.is_tensor(new_item):
