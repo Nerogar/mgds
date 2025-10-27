@@ -44,7 +44,7 @@ class ShuffleTags(
             rand.shuffle(shuffle_tags)
             tags = keep_tags + shuffle_tags
 
-            text = ", ".join(tags)
+            text = f"{delimiter.strip()} ".join(tags)
 
         return {
             self.text_out_name: text
