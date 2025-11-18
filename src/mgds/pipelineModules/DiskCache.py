@@ -203,7 +203,6 @@ class DiskCache(
                             torch.save(split_item, os.path.realpath(os.path.join(cache_dir, str(group_index) + '.pt')))
                             aggregate_cache[group_index] = aggregate_item
 
-                        # pick device index only on CUDA
                         current_device = torch.cuda.current_device() if torch.cuda.is_available() else None
 
                         fs = (self._state.executor.submit(
