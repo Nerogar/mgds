@@ -204,10 +204,10 @@ class DiskCache(
                             aggregate_cache[group_index] = aggregate_item
 
                         # pick device index only on CUDA
-                        current_dev = torch.cuda.current_device() if torch.cuda.is_available() else None
+                        current_device = torch.cuda.current_device() if torch.cuda.is_available() else None
 
                         fs = (self._state.executor.submit(
-                            fn, group_index, in_index, in_variation, current_dev)
+                            fn, group_index, in_index, in_variation, current_device)
                               for (group_index, in_index)
                               in enumerate(self.group_indices[group_key]))
                         for i, f in enumerate(concurrent.futures.as_completed(fs)):
