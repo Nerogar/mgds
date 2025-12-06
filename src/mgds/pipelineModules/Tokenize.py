@@ -3,6 +3,8 @@ from transformers import CLIPTokenizer, T5Tokenizer, T5TokenizerFast, GemmaToken
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
 
+from typing import Callable
+
 
 class Tokenize(
     PipelineModule,
@@ -17,6 +19,8 @@ class Tokenize(
             max_token_length: int | None,
             format_text: str | None = None,
             additional_format_text_tokens: int | None = None,
+            apply_chat_template: Callable | None = None,
+            apply_chat_template_kwargs = {},
             expand_mask: int = 0,
     ):
         super(Tokenize, self).__init__()
@@ -26,6 +30,8 @@ class Tokenize(
         self.tokenizer = tokenizer
         self.max_token_length = max_token_length
         self.format_text = format_text
+        self.apply_chat_template = apply_chat_template
+        self.apply_chat_template_kwargs = apply_chat_template_kwargs
         self.additional_format_text_tokens = additional_format_text_tokens
         self.expand_mask = expand_mask
 
@@ -41,23 +47,27 @@ class Tokenize(
     def get_item(self, variation: int, index: int, requested_name: str = None) -> dict:
         text = self._get_previous_item(variation, self.in_name, index)
 
+        max_length = self.max_token_length
+
         if self.format_text is not None:
             text = self.format_text.format(text)
-            tokenizer_output = self.tokenizer(
-                text,
-                padding='max_length',
-                truncation=True,
-                max_length=self.max_token_length + self.additional_format_text_tokens,
-                return_tensors="pt",
+            max_length += self.additional_format_text_tokens
+
+        if self.apply_chat_template is not None:
+            messages = self.apply_chat_template(text)
+            text = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                **self.apply_chat_template_kwargs,
             )
-        else:
-            tokenizer_output = self.tokenizer(
-                text,
-                padding='max_length',
-                truncation=True,
-                max_length=self.max_token_length,
-                return_tensors="pt",
-            )
+
+        tokenizer_output = self.tokenizer(
+            text,
+            padding='max_length',
+            truncation=True,
+            max_length=max_length,
+            return_tensors="pt",
+        )
 
         tokens = tokenizer_output.input_ids.to(self.pipeline.device)
         mask = tokenizer_output.attention_mask.to(self.pipeline.device)

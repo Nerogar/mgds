@@ -3,7 +3,7 @@ from contextlib import nullcontext
 import torch
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
-from transformers import Qwen2_5_VLForConditionalGeneration
+from transformers import Qwen2_5_VLForConditionalGeneration, Qwen3ForCausalLM
 
 
 class EncodeQwenText(
@@ -16,7 +16,7 @@ class EncodeQwenText(
             tokens_attention_mask_in_name: str | None,
             hidden_state_out_name: str,
             tokens_attention_mask_out_name: str | None,
-            text_encoder: Qwen2_5_VLForConditionalGeneration,
+            text_encoder: Qwen2_5_VLForConditionalGeneration | Qwen3ForCausalLM,
             hidden_state_output_index: int | None = None,
             crop_start: int | None = None,
             autocast_contexts: list[torch.autocast | None] = None,
