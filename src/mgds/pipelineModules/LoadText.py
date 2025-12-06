@@ -29,6 +29,13 @@ class LoadText(
                 f.close()
         except FileNotFoundError:
             text = ''
+        except UnicodeDecodeError as e:
+            raise RuntimeError(
+                f"Failed to load caption file '{path}': The file contains non-UTF-8 characters."
+                "This is a data/workflow issue, not an OT bug. Ensure all your caption files are saved"
+                "with valid UTF-8 encoding. You may need to re-save the file with proper encoding or fix the "
+                "captioning tool that generated it."
+            ) from e
         except:
             print("could not load text, it might be corrupted: " + path)
             raise
