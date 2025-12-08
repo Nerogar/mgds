@@ -1,4 +1,6 @@
 from transformers import CLIPTokenizer, T5Tokenizer, T5TokenizerFast, GemmaTokenizer, LlamaTokenizer, Qwen2Tokenizer
+from transformers.utils.generic import PaddingStrategy
+from transformers.tokenization_utils_base import TruncationStrategy
 
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
@@ -18,6 +20,8 @@ class Tokenize(
             format_text: str | None = None,
             additional_format_text_tokens: int | None = None,
             expand_mask: int = 0,
+            padding_strategy: PaddingStrategy|str = PaddingStrategy.MAX_LENGTH,
+            truncation_strategy: TruncationStrategy|str = TruncationStrategy.LONGEST_FIRST,
     ):
         super(Tokenize, self).__init__()
         self.in_name = in_name
@@ -28,6 +32,8 @@ class Tokenize(
         self.format_text = format_text
         self.additional_format_text_tokens = additional_format_text_tokens
         self.expand_mask = expand_mask
+        self.padding_strategy = padding_strategy
+        self.truncation_strategy = truncation_strategy
 
     def length(self) -> int:
         return self._get_previous_length(self.in_name)
@@ -45,16 +51,16 @@ class Tokenize(
             text = self.format_text.format(text)
             tokenizer_output = self.tokenizer(
                 text,
-                padding='max_length',
-                truncation=True,
+                padding=self.padding_strategy,
+                truncation=self.truncation_strategy,
                 max_length=self.max_token_length + self.additional_format_text_tokens,
                 return_tensors="pt",
             )
         else:
             tokenizer_output = self.tokenizer(
                 text,
-                padding='max_length',
-                truncation=True,
+                padding=self.padding_strategy,
+                truncation=self.truncation_strategy,
                 max_length=self.max_token_length,
                 return_tensors="pt",
             )
