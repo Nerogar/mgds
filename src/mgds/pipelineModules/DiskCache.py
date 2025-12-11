@@ -4,6 +4,7 @@ import json
 import math
 import os
 from typing import Any, Callable
+from pathlib import Path
 
 import torch
 from tqdm import tqdm
@@ -29,7 +30,7 @@ class DiskCache(
             before_cache_fun: Callable[[], None] | None = None,
     ):
         super(DiskCache, self).__init__()
-        self.cache_dir = cache_dir
+        self.cache_dir = Path(cache_dir)
 
         self.split_names = [] if split_names is None else split_names
         self.aggregate_names = [] if aggregate_names is None else aggregate_names
@@ -57,12 +58,15 @@ class DiskCache(
             return sum(x for x in self.group_output_samples.values())
 
     def get_inputs(self) -> list[str]:
-        return self.split_names + self.aggregate_names \
-            + [self.variations_in_name] if self.variations_in_name else [] \
-            + [self.balancing_in_name] if self.variations_in_name else [] \
-            + [self.balancing_strategy_in_name] if self.variations_in_name else [] \
-            + self.variations_group_in_names if self.variations_in_name else [] \
-            + [self.group_enabled_in_name] if self.variations_in_name else []
+        return (
+            self.split_names
+            + self.aggregate_names
+            + ([self.variations_in_name] if self.variations_in_name else [])
+            + ([self.balancing_in_name] if self.variations_in_name else [])
+            + ([self.balancing_strategy_in_name] if self.variations_in_name else [])
+            + (self.variations_group_in_names if self.variations_in_name else [])
+            + ([self.group_enabled_in_name] if self.variations_in_name else [])
+        )
 
     def get_outputs(self) -> list[str]:
         return self.split_names + self.aggregate_names
@@ -132,24 +136,58 @@ class DiskCache(
 
         self.variations_initialized = True
 
-    def __get_cache_dir(self, group_key: str, in_variation: int) -> str:
-        variations = self.group_variations[group_key]
-        return os.path.join(self.cache_dir, group_key, "variation-" + str(in_variation % variations))
+    def __get_variation_cache_dir(self, group_key: str, in_variation: int) -> Path:
+        num_variations = self.group_variations[group_key]
+        return self.cache_dir.joinpath(group_key, f"variation-{str(in_variation % num_variations)}").resolve()
+    
+    def __get_aggregate_cache_filename(self, group_key: str, in_variation: int) -> Path:
+        variation_cache_dir = self.__get_variation_cache_dir(group_key, in_variation)
 
-    def __is_caching_done(self, group_key: str, in_variation: int):
-        cache_dir = self.__get_cache_dir(group_key, in_variation)
+        return variation_cache_dir.joinpath('aggregate.pt')
 
-        cache_exists = False
-        caching_done = False
+    def __get_split_item_cache_filename(self, group_key: str, in_variation: int, group_index: int) -> Path:
+        variation_cache_dir = self.__get_variation_cache_dir(group_key, in_variation)
 
-        if os.path.isdir(cache_dir):
-            with os.scandir(cache_dir) as path_iter:
-                cache_exists = any(path_iter)
+        return variation_cache_dir.joinpath(f'{str(group_index)}.pt')
 
-            aggregate_path = os.path.join(cache_dir, 'aggregate.pt')
-            caching_done = os.path.exists(aggregate_path) and os.path.isfile(aggregate_path)
+    def __get_aggregate_cache_data(self, group_key: str, in_variation: int) -> list|None:
+        aggregate_file = self.__get_aggregate_cache_filename(group_key, in_variation)
+        if not aggregate_file.exists():
+            return None
 
-        return cache_exists and caching_done
+        # The aggregate cache is a list which contains 0 or more pieces of metadata for each
+        # sample. For example, the 'image_path' key might be a string for the filename the
+        # sample represents.
+
+        aggregate_cache: list[dict[str, Any]] = torch.load(aggregate_file,
+                                                           weights_only=False,
+                                                           map_location=self.pipeline.device)
+        if not isinstance(aggregate_cache, list):
+            return None
+
+        for group_index, cache_item in enumerate(aggregate_cache):
+            if cache_item is None:
+                continue
+
+            if not isinstance(cache_item, dict):
+                return None
+
+            split_item = self.__get_split_item_cache_filename(group_key, in_variation, group_index)
+            if not split_item.exists():
+                return None
+
+        return aggregate_cache
+
+    def __save_variation_aggregate_cache(self, group_key: str, in_variation: int, aggregate_cache_data: list):
+        aggregate_cache_file = self.__get_aggregate_cache_filename(group_key, in_variation)
+
+        # Save to tmp file first to mitigate risks of partial-writes.
+        aggregate_cache_tmp_file = aggregate_cache_file.with_suffix('.pt_tmp')
+
+        torch.save(aggregate_cache_data, aggregate_cache_tmp_file)
+
+        # Rename our tmp file and replace any existing file in its final location
+        aggregate_cache_tmp_file.replace(aggregate_cache_file)
 
     def __clone_for_cache(self, x: Any):
         if isinstance(x, torch.Tensor):
@@ -174,22 +212,33 @@ class DiskCache(
 
             variations = self.group_variations[group_key]
             for in_variation in [(x % variations) for x in range(start_variation, end_variation + 1, 1)]:
-                cache_dir = self.__get_cache_dir(group_key, in_variation)
-                if not self.__is_caching_done(group_key, in_variation):
+                self.__get_variation_cache_dir(group_key, in_variation).mkdir(parents=True, exist_ok=True)
+
+                group_num_items = len(self.group_indices[group_key])
+                num_uncached_items = 0
+
+                variation_aggregate_cache = self.__get_aggregate_cache_data(group_key, in_variation)
+                if variation_aggregate_cache is not None:
+                    if len(variation_aggregate_cache) == group_num_items:
+                        for cache_item in variation_aggregate_cache:
+                            if cache_item is None:
+                                num_uncached_items += 1
+                    else:
+                        variation_aggregate_cache = None
+
+                if variation_aggregate_cache is None:
+                    num_uncached_items = group_num_items
+                    variation_aggregate_cache = [None] * group_num_items
+                
+                if num_uncached_items > 0:
                     if not before_cache_fun_called and self.before_cache_fun is not None:
                         before_cache_fun_called = True
                         self.before_cache_fun()
 
-                    os.makedirs(cache_dir, exist_ok=True)
-
-                    size = len(self.group_indices[group_key])
-                    aggregate_cache = [None]*size
-
-                    with tqdm(total=size, smoothing=0.1, desc='caching') as bar:
-                        def fn(group_index, in_index, in_variation, current_device):
+                    with tqdm(total=num_uncached_items, smoothing=0.1, desc=f'caching {group_key}-{in_variation}') as bar:
+                        def fn(group_key, in_variation, group_index, in_index, current_device):
                             #preserve current device for multi-GPU, which is thread-local in torch:
-                            if torch.cuda.is_available() and current_device is not None:
-                                torch.cuda.set_device(current_device)
+                            torch.cuda.set_device(current_device)
 
                             split_item = {}
                             aggregate_item = {}
@@ -200,15 +249,19 @@ class DiskCache(
                                 for name in self.aggregate_names:
                                     aggregate_item[name] = self.__clone_for_cache(self._get_previous_item(in_variation, name, in_index))
 
-                            torch.save(split_item, os.path.realpath(os.path.join(cache_dir, str(group_index) + '.pt')))
-                            aggregate_cache[group_index] = aggregate_item
+                            split_item_cache_filename = self.__get_split_item_cache_filename(group_key, in_variation, group_index)
+                            split_item_cache_tmp_filename = split_item_cache_filename.with_suffix('.pt_tmp')
 
-                        current_device = torch.cuda.current_device() if torch.cuda.is_available() else None
+                            torch.save(split_item, split_item_cache_tmp_filename)
+                            split_item_cache_tmp_filename.replace(split_item_cache_filename)
+
+                            variation_aggregate_cache[group_index] = aggregate_item
 
                         fs = (self._state.executor.submit(
-                            fn, group_index, in_index, in_variation, current_device)
+                            fn, group_key, in_variation, group_index, in_index, torch.cuda.current_device())
                               for (group_index, in_index)
-                              in enumerate(self.group_indices[group_key]))
+                              in enumerate(self.group_indices[group_key])
+                              if variation_aggregate_cache[group_index] is None)
                         for i, f in enumerate(concurrent.futures.as_completed(fs)):
                             try:
                                 f.result()
@@ -218,13 +271,19 @@ class DiskCache(
                                 raise
                             if i % 250 == 0:
                                 self._torch_gc()
+                            if i % 100 == 0 and i > 0:
+                                # Checkpoint our current aggregate cache file
+                                self.__save_variation_aggregate_cache(group_key, in_variation, variation_aggregate_cache)
+
                             bar.update(1)
 
-                    torch.save(aggregate_cache, os.path.realpath(os.path.join(cache_dir, 'aggregate.pt')))
+                    self.__save_variation_aggregate_cache(group_key, in_variation, variation_aggregate_cache)
 
                 if self.aggregate_cache[group_key][in_variation] is None:
                     self.aggregate_cache[group_key][in_variation] = \
-                        torch.load(os.path.realpath(os.path.join(cache_dir, 'aggregate.pt')), weights_only=False, map_location=self.pipeline.device)
+                        torch.load(self.__get_aggregate_cache_filename(group_key, in_variation),
+                                   weights_only=False,
+                                   map_location=self.pipeline.device)
 
     def __get_input_index(self, out_variation: int, out_index: int) -> tuple[str, int, int, int]:
         offset = 0
@@ -239,7 +298,7 @@ class DiskCache(
             group_index = local_index % len(self.group_indices[group_key])
             in_index = self.group_indices[group_key][group_index]
 
-            return group_key, in_variation, group_index, in_index
+            return (group_key, in_variation, group_index, in_index)
 
     def start(self, out_variation: int):
         self.__refresh_cache(out_variation)
@@ -249,6 +308,18 @@ class DiskCache(
 
         group_key, in_variation, group_index, in_index = self.__get_input_index(self.current_variation, index)
 
+        assert isinstance(self.aggregate_cache, dict)
+        if group_key not in self.aggregate_cache:
+            raise IndexError(f'Cannot load index "{index}" ("{requested_name}"), group "{group_key}" is missing')
+
+        assert isinstance(self.aggregate_cache[group_key], list)
+        if in_variation < 0 or in_variation >= len(self.aggregate_cache[group_key]):
+            raise IndexError(f'Cannot load index "{index}" ("{requested_name}"), variation "{in_variation}" is missing from group "{group_key}"')
+
+        assert isinstance(self.aggregate_cache[group_key][in_variation], list)
+        if group_index < 0 or group_index >= len(self.aggregate_cache[group_key][in_variation]):
+            raise IndexError(f'Cannot load index "{index}" ("{requested_name}"), group index "{group_index}" is missing from group "{group_key}" variation "{in_variation}"')
+
         aggregate_item = self.aggregate_cache[group_key][in_variation][group_index]
 
         if requested_name in self.aggregate_names:
@@ -256,8 +327,8 @@ class DiskCache(
                 item[name] = aggregate_item[name]
 
         elif requested_name in self.split_names:
-            cache_path = os.path.join(self.__get_cache_dir(group_key, in_variation), str(group_index) + '.pt')
-            split_item = torch.load(os.path.realpath(cache_path), weights_only=False, map_location=self.pipeline.device)
+            item_cache_path = self.__get_split_item_cache_filename(group_key, in_variation, group_index)
+            split_item = torch.load(item_cache_path, weights_only=False, map_location=self.pipeline.device)
 
             for name in self.split_names:
                 item[name] = split_item[name]
