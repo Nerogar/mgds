@@ -58,15 +58,12 @@ class DiskCache(
             return sum(x for x in self.group_output_samples.values())
 
     def get_inputs(self) -> list[str]:
-        return (
-            self.split_names
-            + self.aggregate_names
-            + ([self.variations_in_name] if self.variations_in_name else [])
-            + ([self.balancing_in_name] if self.variations_in_name else [])
-            + ([self.balancing_strategy_in_name] if self.variations_in_name else [])
-            + (self.variations_group_in_names if self.variations_in_name else [])
+        return self.split_names + self.aggregate_names \
+            + ([self.variations_in_name] if self.variations_in_name else []) \
+            + ([self.balancing_in_name] if self.variations_in_name else []) \
+            + ([self.balancing_strategy_in_name] if self.variations_in_name else []) \
+            + (self.variations_group_in_names if self.variations_in_name else []) \
             + ([self.group_enabled_in_name] if self.variations_in_name else [])
-        )
 
     def get_outputs(self) -> list[str]:
         return self.split_names + self.aggregate_names
@@ -142,12 +139,10 @@ class DiskCache(
     
     def __get_aggregate_cache_filename(self, group_key: str, in_variation: int) -> Path:
         variation_cache_dir = self.__get_variation_cache_dir(group_key, in_variation)
-
         return variation_cache_dir.joinpath('aggregate.pt')
 
     def __get_split_item_cache_filename(self, group_key: str, in_variation: int, group_index: int) -> Path:
         variation_cache_dir = self.__get_variation_cache_dir(group_key, in_variation)
-
         return variation_cache_dir.joinpath(f'{str(group_index)}.pt')
 
     def __get_aggregate_cache_data(self, group_key: str, in_variation: int) -> list|None:
@@ -238,7 +233,8 @@ class DiskCache(
                     with tqdm(total=num_uncached_items, smoothing=0.1, desc=f'caching {group_key}-{in_variation}') as bar:
                         def fn(group_key, in_variation, group_index, in_index, current_device):
                             #preserve current device for multi-GPU, which is thread-local in torch:
-                            torch.cuda.set_device(current_device)
+                            if torch.cuda.is_available() and current_device is not None:
+                                torch.cuda.set_device(current_device)
 
                             split_item = {}
                             aggregate_item = {}
@@ -257,8 +253,10 @@ class DiskCache(
 
                             variation_aggregate_cache[group_index] = aggregate_item
 
+                        current_device = torch.cuda.current_device() if torch.cuda.is_available() else None
+
                         fs = (self._state.executor.submit(
-                            fn, group_key, in_variation, group_index, in_index, torch.cuda.current_device())
+                            fn, group_key, in_variation, group_index, in_index, current_device)
                               for (group_index, in_index)
                               in enumerate(self.group_indices[group_key])
                               if variation_aggregate_cache[group_index] is None)
@@ -298,7 +296,7 @@ class DiskCache(
             group_index = local_index % len(self.group_indices[group_key])
             in_index = self.group_indices[group_key][group_index]
 
-            return (group_key, in_variation, group_index, in_index)
+            return group_key, in_variation, group_index, in_index
 
     def start(self, out_variation: int):
         self.__refresh_cache(out_variation)
