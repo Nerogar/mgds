@@ -60,11 +60,9 @@ class EncodeMistralText(
             )
 
 
-        tokens = tokens.squeeze()
-        text_encoder_output = torch.stack([text_encoder_output.hidden_states[k] for k in self.hidden_state_indexes], dim=1)
-        batch_size, num_channels, seq_len, hidden_dim = text_encoder_output.shape
-        text_encoder_output = text_encoder_output.permute(0, 2, 1, 3).reshape(batch_size, seq_len, num_channels * hidden_dim)
-        hidden_state = text_encoder_output.squeeze(dim=0)
+        hidden_state = torch.cat([text_encoder_output.hidden_states[k] for k in self.hidden_state_indexes], dim=-1)
+        tokens = tokens.squeeze(dim=0)
+        hidden_state = hidden_state.squeeze(dim=0)
         tokens_attention_mask = tokens_attention_mask.squeeze(dim=0)
 
         return {

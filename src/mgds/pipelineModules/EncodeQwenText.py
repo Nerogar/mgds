@@ -17,7 +17,7 @@ class EncodeQwenText(
             hidden_state_out_name: str,
             tokens_attention_mask_out_name: str | None,
             text_encoder: Qwen2_5_VLForConditionalGeneration | Qwen3ForCausalLM,
-            hidden_state_output_index: int | None = None,
+            hidden_state_output_index: int | list[int],
             crop_start: int | None = None,
             autocast_contexts: list[torch.autocast | None] = None,
             dtype: torch.dtype | None = None,
@@ -28,7 +28,7 @@ class EncodeQwenText(
         self.hidden_state_out_name = hidden_state_out_name
         self.tokens_attention_mask_out_name = tokens_attention_mask_out_name
         self.text_encoder = text_encoder
-        self.hidden_state_output_index = hidden_state_output_index
+        self.hidden_state_indexes = hidden_state_output_index if isinstance(hidden_state_output_index, list) else [hidden_state_output_index]
         self.crop_start = crop_start
 
         self.autocast_contexts = [nullcontext()] if autocast_contexts is None else autocast_contexts
@@ -62,8 +62,9 @@ class EncodeQwenText(
                 use_cache=False,
             )
 
-        tokens = tokens.squeeze()
-        hidden_state = text_encoder_output.hidden_states[self.hidden_state_output_index].squeeze(dim=0)
+        hidden_state = torch.cat([text_encoder_output.hidden_states[k] for k in self.hidden_state_indexes], dim=-1)
+        tokens = tokens.squeeze(dim=0)
+        hidden_state = hidden_state.squeeze(dim=0)
         tokens_attention_mask = tokens_attention_mask.squeeze(dim=0)
 
         if self.crop_start is not None:
