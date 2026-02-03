@@ -52,6 +52,7 @@ class Tokenize(
         if self.format_text is not None:
             text = self.format_text.format(text)
             max_length += self.additional_format_text_tokens
+
         if self.apply_chat_template is not None:
             messages = self.apply_chat_template(text)
             text = self.tokenizer.apply_chat_template(
