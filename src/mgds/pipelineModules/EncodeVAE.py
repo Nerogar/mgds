@@ -54,7 +54,7 @@ class EncodeVAE(
                     vae_output = self.vae.encode(image.unsqueeze(0))
                     if hasattr(vae_output, "latent_dist"):
                         output = vae_output.latent_dist
-                    if hasattr(vae_output, "latent"): #FIXME elif?
+                    if hasattr(vae_output, "latent"):
                         output = vae_output.latent.squeeze(dim=0)
                     break
             except RuntimeError:
