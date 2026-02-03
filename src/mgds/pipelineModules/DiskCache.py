@@ -3,6 +3,7 @@ import hashlib
 import json
 import math
 import os
+import pathlib
 from typing import Any, Callable
 
 import torch
@@ -10,6 +11,38 @@ from tqdm import tqdm
 
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.SingleVariationRandomAccessPipelineModule import SingleVariationRandomAccessPipelineModule
+from mgds.util.PersistentCacheState import PersistentCacheState
+from mgds.util.FileUtil import safe_write_json_file
+
+def _clone_for_cache(item: Any) -> Any:
+    if isinstance(item, torch.Tensor):
+        return item.clone()
+    else:
+        return item
+
+def _build_cache_data(pipeline: PipelineModule,
+                      persistent_cache: PersistentCacheState,
+                      split_names: list[str],
+                      aggregate_names: list[str],
+                      group_index: int,
+                      in_index: int,
+                      in_variation: int,
+                      current_thread_cuda_device: int) -> tuple[int, dict]:
+    # preserve current device for multi-GPU, which is thread-local in torch:
+    if torch.cuda.is_available() and current_thread_cuda_device is not None:
+        torch.cuda.set_device(current_thread_cuda_device)
+
+    with torch.no_grad():
+        split_item = {}
+        for name in split_names:
+            split_item[name] = _clone_for_cache(pipeline._get_previous_item(in_variation, name, in_index))
+        persistent_cache.save_split_item(group_index, split_item)
+        del split_item
+
+        aggregate_item = {}
+        for name in aggregate_names:
+            aggregate_item[name] = _clone_for_cache(pipeline._get_previous_item(in_variation, name, in_index))
+        return group_index, aggregate_item
 
 
 class DiskCache(
@@ -19,6 +52,7 @@ class DiskCache(
     def __init__(
             self,
             cache_dir: str,
+            persistent_key_in_name: str | None = None,
             split_names: list[str] | None = None,
             aggregate_names: list[str] | None = None,
             variations_in_name: str | None = None,
@@ -26,10 +60,14 @@ class DiskCache(
             balancing_strategy_in_name: str | None = None,
             variations_group_in_name: str | list[str] | None = None,
             group_enabled_in_name: str | None = None,
+            group_name_in_name: str | None = None,
             before_cache_fun: Callable[[], None] | None = None,
+            allow_unsafe_types: bool = False,
     ):
         super(DiskCache, self).__init__()
         self.cache_dir = cache_dir
+
+        self.persistent_key_in_name = persistent_key_in_name
 
         self.split_names = [] if split_names is None else split_names
         self.aggregate_names = [] if aggregate_names is None else aggregate_names
@@ -41,8 +79,11 @@ class DiskCache(
             [variations_group_in_name] if isinstance(variations_group_in_name, str) else variations_group_in_name
 
         self.group_enabled_in_name = group_enabled_in_name
+        self.group_name_in_name = group_name_in_name
 
         self.before_cache_fun = (lambda: None) if before_cache_fun is None else before_cache_fun
+
+        self.allow_unsafe_types = allow_unsafe_types
 
         self.group_variations = {}
         self.group_indices = {}
@@ -81,10 +122,10 @@ class DiskCache(
             self.group_output_samples, mapping group keys to the number of indices in the cache output for each group
         """
         if self.variations_in_name is not None:
-            group_variations = {}
-            group_indices = {}
-            group_balancing = {}
-            group_balancing_strategy = {}
+            group_variations: dict[str, int] = {}
+            group_indices: dict[str, list] = {}
+            group_balancing: dict[str, int] = {}
+            group_balancing_strategy: dict[str, str] = {}
 
             for in_index in range(self._get_previous_length(self.variations_in_name)):
                 if self.group_enabled_in_name and not self._get_previous_item(0, self.group_enabled_in_name, in_index):
@@ -125,6 +166,7 @@ class DiskCache(
             group_output_samples = {'': len(group_indices[''])}
 
         self.aggregate_cache = {}
+        self.persistent_cache = {}
 
         self.group_variations = group_variations
         self.group_indices = group_indices
@@ -132,29 +174,9 @@ class DiskCache(
 
         self.variations_initialized = True
 
-    def __get_cache_dir(self, group_key: str, in_variation: int) -> str:
+    def __get_cache_dir_path(self, group_key: str, in_variation: int) -> pathlib.Path:
         variations = self.group_variations[group_key]
-        return os.path.join(self.cache_dir, group_key, "variation-" + str(in_variation % variations))
-
-    def __is_caching_done(self, group_key: str, in_variation: int):
-        cache_dir = self.__get_cache_dir(group_key, in_variation)
-
-        cache_exists = False
-        caching_done = False
-
-        if os.path.isdir(cache_dir):
-            with os.scandir(cache_dir) as path_iter:
-                cache_exists = any(path_iter)
-
-            aggregate_path = os.path.join(cache_dir, 'aggregate.pt')
-            caching_done = os.path.exists(aggregate_path) and os.path.isfile(aggregate_path)
-
-        return cache_exists and caching_done
-
-    def __clone_for_cache(self, x: Any):
-        if isinstance(x, torch.Tensor):
-            return x.clone()
-        return x
+        return pathlib.Path(self.cache_dir) / group_key / f"variation-{str(in_variation % variations)}"
 
     def __refresh_cache(self, out_variation: int):
         if not self.variations_initialized:
@@ -162,7 +184,9 @@ class DiskCache(
 
         self.aggregate_cache = {}
         for group_key, variations in self.group_variations.items():
-            self.aggregate_cache[group_key] = [None for _ in range(variations)]
+            self.aggregate_cache[group_key] = [None] * variations
+            if group_key not in self.persistent_cache:
+                self.persistent_cache[group_key] = [None] * variations
 
         before_cache_fun_called = False
         for group_key in self.group_variations.keys():
@@ -174,57 +198,113 @@ class DiskCache(
 
             variations = self.group_variations[group_key]
             for in_variation in [(x % variations) for x in range(start_variation, end_variation + 1, 1)]:
-                cache_dir = self.__get_cache_dir(group_key, in_variation)
-                if not self.__is_caching_done(group_key, in_variation):
+                cache_path = self.__get_cache_dir_path(group_key, in_variation)
+
+                # Load Persistent Cache State
+                persistent_cache_path = cache_path / 'cache_state.json'
+
+                persistent_cache = None
+                if persistent_cache_path.is_file():
+                    try:
+                        with open(persistent_cache_path, 'r') as persistent_cache_reader:
+                            persistent_cache_dict = json.load(persistent_cache_reader)
+                        persistent_cache = PersistentCacheState.from_dict(cache_path, persistent_cache_dict)
+                    except ValueError as ex:
+                        print(f'Could not load "{persistent_cache_path.name}" due to error: {str(ex)}.'
+                               ' Cache will be rebuilt.')
+
+                # Start a new persistent cache if we failed to load the existing one, or one did not
+                # already exist.
+                if persistent_cache is None:
+                    persistent_cache = PersistentCacheState(cache_path,
+                                                            aggregate_filename='aggregate.pt')
+
+                self.persistent_cache[group_key][in_variation] = persistent_cache
+
+                # Initialize Persistent Cache State with the current run's set of files
+                cache_stable = self.persistent_key_in_name is not None
+                if cache_stable:
+                    # Map each `group_index` to a persistent key--a value that will always be the
+                    # same for the file (or the file's data in a perfect world), so that our
+                    # persistent cache has a stable value to reference this file by.
+                    group_index_mappings = {group_index: self._get_previous_item(out_variation,
+                                                                                 self.persistent_key_in_name,
+                                                                                 in_index)
+                                            for group_index, in_index in enumerate(self.group_indices[group_key])}
+                else:
+                    # As we don't have a persistent key to map each group_index to the file that it
+                    # represents, we fall-back to the legacy unstable behavior by mapping each
+                    # `group_index` it to a string of itself. This is not "safe", in that any
+                    # inclusions/removals to the files on disk will disrupt this order the next time
+                    # we run. It is much better to use the code path above this one, but this path
+                    # exists for legacy callers that have not been updated.
+                    print('Warning: Using unstable cache file mappings.')
+                    group_index_mappings = {group_index: str(group_index)
+                                            for group_index in range(len(self.group_indices[group_key]))}
+
+                persistent_cache.build_cache_file_mappings(group_index_mappings,
+                                                           remove_stale_cache=False)
+
+                # Resave our cache state if we are using stable file mappings
+                if cache_stable:
+                    persistent_cache_dict = persistent_cache.to_dict()
+                    safe_write_json_file(persistent_cache_dict, persistent_cache_path)
+
+                # Load our aggregate items cache
+                aggregate_cache = persistent_cache.get_aggregate_cache(self.pipeline.device,
+                                                                       self.allow_unsafe_types,
+                                                                       validate_against_split_items=True)
+                if aggregate_cache is None:
+                    aggregate_cache = [None] * len(self.group_indices[group_key]) 
+
+                self.aggregate_cache[group_key][in_variation] = aggregate_cache
+                
+                # If we have uncached items, cache them now
+                total_uncached_files = aggregate_cache.count(None)
+                if total_uncached_files > 0:
                     if not before_cache_fun_called and self.before_cache_fun is not None:
                         before_cache_fun_called = True
                         self.before_cache_fun()
 
-                    os.makedirs(cache_dir, exist_ok=True)
+                    total_files = len(aggregate_cache)
+                    total_cached_files = total_files - total_uncached_files
 
-                    size = len(self.group_indices[group_key])
-                    aggregate_cache = [None]*size
+                    group_name = (self._get_previous_item(out_variation, self.group_name_in_name, self.group_indices[group_key][0])
+                                  if self.group_name_in_name is not None else
+                                  None)
+                    caching_text = (f'caching {group_name} ({group_key[0:7]}...{group_key[-7:]})'
+                                    if group_name is not None else ''\
+                                    f'caching {group_key}')
 
-                    with tqdm(total=size, smoothing=0.1, desc='caching') as bar:
-                        def fn(group_index, in_index, in_variation, current_device):
-                            #preserve current device for multi-GPU, which is thread-local in torch:
-                            if torch.cuda.is_available() and current_device is not None:
-                                torch.cuda.set_device(current_device)
-
-                            split_item = {}
-                            aggregate_item = {}
-
-                            with torch.no_grad():
-                                for name in self.split_names:
-                                    split_item[name] = self.__clone_for_cache(self._get_previous_item(in_variation, name, in_index))
-                                for name in self.aggregate_names:
-                                    aggregate_item[name] = self.__clone_for_cache(self._get_previous_item(in_variation, name, in_index))
-
-                            torch.save(split_item, os.path.realpath(os.path.join(cache_dir, str(group_index) + '.pt')))
-                            aggregate_cache[group_index] = aggregate_item
-
-                        current_device = torch.cuda.current_device() if torch.cuda.is_available() else None
-
-                        fs = (self._state.executor.submit(
-                            fn, group_index, in_index, in_variation, current_device)
+                    with tqdm(initial=total_cached_files, total=total_files, smoothing=0.1, desc=caching_text) as bar:
+                        current_thread_cuda_device = torch.cuda.current_device() if torch.cuda.is_available() else None
+                        fs = (self._state.executor.submit(_build_cache_data,
+                                                          self,
+                                                          persistent_cache,
+                                                          self.split_names,
+                                                          self.aggregate_names,
+                                                          group_index,
+                                                          in_index,
+                                                          in_variation,
+                                                          current_thread_cuda_device)
                               for (group_index, in_index)
-                              in enumerate(self.group_indices[group_key]))
+                              in enumerate(self.group_indices[group_key])
+                              if aggregate_cache[group_index] is None)
                         for i, f in enumerate(concurrent.futures.as_completed(fs)):
                             try:
-                                f.result()
+                                group_index, index_aggregate_data = f.result()
+                                aggregate_cache[group_index] = index_aggregate_data
                             except:
-                                self._state.executor.shutdown(
-                                    wait=True, cancel_futures=True)
+                                self._state.executor.shutdown(wait=True, cancel_futures=True)
                                 raise
+
                             if i % 250 == 0:
                                 self._torch_gc()
+                            if i % 200 == 0:
+                                persistent_cache.save_aggregate_cache(aggregate_cache)
                             bar.update(1)
 
-                    torch.save(aggregate_cache, os.path.realpath(os.path.join(cache_dir, 'aggregate.pt')))
-
-                if self.aggregate_cache[group_key][in_variation] is None:
-                    self.aggregate_cache[group_key][in_variation] = \
-                        torch.load(os.path.realpath(os.path.join(cache_dir, 'aggregate.pt')), weights_only=False, map_location=self.pipeline.device)
+                    persistent_cache.save_aggregate_cache(aggregate_cache)
 
     def __get_input_index(self, out_variation: int, out_index: int) -> tuple[str, int, int, int]:
         offset = 0
@@ -249,16 +329,16 @@ class DiskCache(
 
         group_key, in_variation, group_index, in_index = self.__get_input_index(self.current_variation, index)
 
-        aggregate_item = self.aggregate_cache[group_key][in_variation][group_index]
+        if requested_name is None or requested_name in self.aggregate_names:
+            aggregate_item: dict[str, Any] = self.aggregate_cache[group_key][in_variation][group_index]
+            item = aggregate_item.copy()
 
-        if requested_name in self.aggregate_names:
-            for name in self.aggregate_names:
-                item[name] = aggregate_item[name]
-
-        elif requested_name in self.split_names:
-            cache_path = os.path.join(self.__get_cache_dir(group_key, in_variation), str(group_index) + '.pt')
-            split_item = torch.load(os.path.realpath(cache_path), weights_only=False, map_location=self.pipeline.device)
-
+        if requested_name is None or requested_name in self.split_names:
+            persistent_cache: PersistentCacheState = self.persistent_cache[group_key][in_variation]
+            split_item: dict[str, Any] = \
+                persistent_cache.get_split_item(group_index,
+                                                self.pipeline.device,
+                                                allow_unsafe_types=self.allow_unsafe_types)
             for name in self.split_names:
                 item[name] = split_item[name]
 
