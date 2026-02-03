@@ -1,4 +1,4 @@
-from transformers import CLIPTokenizer, T5Tokenizer, T5TokenizerFast, GemmaTokenizer, LlamaTokenizer, Qwen2Tokenizer
+from transformers import CLIPTokenizer, T5Tokenizer, T5TokenizerFast, GemmaTokenizer, LlamaTokenizer, Qwen2Tokenizer, LlamaTokenizerFast
 
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
@@ -15,7 +15,7 @@ class Tokenize(
             in_name: str,
             tokens_out_name: str,
             mask_out_name: str,
-            tokenizer: CLIPTokenizer | T5Tokenizer | T5TokenizerFast | GemmaTokenizer | LlamaTokenizer | Qwen2Tokenizer,
+            tokenizer: CLIPTokenizer | T5Tokenizer | T5TokenizerFast | GemmaTokenizer | LlamaTokenizer | LlamaTokenizerFast | Qwen2Tokenizer,
             max_token_length: int | None,
             format_text: str | None = None,
             additional_format_text_tokens: int | None = None,
