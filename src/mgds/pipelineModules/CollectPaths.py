@@ -50,6 +50,8 @@ class CollectPaths(
         if include_subdirectories:
             sub_directories = list(filter(os.path.isdir, dir_list))
             for sub_directory in sub_directories:
+                if os.path.basename(sub_directory).startswith('.'):
+                    continue
                 files.extend(self.__list_files(sub_directory, include_subdirectories))
 
         return files
