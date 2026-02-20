@@ -130,10 +130,10 @@ class AspectBucketing(
         for index in range(self._get_previous_length(self.target_resolutions_in_name)):
             resolutions = self._get_previous_item(variation, self.target_resolutions_in_name, index)
             if 'x' in resolutions and ',' not in resolutions:
-                res = resolutions.strip().split('x')
+                res = resolutions.split('x')
                 possible_fixed_resolutions.add(
                     self.__quantize_resolution(
-                        (int(res[1]), int(res[0])), self.quantization
+                        (int(res[1].strip()), int(res[0].strip())), self.quantization
                     )
                 )
             else:
@@ -143,10 +143,10 @@ class AspectBucketing(
             for index in range(self._get_previous_length(self.target_resolutions_override_in_name)):
                 resolutions = self._get_previous_item(variation, self.target_resolutions_override_in_name, index)
                 if 'x' in resolutions and ',' not in resolutions:
-                    res = resolutions.strip().split('x')
+                    res = resolutions.split('x')
                     possible_fixed_resolutions.add(
                         self.__quantize_resolution(
-                            (int(res[1]), int(res[0])), self.quantization
+                            (int(res[1].strip()), int(res[0].strip())), self.quantization
                         )
                     )
                 else:
@@ -180,9 +180,9 @@ class AspectBucketing(
                 target_resolutions = self._get_previous_item(variation, self.target_resolutions_override_in_name, index)
 
         if 'x' in target_resolutions and ',' not in target_resolutions:
-            res = target_resolutions.strip().split('x')
+            res = target_resolutions.split('x')
             target_resolution = self.__quantize_resolution(
-                (int(res[1]), int(res[0])), self.quantization
+                (int(res[1].strip()), int(res[0].strip())), self.quantization
             )
         else:
             target_resolutions = [int(res.strip()) for res in target_resolutions.split(',')]
