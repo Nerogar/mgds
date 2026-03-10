@@ -627,7 +627,7 @@ class PersistentCacheState:
 
         return out_aggregate_data
 
-    def save_aggregate_cache(self, aggregate_cache_data_list: list[dict[str, Any]]):
+    def save_aggregate_cache(self, aggregate_cache_data_list: list[dict[str, Any] | None] | None):
         """
         Saves `aggregate_cache_data_list` for for this persistent cache to disk.
         `aggregate_cache_data_list` may not contain any keys with two leading underscores.
@@ -645,7 +645,9 @@ class PersistentCacheState:
 
         if len(aggregate_cache_data_list) > 0:
             if len(self._transient_group_index_to_persistent_index_map) != len(aggregate_cache_data_list):
-                raise ValueError("Expected aggregate cache to contain as many items as  list.")
+                raise ValueError(f"Expected aggregate cache to contain as many items as cache file mapping."
+                                 f" Expected: {len(self._transient_group_index_to_persistent_index_map)}"
+                                 f" Actual: {len(aggregate_cache_data_list)}")
 
         # Ensure our list of data is either None or a Dict (which may be empty or contain data)
         persistent_aggregate_data = {
