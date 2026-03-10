@@ -215,7 +215,8 @@ class DiskCache(
                                f'NumRealSamples: {num_samples}, NumVirtualSamples: {num_samples_out}, NumSamplesToCache: {num_samples_to_cache}\n'
                                f'BalancingMethod: {balancing_method}, BalancingAmount: {balancing_amount}')
 
-            cache_path = self.__get_cache_dir_path(group_key, (out_variation + 1) % num_variations)
+            disk_variation = (out_variation + 1) % max(num_variations, 1)
+            cache_path = self.__get_cache_dir_path(group_key, disk_variation)
 
             # Load Persistent Cache State
             cache_state_path = cache_path / 'cache_state.json'
