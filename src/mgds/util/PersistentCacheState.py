@@ -503,7 +503,7 @@ class PersistentCacheState:
                             torch_device: torch.device | str | dict[str, str] | None,
                             allow_unsafe_types: bool,
                             validate_against_split_items: bool = True
-    ) -> 'list[dict[str, Any]] | None':
+    ) -> 'dict[int, dict[str, Any]] | None':
         """
         Gets the aggregate cache list for this cache state, automatically removing invalid or expired
         cache data. 
@@ -529,7 +529,7 @@ class PersistentCacheState:
         
         :return: A list of cache data in the same order of the `group_index` values set in the call
             to `PersistentCacheState.build_cache_file_mappings()`.
-        :rtype: list[dict[str, Any]] | None
+        :rtype: dict[int, dict[str, Any]] | None
         """
 
         if not self._aggregate_file_path.is_file():
@@ -596,7 +596,7 @@ class PersistentCacheState:
         # Rebuild our aggregate cache list to use `group_index` keys that callers expect, instead of
         # the `persistent_index` values we save to disk. Additionally, we will discard data when the
         # corresponding split file is missing (or vice versa).
-        out_aggregate_data = [None] * len(self._transient_group_index_to_persistent_index_map)
+        out_aggregate_data = {}
         for group_index, persistent_index in self._transient_group_index_to_persistent_index_map.items():
             if validate_against_split_items:
                 # Check if the split data cache for this index still exists
@@ -627,7 +627,7 @@ class PersistentCacheState:
 
         return out_aggregate_data
 
-    def save_aggregate_cache(self, aggregate_cache_data_list: list[dict[str, Any] | None] | None):
+    def save_aggregate_cache(self, aggregate_cache_data_list: 'dict[int, dict[str, Any] | None] | None'):
         """
         Saves `aggregate_cache_data_list` for for this persistent cache to disk.
         `aggregate_cache_data_list` may not contain any keys with two leading underscores.
@@ -637,11 +637,11 @@ class PersistentCacheState:
         """
         # Coerce no-data to be an empty list instead
         if aggregate_cache_data_list is None:
-            aggregate_cache_data_list = []
+            aggregate_cache_data_list = {}
 
         # Ensure our data is a list
-        if not isinstance(aggregate_cache_data_list, list):
-            raise ValueError("Expected aggregate cache to be a list.")
+        if not isinstance(aggregate_cache_data_list, dict):
+            raise ValueError("Expected aggregate cache to be a dict.")
 
         if len(aggregate_cache_data_list) > 0:
             if len(self._transient_group_index_to_persistent_index_map) != len(aggregate_cache_data_list):
@@ -654,7 +654,7 @@ class PersistentCacheState:
             _CACHE_VERSION_FIELD: str(_CACHE_VERSION_LATEST),
             _CACHE_UUID_FIELD: str(self._cache_uuid.hex),
         }
-        for group_index, aggregate_cache_data in enumerate(aggregate_cache_data_list):
+        for group_index, aggregate_cache_data in aggregate_cache_data_list.items():
             if aggregate_cache_data is not None and not isinstance(aggregate_cache_data, dict):
                 raise ValueError('Expected aggregate cache data to be a dict or None')
 

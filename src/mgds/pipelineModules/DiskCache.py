@@ -1,4 +1,5 @@
 import concurrent
+import concurrent.futures
 import hashlib
 import json
 import math
@@ -181,74 +182,74 @@ class DiskCache(
 
         self.variations_initialized = True
 
-    def __get_cache_dir_path(self, group_key: str, in_variation: int) -> pathlib.Path:
-        variations = self.group_variations[group_key]
-        return pathlib.Path(self.cache_dir) / group_key / f"variation-{str(in_variation % variations)}"
+    def __get_group_index_for_variation(self,
+                                        group_key: str,
+                                        sample_index: int):
+        """
+        Gets the `group_index` we should return for the sample index, for the current variation.
+        
+        Attempts to maximize the number of unique sample indices used across variations when possible,
+        such as when `len(group_indices) > group_output_samples and group_variations > 1`.). In this
+        case, unique samples will be used until they, or the number of variations allowed, are exhausted.
+        
+        However, this can lead to earlier samples being repeated up to one time more than later
+        samples. If this is an issue, it can be avoided by keeping `group_output_samples` either a
+        whole multiple of `group_indices` with any number of variations, or with any number of
+        `group_output_samples` with only one variation set.
+        
+        :param group_key: The key for the group currently being cached.
+        :type group_key: str
+        
+        :param sample_index: The number of the current sample in this group for this epoch/variation.
+        :type sample_index: int
+        
+        :return: The `group_index` value to use for the provided `group_key` and `sample_index`.
+        :rtype: int
+        """
+        assert sample_index >= 0
 
-    def __refresh_cache(self, out_variation: int):
-        if not self.variations_initialized:
-            self.__init_variations()
+        current_cache_variation = self.current_variation % self.group_variations[group_key]
+        num_samples_per_variation = self.group_output_samples[group_key]
+        variation_offset = num_samples_per_variation * current_cache_variation
+        actual_num_samples = len(self.group_indices[group_key])
+        return (sample_index + variation_offset) % actual_num_samples
 
-        total_num_samples = 0
-        before_cache_fun_called = False
-        for group_key, num_variations in self.group_variations.items():
-            num_samples = len(self.group_indices[group_key])
-            num_samples_out = self.group_output_samples[group_key]
-            num_samples_to_cache = min(num_samples, num_samples_out)
+    def __get_persistent_cache_group_mapping(self, group_key):
+        """
+        Creates a mapping between the active samples for the current variation, and their unique
+        persistent key. The persistent key will only actually be persistent across runs if the
+        `persistent_key_in_name` value is set. Otherwise, the cache is only valid until a sample is
+        added, removed, or changed in this group.
+        
+        :param group_key: The key for the group currently being cached.
+        :type group_key: str
+        
+        :return: A dictionary of all active `group_index` values and their unique persistent key.
+        :rtype: dict
+        """
+        group_index_mappings = {}
 
-            index_start = total_num_samples
-            total_num_samples += num_samples
+        if self.persistent_key_in_name is None:
+            print('Warning: Using unstable cache file mappings.')
 
-            group_name = (self._get_previous_item(out_variation, self.group_name_in_name, self.group_indices[group_key][0])
-                          if self.group_name_in_name is not None else
-                          group_key)
-            balancing_method = (self._get_previous_item(out_variation, self.balancing_strategy_in_name, self.group_indices[group_key][0])
-                          if self.balancing_strategy_in_name is not None else
-                          '?')
-            balancing_amount = (self._get_previous_item(out_variation, self.balancing_in_name, self.group_indices[group_key][0])
-                          if self.balancing_in_name is not None else
-                          '?')
+        current_group_indices = self.group_indices[group_key]
+        num_out_samples = self.group_output_samples[group_key]
+        for sample_index in range(num_out_samples):
+            group_index = self.__get_group_index_for_variation(group_key, sample_index)
 
-            cache_group_group_name = (f'"{group_name}": {group_key}' if group_name != group_key else group_key)
-            _cache_debug_print(f'\n[Cache Group Info]\n'
-                               f'{cache_group_group_name}\n'
-                               f'NumRealSamples: {num_samples}, NumVirtualSamples: {num_samples_out}, NumSamplesToCache: {num_samples_to_cache}\n'
-                               f'BalancingMethod: {balancing_method}, BalancingAmount: {balancing_amount}')
+            # Depending on the number of `group_output_samples` and `group_indices`, it is possible
+            # (and common) for multiple samples to map to the same `group_index``. Skip pulling this
+            # data multiple times in these cases.
+            if group_index in group_index_mappings:
+                continue
 
-            disk_variation = (out_variation + 1) % max(num_variations, 1)
-            cache_path = self.__get_cache_dir_path(group_key, disk_variation)
-
-            # Load Persistent Cache State
-            cache_state_path = cache_path / 'cache_state.json'
-
-            persistent_cache_state = None
-            if cache_state_path.is_file():
-                try:
-                    with open(cache_state_path, 'r') as persistent_cache_reader:
-                        persistent_cache_dict = json.load(persistent_cache_reader)
-                    persistent_cache_state = PersistentCacheState.from_dict(cache_path, persistent_cache_dict)
-                except ValueError as ex:
-                    print(f'Could not load "{cache_state_path.name}" due to error: {str(ex)}.'
-                            ' Cache will be rebuilt.')
-
-            # Start a new persistent cache if we failed to load the existing one, or one did not
-            # already exist.
-            if persistent_cache_state is None:
-                persistent_cache_state = PersistentCacheState(cache_path,
-                                                        aggregate_filename='aggregate.pt')
-
-            self.persistent_cache[group_key] = persistent_cache_state
-
-            # Initialize Persistent Cache State with the current run's set of files
-            cache_stable = self.persistent_key_in_name is not None
-            if cache_stable:
+            if self.persistent_key_in_name is not None:
                 # Map each `group_index` to a persistent key--a value that will always be the
                 # same for the file (or the file's data in a perfect world), so that our
                 # persistent cache has a stable value to reference this file by.
-                group_index_mappings = {group_index: self._get_previous_item(out_variation,
-                                                                             self.persistent_key_in_name,
-                                                                             index_start + group_index)
-                                        for group_index in range(0, num_samples_to_cache)}
+                sample_label = self._get_previous_item(self.current_variation,
+                                                       self.persistent_key_in_name,
+                                                       current_group_indices[group_index])
             else:
                 # As we don't have a persistent key to map each group_index to the file that it
                 # represents, we fall-back to the legacy unstable behavior by mapping each
@@ -256,72 +257,159 @@ class DiskCache(
                 # inclusions/removals to the files on disk will disrupt this order the next time
                 # we run. It is much better to use the code path above this one, but this path
                 # exists for legacy callers that have not been updated.
-                print('Warning: Using unstable cache file mappings.')
-                group_index_mappings = {group_index: str(group_index)
-                                        for group_index in range(0, num_samples_to_cache)}
+                sample_label = str(group_index)
+            group_index_mappings[group_index] = sample_label
 
-            persistent_cache_state.build_cache_file_mappings(group_index_mappings,
+        return group_index_mappings
+
+    def __generate_cache_future_tasks(self,
+                                      group_key: str,
+                                      aggregate_cache: dict[int, dict],
+                                      persistent_cache_state: PersistentCacheState):
+        """
+        Creates and yields cache-generation futures for each cache entry missing from the current
+        group.
+        
+        :param group_key: The key for the group currently being cached.
+        :type group_key: str
+        
+        :param aggregate_cache: The aggregate cache for the current group.
+        :type group_key: dict[int, dict]
+        
+        :param persistent_cache_state: The persistent cache state for the current group.
+        :type group_key: PersistentCacheState
+        
+        :return: Generator that yields async task futures that build the missing cache entries.
+        :rtype: Generator[Future[tuple[int, dict]], Any, None]
+        """
+        current_thread_cuda_device = torch.cuda.current_device() if torch.cuda.is_available() else None
+
+        num_out_samples = self.group_output_samples[group_key]
+        for sample_index in range(num_out_samples):
+            group_index = self.__get_group_index_for_variation(group_key, sample_index)
+            if group_index in aggregate_cache:
+                continue
+
+            aggregate_cache[group_index] = None
+            yield self._state.executor.submit(_build_cache_data,
+                                              self,
+                                              persistent_cache_state,
+                                              self.split_names,
+                                              self.aggregate_names,
+                                              group_index,
+                                              self.group_indices[group_key][group_index],
+                                              self.current_variation,
+                                              current_thread_cuda_device)
+
+    def __get_cache_group_label(self, group_key: str) -> str:
+        """
+        Gets a human-friendly name for the specific cache group.
+        
+        :param group_key: The key for the group currently being cached.
+        :type group_key: str
+        
+        :return: The name of the current group, or the key for the current group if the name is
+            unknown.
+        :rtype: str
+        """
+        group_name = (self._get_previous_item(self.current_variation,
+                                                self.group_name_in_name,
+                                                self.group_indices[group_key][0])
+                      if self.group_name_in_name is not None else
+                      group_key)
+        if group_name == group_key:
+            return group_key
+        else:
+            return f'{group_name} ({group_key[0:7]}...{group_key[-7:]})'
+
+    def __get_cache_dir_path(self, group_key: str) -> pathlib.Path:
+        """
+        Gets the Path for the for the specified group for the current variation.
+        
+        :param group_key: The key for the group currently being cached.
+        :type group_key: str
+        
+        :return: The Path for the specified group's cache directory.
+        :rtype: pathlib.Path
+        """
+        num_variations = self.group_variations[group_key]
+        variation_folder = f"variation-{str(self.current_variation % num_variations)}"
+        return pathlib.Path(self.cache_dir) / group_key / variation_folder
+
+    def __refresh_cache(self):
+        if not self.variations_initialized:
+            self.__init_variations()
+
+        before_cache_fun_called = False
+        for group_key, num_variations in self.group_variations.items():
+            # Build our list of `group_index` to persistent_key mappings. This is also a complete
+            # list of every `group_index` we need to make sure we have/create a cache file for.
+            persistent_cache_group_mappings = self.__get_persistent_cache_group_mapping(group_key)
+
+            cache_path = self.__get_cache_dir_path(group_key)
+            persistent_cache_state_path = cache_path / 'cache_state.json'
+
+            # Load Persistent Cache State
+            persistent_cache_state = None
+            if persistent_cache_state_path.is_file():
+                try:
+                    with open(persistent_cache_state_path, 'r') as persistent_cache_reader:
+                        persistent_cache_dict = json.load(persistent_cache_reader)
+                    persistent_cache_state = PersistentCacheState.from_dict(cache_path, persistent_cache_dict)
+                except ValueError as ex:
+                    print(f'Could not load "{persistent_cache_state_path.name}" due to error: {str(ex)}.'
+                            ' Cache will be rebuilt.')
+            if persistent_cache_state is None:
+                persistent_cache_state = PersistentCacheState(cache_path,
+                                                              aggregate_filename='aggregate.pt')
+            self.persistent_cache[group_key] = persistent_cache_state
+
+            # Give our persistent cache state a list of the current run's set of samples.
+            persistent_cache_state.build_cache_file_mappings(persistent_cache_group_mappings,
                                                              remove_stale_cache=self.delete_stale_cache_files)
 
-            # Resave our cache state if we are using stable file mappings
-            if cache_stable:
+            # Resave our cache state if we are using persistent file mappings
+            if self.persistent_key_in_name is not None:
                 persistent_cache_dict = persistent_cache_state.to_dict()
-                safe_write_json_file(persistent_cache_dict, cache_state_path)
+                safe_write_json_file(persistent_cache_dict, persistent_cache_state_path)
 
             # Load our aggregate items cache
-            aggregate_cache = persistent_cache_state.get_aggregate_cache(self.pipeline.device,
-                                                                         self.allow_unsafe_types,
-                                                                         validate_against_split_items=True)
+            aggregate_cache: dict = persistent_cache_state.get_aggregate_cache(self.pipeline.device,
+                                                                               self.allow_unsafe_types,
+                                                                               validate_against_split_items=True)
             if aggregate_cache is None:
-                _cache_debug_print(f'Building new aggregate cache for group {group_key}.')
-                aggregate_cache = [None] * num_samples_to_cache
-            else:
-                _cache_debug_print(f'Found existing aggregate cache with {len(aggregate_cache)} entries for group {group_key}.')
-
+                aggregate_cache = {}
             self.aggregate_cache[group_key] = aggregate_cache
 
             # If we have uncached items, cache them now
-            total_uncached_files = aggregate_cache.count(None)
+            total_uncached_files = sum(1 for key in persistent_cache_group_mappings.keys() if key not in aggregate_cache)
             if total_uncached_files > 0:
                 if not before_cache_fun_called and self.before_cache_fun is not None:
                     before_cache_fun_called = True
                     self.before_cache_fun()
 
-                total_files = len(aggregate_cache)
+                total_files = len(persistent_cache_group_mappings)
                 total_cached_files = total_files - total_uncached_files
-
-                caching_text = (f'caching {group_name} ({group_key[0:7]}...{group_key[-7:]})'
-                                if group_name != group_key else
-                                f'caching {group_key}')
-
+                caching_text = f'caching {self.__get_cache_group_label(group_key)}'
                 with tqdm(initial=total_cached_files, total=total_files, smoothing=0.1, desc=caching_text) as bar:
-                    current_thread_cuda_device = torch.cuda.current_device() if torch.cuda.is_available() else None
-                    fs = (self._state.executor.submit(_build_cache_data,
-                                                      self,
-                                                      persistent_cache_state,
-                                                      self.split_names,
-                                                      self.aggregate_names,
-                                                      group_index,
-                                                      index_start + group_index,
-                                                      out_variation,
-                                                      current_thread_cuda_device)
-                          for group_index in range(0, num_samples_to_cache)
-                          if aggregate_cache[group_index] is None)
-                    for i, f in enumerate(concurrent.futures.as_completed(fs)):
+                    fs = self.__generate_cache_future_tasks(group_key,
+                                                            aggregate_cache,
+                                                            persistent_cache_state)
+                    for num_tasks_complete, future in enumerate(concurrent.futures.as_completed(fs)):
                         try:
-                            group_index, index_aggregate_data = f.result()
+                            group_index, index_aggregate_data = future.result()
                             aggregate_cache[group_index] = index_aggregate_data
                         except:
                             self._state.executor.shutdown(wait=True, cancel_futures=True)
                             raise
 
-                        if i % 250 == 0:
+                        # Periodically flush our torch cache and save our aggregate cache to disk.
+                        if num_tasks_complete % 200 == 0:
                             self._torch_gc()
-                        if i % 200 == 0:
                             persistent_cache_state.save_aggregate_cache(aggregate_cache)
                         bar.update(1)
 
-                persistent_cache_state.save_aggregate_cache(aggregate_cache)
+                    persistent_cache_state.save_aggregate_cache(aggregate_cache)
 
     def __get_input_index(self, out_index: int) -> tuple[str, int]:
         offset = 0
@@ -338,12 +426,14 @@ class DiskCache(
         raise IndexError(f'Could not find index for variation {out_index}.')
 
     def start(self, out_variation: int):
-        self.__refresh_cache(out_variation)
+        self.__refresh_cache()
 
     def get_item(self, index: int, requested_name: str = None) -> dict:
         item = {}
 
-        group_key, group_index = self.__get_input_index(index)
+        group_key, input_index = self.__get_input_index(index)
+
+        group_index = self.__get_group_index_for_variation(group_key, input_index)
 
         if requested_name is None or requested_name in self.aggregate_names:
             aggregate_item: dict[str, Any] = self.aggregate_cache[group_key][group_index]
