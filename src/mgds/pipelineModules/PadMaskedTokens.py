@@ -35,16 +35,7 @@ class PadMaskedTokens(
         tokens_mask = self._get_previous_item(variation, self.tokens_mask_name, index)
         hidden_state = self._get_previous_item(variation, self.hidden_state_name, index)
 
-        current_length = tokens.shape[0]
-
-        if current_length >= self.max_length:
-            return {
-                self.tokens_name: tokens,
-                self.tokens_mask_name: tokens_mask,
-                self.hidden_state_name: hidden_state,
-            }
-
-        pad_length = self.max_length - current_length
+        pad_length = self.max_length - tokens.shape[0]
 
         tokens = F.pad(tokens, (0, pad_length), value=0)
         tokens_mask = F.pad(tokens_mask, (0, pad_length), value=0)
