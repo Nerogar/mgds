@@ -595,10 +595,10 @@ class SmartDiskCache(
 
                 current_device = torch.cuda.current_device() if torch.cuda.is_available() else None
 
-                fs = (self._state.executor.submit(
+                fs = [self._state.executor.submit(
                     fn, filepath, group_key, in_variation, in_index, group_index, variations, resolution, current_device)
                       for (filepath, group_key, in_variation, in_index, group_index, variations, resolution)
-                      in unique_items)
+                      in unique_items]
                 build_count = 0
                 for i, f in enumerate(concurrent.futures.as_completed(fs)):
                     try:
