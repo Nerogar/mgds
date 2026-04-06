@@ -462,21 +462,24 @@ class SmartDiskCache(
 
         self._aggregate_cache = {}
         if self.aggregate_names:
-            for group_index, fp in enumerate(self._sourceless_filepaths):
-                entry = self.cache_index['entries'].get(fp)
-                if entry is None:
-                    continue
-                real_path = self._real_pt_path(entry['cache_file'], 0)
-                try:
-                    cached = torch.load(real_path, weights_only=False, map_location='cpu')
-                    agg_data = {}
-                    for name in self.aggregate_names:
-                        if name in cached:
-                            agg_data[name] = cached[name]
-                    if agg_data:
-                        self._aggregate_cache[(fp, 0)] = agg_data
-                except Exception:
-                    pass
+            with tqdm(total=len(self._sourceless_filepaths), smoothing=0.1, desc='loading aggregate cache') as bar:
+                for group_index, fp in enumerate(self._sourceless_filepaths):
+                    entry = self.cache_index['entries'].get(fp)
+                    if entry is None:
+                        bar.update(1)
+                        continue
+                    real_path = self._real_pt_path(entry['cache_file'], 0)
+                    try:
+                        cached = torch.load(real_path, weights_only=False, map_location='cpu')
+                        agg_data = {}
+                        for name in self.aggregate_names:
+                            if name in cached:
+                                agg_data[name] = cached[name]
+                        if agg_data:
+                            self._aggregate_cache[(fp, 0)] = agg_data
+                    except Exception:
+                        pass
+                    bar.update(1)
 
     def __refresh_cache_sourceless(self, out_variation: int):
         if not self.variations_initialized:
@@ -508,31 +511,36 @@ class SmartDiskCache(
             needed_variations = [(x % variations) for x in range(start_variation, end_variation + 1, 1)]
 
             items_to_build = []
+            validate_total = len(needed_variations) * len(self.group_indices[group_key])
 
-            for in_variation in needed_variations:
-                for group_index, in_index in enumerate(self.group_indices[group_key]):
-                    filepath = self._get_source_path(in_variation, in_index)
-                    if filepath is None:
-                        continue
-
-                    filepath = os.path.normpath(filepath)
-                    if in_index not in self._source_path_cache:
-                        self._source_path_cache[in_index] = filepath
-                    resolution = self._get_resolution_string(in_variation, in_index)
-
-                    entry = self.cache_index['entries'].get(filepath)
-                    if entry is not None:
-                        status = self._validate_entry(filepath, entry, resolution, variations)
-                        if status == 'valid':
-                            files_skipped += 1
+            with tqdm(total=validate_total, smoothing=0.1, desc='validating cache') as bar:
+                for in_variation in needed_variations:
+                    for group_index, in_index in enumerate(self.group_indices[group_key]):
+                        filepath = self._get_source_path(in_variation, in_index)
+                        if filepath is None:
+                            bar.update(1)
                             continue
-                        with self._index_lock:
-                            old_hash = entry.get('hash')
-                            if old_hash:
-                                self._remove_from_hash_index(old_hash, filepath)
-                            del self.cache_index['entries'][filepath]
 
-                    items_to_build.append((filepath, group_key, in_variation, in_index, group_index, variations, resolution))
+                        filepath = os.path.normpath(filepath)
+                        if in_index not in self._source_path_cache:
+                            self._source_path_cache[in_index] = filepath
+                        resolution = self._get_resolution_string(in_variation, in_index)
+
+                        entry = self.cache_index['entries'].get(filepath)
+                        if entry is not None:
+                            status = self._validate_entry(filepath, entry, resolution, variations)
+                            if status == 'valid':
+                                files_skipped += 1
+                                bar.update(1)
+                                continue
+                            with self._index_lock:
+                                old_hash = entry.get('hash')
+                                if old_hash:
+                                    self._remove_from_hash_index(old_hash, filepath)
+                                del self.cache_index['entries'][filepath]
+
+                        items_to_build.append((filepath, group_key, in_variation, in_index, group_index, variations, resolution))
+                        bar.update(1)
 
             if not items_to_build:
                 continue
@@ -631,6 +639,7 @@ class SmartDiskCache(
         if not self.aggregate_names:
             return
 
+        load_items = []
         for group_key in self.group_variations.keys():
             start_index = self.group_output_samples[group_key] * out_variation
             end_index = self.group_output_samples[group_key] * (out_variation + 1) - 1
@@ -650,17 +659,22 @@ class SmartDiskCache(
                     if cache_entry is None:
                         continue
                     variation = in_variation % variations
-                    real_path = self._real_pt_path(cache_entry['cache_file'], variation)
-                    try:
-                        cached = torch.load(real_path, weights_only=False, map_location='cpu')
-                        agg_data = {}
-                        for name in self.aggregate_names:
-                            if name in cached:
-                                agg_data[name] = cached[name]
-                        if agg_data:
-                            self._aggregate_cache[(filepath, variation)] = agg_data
-                    except Exception:
-                        pass
+                    load_items.append((filepath, cache_entry, variation))
+
+        with tqdm(total=len(load_items), smoothing=0.1, desc='loading aggregate cache') as bar:
+            for filepath, cache_entry, variation in load_items:
+                real_path = self._real_pt_path(cache_entry['cache_file'], variation)
+                try:
+                    cached = torch.load(real_path, weights_only=False, map_location='cpu')
+                    agg_data = {}
+                    for name in self.aggregate_names:
+                        if name in cached:
+                            agg_data[name] = cached[name]
+                    if agg_data:
+                        self._aggregate_cache[(filepath, variation)] = agg_data
+                except Exception:
+                    pass
+                bar.update(1)
 
     def start(self, out_variation: int):
         if self.sourceless:
