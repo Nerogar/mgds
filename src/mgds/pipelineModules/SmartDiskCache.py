@@ -314,7 +314,7 @@ class SmartDiskCache(
 
     def _get_source_path(self, in_variation: int, in_index: int) -> str | None:
         if self.source_path_in_name:
-            return self._get_previous_item(in_variation, self.source_path_in_name, in_index)
+            return self._get_previous_item(0, self.source_path_in_name, in_index)
         return None
 
     def __init_variations(self):
