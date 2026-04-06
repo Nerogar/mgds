@@ -14,7 +14,7 @@ from tqdm import tqdm
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.SingleVariationRandomAccessPipelineModule import SingleVariationRandomAccessPipelineModule
 
-CACHE_VERSION = 1
+CACHE_VERSION = 2
 
 
 class SmartDiskCache(
@@ -89,7 +89,10 @@ class SmartDiskCache(
         return inputs
 
     def get_outputs(self) -> list[str]:
-        return self.split_names + self.aggregate_names
+        outputs = self.split_names + self.aggregate_names
+        if self.sourceless:
+            outputs.append('concept')
+        return outputs
 
     def __string_key(self, data: list[Any]) -> str:
         json_data = json.dumps(data, sort_keys=True, ensure_ascii=True, separators=(',', ':'), indent=None)
@@ -275,6 +278,17 @@ class SmartDiskCache(
                     cache_data[name] = self.__clone_for_cache(self._get_previous_item(v, name, in_index))
             cache_data['__cache_version'] = CACHE_VERSION
             cache_data['__modeltype'] = self.modeltype
+            if self.source_path_in_name:
+                try:
+                    concept = self._get_previous_item(v, 'concept', in_index)
+                    if concept is not None and isinstance(concept, dict):
+                        cache_data['__concept_loss_weight'] = concept.get('loss_weight', 1.0)
+                        cache_data['__concept_type'] = concept.get('type', 'STANDARD')
+                        cache_data['__concept_name'] = concept.get('name', '')
+                        cache_data['__concept_path'] = concept.get('path', '')
+                        cache_data['__concept_seed'] = concept.get('seed', 0)
+                except Exception:
+                    pass
 
             tmp_path = pt_path + f'.{os.getpid()}.{threading.get_ident()}.tmp'
             torch.save(cache_data, os.path.realpath(tmp_path))
@@ -594,6 +608,14 @@ class SmartDiskCache(
                 for name in self.split_names + self.aggregate_names:
                     if name in cached:
                         item[name] = cached[name]
+                if self.sourceless and '__concept_loss_weight' in cached:
+                    item['concept'] = {
+                        'loss_weight': cached['__concept_loss_weight'],
+                        'type': cached.get('__concept_type', 'STANDARD'),
+                        'name': cached.get('__concept_name', ''),
+                        'path': cached.get('__concept_path', ''),
+                        'seed': cached.get('__concept_seed', 0),
+                    }
                 return item
 
         item = {}
