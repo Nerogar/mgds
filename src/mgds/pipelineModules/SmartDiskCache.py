@@ -435,8 +435,6 @@ class SmartDiskCache(
         files_skipped = 0
         files_failed = []
 
-        all_input_files = set()
-
         for group_key in self.group_variations.keys():
             start_index = self.group_output_samples[group_key] * out_variation
             end_index = self.group_output_samples[group_key] * (out_variation + 1) - 1
@@ -456,7 +454,6 @@ class SmartDiskCache(
                         continue
 
                     filepath = os.path.normpath(filepath)
-                    all_input_files.add((filepath, group_key, in_variation, in_index, group_index, variations))
 
                     entry = self.cache_index['entries'].get(filepath)
                     if entry is not None:
@@ -472,6 +469,11 @@ class SmartDiskCache(
                                 del self.cache_index['entries'][filepath]
                             items_to_build.append((filepath, group_key, in_variation, in_index, group_index, variations))
                         elif status == 'rebuild':
+                            with self._index_lock:
+                                old_hash = entry.get('hash')
+                                if old_hash:
+                                    self._remove_from_hash_index(old_hash, filepath)
+                                del self.cache_index['entries'][filepath]
                             items_to_build.append((filepath, group_key, in_variation, in_index, group_index, variations))
                     else:
                         items_to_build.append((filepath, group_key, in_variation, in_index, group_index, variations))
