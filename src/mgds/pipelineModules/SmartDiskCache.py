@@ -3,6 +3,7 @@ import hashlib
 import json
 import math
 import os
+import random
 import shutil
 import threading
 import time
@@ -236,6 +237,61 @@ class SmartDiskCache(
                 return 'missing_pt'
 
         return 'valid'
+
+    def _fast_validate(self) -> bool:
+        """Fast validation: directory mtime check + random spot check.
+
+        Skips the expensive per-file validation loop when nothing has changed.
+        Returns True if cache appears valid.
+        """
+        last_validated = self.cache_index.get('last_validated')
+        if last_validated is None:
+            return False
+
+        entries = self.cache_index.get('entries', {})
+        if not entries:
+            return False
+
+        # Check if any source directory was modified after last validation
+        # (catches added/removed/renamed files)
+        parent_dirs = set()
+        for filepath in entries:
+            parent_dirs.add(os.path.dirname(filepath))
+
+        for d in parent_dirs:
+            try:
+                dir_mtime = os.path.getmtime(d)
+            except OSError:
+                return False
+            if dir_mtime > last_validated:
+                return False
+
+        # Spot-check: mtime compare + .pt existence (no hashing)
+        # Small datasets: check everything (still instant). Large: random sample.
+        all_keys = list(entries.keys())
+        if len(all_keys) <= 100:
+            sample_keys = all_keys
+            sample_size = len(all_keys)
+        else:
+            sample_size = min(50, max(10, len(all_keys) // 20))
+            sample_keys = random.sample(all_keys, sample_size)
+
+        for filepath in sample_keys:
+            entry = entries[filepath]
+            if entry.get('modeltype') != self.modeltype:
+                return False
+            try:
+                current_mtime = os.path.getmtime(filepath)
+            except OSError:
+                return False
+            if current_mtime != entry.get('mtime'):
+                return False
+            cache_file = entry.get('cache_file')
+            if cache_file and not os.path.isfile(self._real_pt_path(cache_file, 0)):
+                return False
+
+        self._fast_validate_sample_size = sample_size
+        return True
 
     def _add_to_hash_index(self, file_hash: str, filepath: str):
         if file_hash not in self.cache_index['hash_index']:
@@ -495,6 +551,35 @@ class SmartDiskCache(
         self._source_path_cache = {}
         self._aggregate_cache = {}
 
+        # --- Fast validation path ---
+        if self.cache_index.get('entries') and self._fast_validate():
+            all_in_index = True
+            for group_key in self.group_variations.keys():
+                for in_index in self.group_indices[group_key]:
+                    filepath = self._get_source_path(0, in_index)
+                    if filepath is None:
+                        continue
+                    filepath = os.path.normpath(filepath)
+                    self._source_path_cache[in_index] = filepath
+                    if filepath not in self.cache_index['entries']:
+                        all_in_index = False
+                        break
+                if not all_in_index:
+                    break
+
+            if all_in_index:
+                n = len(self.cache_index['entries'])
+                checked = getattr(self, '_fast_validate_sample_size', '?')
+                print(f"SmartDiskCache: Fast validation passed ({n} entries, {checked} spot-checked)")
+                self._load_aggregate_cache(out_variation)
+                return
+
+            # Index mismatch — fall through to full validation
+            self._source_path_cache = {}
+
+        # Clear fast-validation token during full validation
+        self.cache_index.pop('last_validated', None)
+
         before_cache_fun_called = False
         files_built = 0
         files_skipped = 0
@@ -622,6 +707,7 @@ class SmartDiskCache(
                         print(f"SmartDiskCache: Stopped early. Cached {files_built} files this session, {files_skipped} reused from cache.")
                         raise CachingStoppedException()
 
+        self.cache_index['last_validated'] = time.time()
         self._save_cache_index()
 
         total = files_built + files_skipped + len(files_failed)
