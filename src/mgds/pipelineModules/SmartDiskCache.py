@@ -586,7 +586,11 @@ class SmartDiskCache(
             self.__refresh_cache(out_variation)
 
     def get_item(self, index: int, requested_name: str = None) -> dict:
-        group_key, in_variation, group_index, in_index = self.__get_input_index(self.current_variation, index)
+        result = self.__get_input_index(self.current_variation, index)
+        if result is None:
+            return {requested_name: self._get_previous_item(self.current_variation, requested_name, index)}
+
+        group_key, in_variation, group_index, in_index = result
 
         if self.sourceless:
             filepath = self._sourceless_filepaths[group_index]
