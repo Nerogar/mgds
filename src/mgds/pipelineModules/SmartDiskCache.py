@@ -17,6 +17,10 @@ from mgds.pipelineModuleTypes.SingleVariationRandomAccessPipelineModule import S
 CACHE_VERSION = 2
 
 
+class CachingStoppedException(Exception):
+    pass
+
+
 class SmartDiskCache(
     PipelineModule,
     SingleVariationRandomAccessPipelineModule,
@@ -32,6 +36,7 @@ class SmartDiskCache(
             variations_group_in_name: str | list[str] | None = None,
             group_enabled_in_name: str | None = None,
             before_cache_fun: Callable[[], None] | None = None,
+            stop_check_fun: Callable[[], bool] | None = None,
             modeltype: str = "",
             source_path_in_name: str | None = None,
             sourceless: bool = False,
@@ -51,6 +56,7 @@ class SmartDiskCache(
         self.group_enabled_in_name = group_enabled_in_name
 
         self.before_cache_fun = (lambda: None) if before_cache_fun is None else before_cache_fun
+        self.stop_check_fun = stop_check_fun or (lambda: False)
 
         self.modeltype = modeltype
         self.source_path_in_name = source_path_in_name
@@ -567,6 +573,11 @@ class SmartDiskCache(
                         self._torch_gc()
                     self._flush_cache_index(build_count)
                     bar.update(1)
+                    if self.stop_check_fun():
+                        self._state.executor.shutdown(wait=True, cancel_futures=True)
+                        self._save_cache_index()
+                        print(f"SmartDiskCache: Stopped early. Cached {files_built} files this session, {files_skipped} reused from cache.")
+                        raise CachingStoppedException()
 
         self._save_cache_index()
 
