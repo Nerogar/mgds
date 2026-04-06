@@ -5,6 +5,7 @@ import math
 import os
 import shutil
 import threading
+import time
 from typing import Any, Callable
 
 import torch
@@ -43,6 +44,7 @@ class SmartDiskCache(
     ):
         super(SmartDiskCache, self).__init__()
         self.cache_dir = cache_dir
+        self._real_cache_dir = os.path.realpath(cache_dir)
 
         self.split_names = [] if split_names is None else split_names
         self.aggregate_names = [] if aggregate_names is None else aggregate_names
@@ -73,6 +75,9 @@ class SmartDiskCache(
 
         self.cache_index = None
         self._index_lock = threading.Lock()
+        self._last_flush_time = 0.0
+        self._source_path_cache = {}
+        self._aggregate_cache = {}
 
     def length(self) -> int:
         if not self.variations_initialized:
@@ -120,16 +125,18 @@ class SmartDiskCache(
     def _load_cache_index(self) -> dict:
         cache_path = self._get_cache_json_path()
         tmp_path = cache_path + '.tmp'
+        bak_path = cache_path + '.bak'
 
         if os.path.exists(cache_path):
-            if os.path.exists(tmp_path):
-                try:
-                    os.remove(tmp_path)
-                except OSError:
-                    pass
             try:
                 with open(cache_path, 'r') as f:
-                    return json.load(f)
+                    data = json.load(f)
+                for p in (tmp_path, bak_path):
+                    try:
+                        os.remove(p)
+                    except OSError:
+                        pass
+                return data
             except (json.JSONDecodeError, OSError):
                 pass
 
@@ -137,17 +144,23 @@ class SmartDiskCache(
             try:
                 with open(tmp_path, 'r') as f:
                     data = json.load(f)
-                shutil.move(tmp_path, cache_path)
+                os.replace(tmp_path, cache_path)
                 return data
             except (json.JSONDecodeError, OSError):
-                try:
-                    os.remove(tmp_path)
-                except OSError:
-                    pass
+                pass
+
+        if os.path.exists(bak_path):
+            try:
+                with open(bak_path, 'r') as f:
+                    data = json.load(f)
+                os.replace(bak_path, cache_path)
+                return data
+            except (json.JSONDecodeError, OSError):
+                pass
 
         return {"version": CACHE_VERSION, "entries": {}, "hash_index": {}}
 
-    def _save_cache_index(self):
+    def _save_cache_index(self, compact: bool = False):
         os.makedirs(self.cache_dir, exist_ok=True)
         cache_path = self._get_cache_json_path()
         tmp_path = cache_path + '.tmp'
@@ -155,19 +168,21 @@ class SmartDiskCache(
 
         with self._index_lock:
             with open(tmp_path, 'w') as f:
-                json.dump(self.cache_index, f, indent=2)
+                json.dump(self.cache_index, f, indent=None if compact else 2)
 
-        if os.path.exists(cache_path):
-            try:
-                shutil.copy2(cache_path, bak_path)
-            except OSError:
-                pass
+            if os.path.exists(cache_path):
+                try:
+                    shutil.copy2(cache_path, bak_path)
+                except OSError:
+                    pass
 
-        shutil.move(tmp_path, cache_path)
+            os.replace(tmp_path, cache_path)
 
-    def _flush_cache_index(self, count: int):
-        if count > 0 and count % 50 == 0:
-            self._save_cache_index()
+    def _flush_cache_index(self):
+        now = time.monotonic()
+        if now - self._last_flush_time >= 30.0:
+            self._save_cache_index(compact=True)
+            self._last_flush_time = now
 
     def _get_resolution_string(self, in_variation: int, in_index: int) -> str | None:
         if 'crop_resolution' in self.aggregate_names:
@@ -184,6 +199,9 @@ class SmartDiskCache(
 
     def _pt_path(self, cache_file: str, variation: int) -> str:
         return os.path.join(self.cache_dir, f"{cache_file}_{variation + 1}.pt")
+
+    def _real_pt_path(self, cache_file: str, variation: int) -> str:
+        return os.path.join(self._real_cache_dir, f"{cache_file}_{variation + 1}.pt")
 
     def _validate_entry(self, filepath: str, entry: dict, resolution: str | None, variations: int) -> str:
         if entry['modeltype'] != self.modeltype:
@@ -202,6 +220,9 @@ class SmartDiskCache(
             return 'rebuild'
 
         if current_mtime == entry['mtime']:
+            for v in range(variations):
+                if not os.path.isfile(self._real_pt_path(entry['cache_file'], v)):
+                    return 'missing_pt'
             return 'valid'
 
         file_hash = self._hash_file(filepath)
@@ -211,7 +232,7 @@ class SmartDiskCache(
         entry['mtime'] = current_mtime
 
         for v in range(variations):
-            if not os.path.isfile(self._pt_path(entry['cache_file'], v)):
+            if not os.path.isfile(self._real_pt_path(entry['cache_file'], v)):
                 return 'missing_pt'
 
         return 'valid'
@@ -272,8 +293,8 @@ class SmartDiskCache(
         cache_file = self._make_cache_file(file_hash, resolution)
 
         for v in range(variations):
-            pt_path = self._pt_path(cache_file, v)
-            if os.path.isfile(pt_path):
+            real_pt = self._real_pt_path(cache_file, v)
+            if os.path.isfile(real_pt):
                 continue
 
             cache_data = {}
@@ -296,9 +317,10 @@ class SmartDiskCache(
                 except Exception:
                     pass
 
-            tmp_path = pt_path + f'.{os.getpid()}.{threading.get_ident()}.tmp'
-            torch.save(cache_data, os.path.realpath(tmp_path))
-            shutil.move(tmp_path, pt_path)
+            real_pt_path = self._real_pt_path(cache_file, v)
+            real_tmp_path = real_pt_path + f'.{os.getpid()}.{threading.get_ident()}.tmp'
+            torch.save(cache_data, real_tmp_path)
+            os.replace(real_tmp_path, real_pt_path)
 
         with self._index_lock:
             self.cache_index['entries'][filepath] = {
@@ -422,7 +444,7 @@ class SmartDiskCache(
 
         for fp in self._sourceless_filepaths:
             entry = self.cache_index['entries'][fp]
-            pt_path = self._pt_path(entry['cache_file'], 0)
+            pt_path = self._real_pt_path(entry['cache_file'], 0)
             if not os.path.isfile(pt_path):
                 raise RuntimeError(
                     f"Sourceless training: cache file '{pt_path}' is missing. "
@@ -438,6 +460,24 @@ class SmartDiskCache(
         self.group_balancing = {}
         self.variations_initialized = True
 
+        self._aggregate_cache = {}
+        if self.aggregate_names:
+            for group_index, fp in enumerate(self._sourceless_filepaths):
+                entry = self.cache_index['entries'].get(fp)
+                if entry is None:
+                    continue
+                real_path = self._real_pt_path(entry['cache_file'], 0)
+                try:
+                    cached = torch.load(real_path, weights_only=False, map_location='cpu')
+                    agg_data = {}
+                    for name in self.aggregate_names:
+                        if name in cached:
+                            agg_data[name] = cached[name]
+                    if agg_data:
+                        self._aggregate_cache[(fp, 0)] = agg_data
+                except Exception:
+                    pass
+
     def __refresh_cache_sourceless(self, out_variation: int):
         if not self.variations_initialized:
             self.__init_sourceless()
@@ -449,6 +489,8 @@ class SmartDiskCache(
 
         self.cache_index = self._load_cache_index()
         os.makedirs(self.cache_dir, exist_ok=True)
+        self._source_path_cache = {}
+        self._aggregate_cache = {}
 
         before_cache_fun_called = False
         files_built = 0
@@ -474,6 +516,8 @@ class SmartDiskCache(
                         continue
 
                     filepath = os.path.normpath(filepath)
+                    if in_index not in self._source_path_cache:
+                        self._source_path_cache[in_index] = filepath
                     resolution = self._get_resolution_string(in_variation, in_index)
 
                     entry = self.cache_index['entries'].get(filepath)
@@ -505,6 +549,7 @@ class SmartDiskCache(
                     seen_paths.add(fp)
                     unique_items.append(item)
 
+            self._last_flush_time = time.monotonic()
             with tqdm(total=len(unique_items), smoothing=0.1, desc='caching') as bar:
                 def fn(filepath, group_key, in_variation, in_index, group_index, variations, resolution, current_device):
                     if torch.cuda.is_available() and current_device is not None:
@@ -524,7 +569,7 @@ class SmartDiskCache(
                         if self._try_dedup(filepath, file_hash, resolution, mtime):
                             entry = self.cache_index['entries'][filepath]
                             all_present = all(
-                                os.path.isfile(self._pt_path(entry['cache_file'], v))
+                                os.path.isfile(self._real_pt_path(entry['cache_file'], v))
                                 for v in range(variations)
                             )
                             if all_present:
@@ -561,7 +606,7 @@ class SmartDiskCache(
                     build_count += 1
                     if build_count % 250 == 0:
                         self._torch_gc()
-                    self._flush_cache_index(build_count)
+                    self._flush_cache_index()
                     bar.update(1)
                     if self.stop_check_fun():
                         self._state.executor.shutdown(wait=True, cancel_futures=True)
@@ -580,6 +625,43 @@ class SmartDiskCache(
             if len(files_failed) > 10:
                 print(f"  ... and {len(files_failed) - 10} more")
 
+        self._load_aggregate_cache(out_variation)
+
+    def _load_aggregate_cache(self, out_variation: int):
+        if not self.aggregate_names:
+            return
+
+        for group_key in self.group_variations.keys():
+            start_index = self.group_output_samples[group_key] * out_variation
+            end_index = self.group_output_samples[group_key] * (out_variation + 1) - 1
+
+            start_variation = start_index // len(self.group_indices[group_key])
+            end_variation = end_index // len(self.group_indices[group_key])
+
+            variations = self.group_variations[group_key]
+            needed_variations = [(x % variations) for x in range(start_variation, end_variation + 1)]
+
+            for in_variation in needed_variations:
+                for group_index, in_index in enumerate(self.group_indices[group_key]):
+                    filepath = self._source_path_cache.get(in_index)
+                    if filepath is None:
+                        continue
+                    cache_entry = self.cache_index['entries'].get(filepath)
+                    if cache_entry is None:
+                        continue
+                    variation = in_variation % variations
+                    real_path = self._real_pt_path(cache_entry['cache_file'], variation)
+                    try:
+                        cached = torch.load(real_path, weights_only=False, map_location='cpu')
+                        agg_data = {}
+                        for name in self.aggregate_names:
+                            if name in cached:
+                                agg_data[name] = cached[name]
+                        if agg_data:
+                            self._aggregate_cache[(filepath, variation)] = agg_data
+                    except Exception:
+                        pass
+
     def start(self, out_variation: int):
         if self.sourceless:
             self.__refresh_cache_sourceless(out_variation)
@@ -596,18 +678,22 @@ class SmartDiskCache(
         if self.sourceless:
             filepath = self._sourceless_filepaths[group_index]
         else:
-            filepath = self._get_source_path(in_variation, in_index)
+            filepath = self._source_path_cache.get(in_index)
 
         if filepath is not None:
-            if not self.sourceless:
-                filepath = os.path.normpath(filepath)
             cache_entry = self.cache_index['entries'].get(filepath)
 
             if cache_entry is not None:
                 variation = in_variation % self.group_variations[group_key]
-                cache_path = self._pt_path(cache_entry['cache_file'], variation)
 
-                cached = torch.load(os.path.realpath(cache_path), weights_only=False, map_location=self.pipeline.device)
+                if requested_name in self.aggregate_names:
+                    agg_data = self._aggregate_cache.get((filepath, variation))
+                    if agg_data is not None:
+                        return agg_data
+
+                real_cache_path = self._real_pt_path(cache_entry['cache_file'], variation)
+
+                cached = torch.load(real_cache_path, weights_only=False, map_location=self.pipeline.device)
 
                 item = {}
                 for name in self.split_names + self.aggregate_names:
@@ -723,4 +809,4 @@ class SmartDiskCache(
             json.dump(index, f, indent=2)
         if os.path.exists(cache_path):
             shutil.copy2(cache_path, bak_path)
-        shutil.move(tmp_path, cache_path)
+        os.replace(tmp_path, cache_path)
