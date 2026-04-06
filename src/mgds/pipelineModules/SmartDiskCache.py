@@ -185,7 +185,7 @@ class SmartDiskCache(
     def _pt_path(self, cache_file: str, variation: int) -> str:
         return os.path.join(self.cache_dir, f"{cache_file}_{variation + 1}.pt")
 
-    def _validate_entry(self, filepath: str, entry: dict, in_variation: int, in_index: int, variations: int) -> str:
+    def _validate_entry(self, filepath: str, entry: dict, resolution: str | None, variations: int) -> str:
         if entry['modeltype'] != self.modeltype:
             raise RuntimeError(
                 f"Cache modeltype mismatch for '{filepath}': "
@@ -193,13 +193,8 @@ class SmartDiskCache(
                 f"Delete the cache directory or use a separate cache_dir for this model type."
             )
 
-        resolution = self._get_resolution_string(in_variation, in_index)
         if resolution and entry.get('resolution') and resolution != entry['resolution']:
             return 'resolution_changed'
-
-        for v in range(variations):
-            if not os.path.isfile(self._pt_path(entry['cache_file'], v)):
-                return 'missing_pt'
 
         try:
             current_mtime = os.path.getmtime(filepath)
@@ -210,11 +205,16 @@ class SmartDiskCache(
             return 'valid'
 
         file_hash = self._hash_file(filepath)
-        if file_hash == entry['hash']:
-            entry['mtime'] = current_mtime
-            return 'valid'
+        if file_hash != entry['hash']:
+            return 'content_changed'
 
-        return 'content_changed'
+        entry['mtime'] = current_mtime
+
+        for v in range(variations):
+            if not os.path.isfile(self._pt_path(entry['cache_file'], v)):
+                return 'missing_pt'
+
+        return 'valid'
 
     def _add_to_hash_index(self, file_hash: str, filepath: str):
         if file_hash not in self.cache_index['hash_index']:
@@ -474,29 +474,21 @@ class SmartDiskCache(
                         continue
 
                     filepath = os.path.normpath(filepath)
+                    resolution = self._get_resolution_string(in_variation, in_index)
 
                     entry = self.cache_index['entries'].get(filepath)
                     if entry is not None:
-                        status = self._validate_entry(filepath, entry, in_variation, in_index, variations)
+                        status = self._validate_entry(filepath, entry, resolution, variations)
                         if status == 'valid':
                             files_skipped += 1
                             continue
-                        if status in ('resolution_changed', 'missing_pt', 'content_changed'):
-                            with self._index_lock:
-                                old_hash = entry.get('hash')
-                                if old_hash:
-                                    self._remove_from_hash_index(old_hash, filepath)
-                                del self.cache_index['entries'][filepath]
-                            items_to_build.append((filepath, group_key, in_variation, in_index, group_index, variations))
-                        elif status == 'rebuild':
-                            with self._index_lock:
-                                old_hash = entry.get('hash')
-                                if old_hash:
-                                    self._remove_from_hash_index(old_hash, filepath)
-                                del self.cache_index['entries'][filepath]
-                            items_to_build.append((filepath, group_key, in_variation, in_index, group_index, variations))
-                    else:
-                        items_to_build.append((filepath, group_key, in_variation, in_index, group_index, variations))
+                        with self._index_lock:
+                            old_hash = entry.get('hash')
+                            if old_hash:
+                                self._remove_from_hash_index(old_hash, filepath)
+                            del self.cache_index['entries'][filepath]
+
+                    items_to_build.append((filepath, group_key, in_variation, in_index, group_index, variations, resolution))
 
             if not items_to_build:
                 continue
@@ -514,7 +506,7 @@ class SmartDiskCache(
                     unique_items.append(item)
 
             with tqdm(total=len(unique_items), smoothing=0.1, desc='caching') as bar:
-                def fn(filepath, group_key, in_variation, in_index, group_index, variations, current_device):
+                def fn(filepath, group_key, in_variation, in_index, group_index, variations, resolution, current_device):
                     if torch.cuda.is_available() and current_device is not None:
                         torch.cuda.set_device(current_device)
 
@@ -527,8 +519,6 @@ class SmartDiskCache(
                         file_hash = self._hash_file(filepath)
                     except OSError:
                         return filepath, 'hash_failed'
-
-                    resolution = self._get_resolution_string(in_variation, in_index)
 
                     if filepath not in self.cache_index['entries']:
                         if self._try_dedup(filepath, file_hash, resolution, mtime):
@@ -553,8 +543,8 @@ class SmartDiskCache(
                 current_device = torch.cuda.current_device() if torch.cuda.is_available() else None
 
                 fs = (self._state.executor.submit(
-                    fn, filepath, group_key, in_variation, in_index, group_index, variations, current_device)
-                      for (filepath, group_key, in_variation, in_index, group_index, variations)
+                    fn, filepath, group_key, in_variation, in_index, group_index, variations, resolution, current_device)
+                      for (filepath, group_key, in_variation, in_index, group_index, variations, resolution)
                       in unique_items)
                 build_count = 0
                 for i, f in enumerate(concurrent.futures.as_completed(fs)):
