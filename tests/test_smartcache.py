@@ -242,7 +242,11 @@ class TestCacheValidation:
                 f"{f} was rewritten even though source was unchanged"
 
     def test_touched_file(self, tmp_path):
-        """mtime changed but content same -> cache accepted, mtime updated in index."""
+        """mtime changed but content same -> cache accepted, mtime updated in index.
+
+        Simulates a new training run (fresh pipeline) after a touch, since
+        within-run session skip intentionally bypasses re-validation.
+        """
         paths, tensors = self._setup_files(tmp_path, n=2)
 
         ds, cache_dir, _ = _build_smart_pipeline(
@@ -274,7 +278,18 @@ class TestCacheValidation:
         pt_files = [f for f in os.listdir(cache_dir) if f.endswith(".pt")]
         pt_mtimes = {f: os.path.getmtime(os.path.join(cache_dir, f)) for f in pt_files}
 
-        _drain(ds)
+        # Fresh pipeline = new run; full validation will run against persisted cache.json.
+        ds2, _, _ = _build_smart_pipeline(
+            tmp_path,
+            concepts=[{"name": "A", "path": "dummy"}],
+            dummy_data={"latent": tensors, "image_path": paths},
+            dummy_length=len(paths),
+            split_names=["latent"],
+            aggregate_names=[],
+            modeltype="testmodel",
+            source_path_in_name="image_path",
+        )
+        _drain(ds2)
 
         # .pt files should NOT have been rewritten
         for f in pt_files:
@@ -313,7 +328,18 @@ class TestCacheValidation:
         with open(paths[0], "wb") as f:
             f.write(b"COMPLETELY DIFFERENT CONTENT NOW")
 
-        _drain(ds)
+        # Fresh pipeline simulates a new run; within-run edits are not picked up by design.
+        ds2, _, _ = _build_smart_pipeline(
+            tmp_path,
+            concepts=[{"name": "A", "path": "dummy"}],
+            dummy_data={"latent": tensors, "image_path": paths},
+            dummy_length=len(paths),
+            split_names=["latent"],
+            aggregate_names=[],
+            modeltype="testmodel",
+            source_path_in_name="image_path",
+        )
+        _drain(ds2)
 
         index_after = _read_cache_json(cache_dir)
         new_hash = index_after["entries"][norm_path]["hash"]
@@ -373,7 +399,18 @@ class TestCacheValidation:
         os.remove(victim)
         assert not os.path.isfile(victim)
 
-        _drain(ds)
+        # Fresh pipeline = new run; detection relies on full validation at start of run.
+        ds2, _, _ = _build_smart_pipeline(
+            tmp_path,
+            concepts=[{"name": "A", "path": "dummy"}],
+            dummy_data={"latent": tensors, "image_path": paths},
+            dummy_length=len(paths),
+            split_names=["latent"],
+            aggregate_names=[],
+            modeltype="testmodel",
+            source_path_in_name="image_path",
+        )
+        _drain(ds2)
 
         # The file should be recreated
         assert os.path.isfile(victim), f"Expected {victim} to be rebuilt after deletion"
@@ -503,7 +540,18 @@ class TestDeduplication:
         with open(path_b, "wb") as f:
             f.write(b"DIVERGED content after edit")
 
-        _drain(ds)
+        # Fresh pipeline = new run; edit detection happens on full validation at start of run.
+        ds2, _, _ = _build_smart_pipeline(
+            tmp_path,
+            concepts=[{"name": "D", "path": "dummy"}],
+            dummy_data={"latent": tensors, "image_path": [path_a, path_b]},
+            dummy_length=2,
+            split_names=["latent"],
+            aggregate_names=[],
+            modeltype="testmodel",
+            source_path_in_name="image_path",
+        )
+        _drain(ds2)
 
         index_after = _read_cache_json(cache_dir)
 
@@ -1130,8 +1178,15 @@ class TestRebuildHashIndexCleanup:
                 raise OSError("simulated access error")
             return original_getmtime(path)
 
+        # Fresh pipeline = new run; 'rebuild' path triggers during full validation
+        # at run start, not via within-run revalidation (which session-skip bypasses).
+        ds2, _, _ = _build_smart_pipeline(
+            tmp_path, [{}], dummy_data, 1,
+            split_names=["latent"], aggregate_names=[],
+            modeltype="testmodel", source_path_in_name="image_path",
+        )
         with patch("os.path.getmtime", side_effect=flaky_getmtime):
-            _drain(ds)
+            _drain(ds2)
 
         idx_after = _read_cache_json(cache_dir)
         new_hash = idx_after["entries"][fp]["hash"]
@@ -1159,7 +1214,7 @@ class TestFastValidation:
         return paths, tensors
 
     def test_fast_validation_skips_full_loop(self, tmp_path, capsys):
-        """Second run with no changes should use fast validation."""
+        """Second *process* with no changes should use fast validation path."""
         paths, tensors = self._setup_files(tmp_path, n=5)
 
         ds, cache_dir, _ = _build_smart_pipeline(
@@ -1173,13 +1228,26 @@ class TestFastValidation:
             source_path_in_name="image_path",
         )
 
-        _drain(ds)  # first run — full validation + cache build
+        _drain(ds)  # first process — full validation + cache build
 
         idx = _read_cache_json(cache_dir)
         assert "last_validated" in idx
 
         time.sleep(0.05)
-        _drain(ds)  # second run — should hit fast path
+
+        # A new pipeline instance = new process semantics, so the session-skip
+        # set is empty and fast validation is the first line of defense.
+        ds2, _, _ = _build_smart_pipeline(
+            tmp_path,
+            concepts=[{"name": "A", "path": "dummy"}],
+            dummy_data={"latent": tensors, "image_path": paths},
+            dummy_length=len(paths),
+            split_names=["latent"],
+            aggregate_names=[],
+            modeltype="testmodel",
+            source_path_in_name="image_path",
+        )
+        _drain(ds2)
 
         captured = capsys.readouterr()
         assert "Fast validation passed" in captured.out
@@ -1265,3 +1333,146 @@ class TestFastValidation:
 
         captured = capsys.readouterr()
         assert "Fast validation passed" not in captured.out
+
+
+# ---------------------------------------------------------------------------
+# Session-level skip (no per-epoch revalidation within one process)
+# ---------------------------------------------------------------------------
+
+class TestSessionSkip:
+    """Tests that the in-process session cache skips re-validation entirely
+    on subsequent epochs when the set of required filepaths is unchanged."""
+
+    def _setup_files(self, tmp_path, n=4):
+        src_dir = tmp_path / "sources"
+        src_dir.mkdir()
+        paths = [
+            _create_source_file(src_dir, f"img_{i}.bin", f"content_{i}".encode())
+            for i in range(n)
+        ]
+        tensors = _make_tensors(n, seed=99)
+        return paths, tensors
+
+    def test_second_epoch_skips_validation(self, tmp_path, capsys):
+        """Second epoch on the same pipeline must hit the session-skip path
+        -- no 'validating cache' loop, no fast-validate call."""
+        paths, tensors = self._setup_files(tmp_path, n=4)
+
+        ds, _, _ = _build_smart_pipeline(
+            tmp_path,
+            concepts=[{"name": "A", "path": "dummy"}],
+            dummy_data={"latent": tensors, "image_path": paths},
+            dummy_length=len(paths),
+            split_names=["latent"],
+            aggregate_names=[],
+            modeltype="testmodel",
+            source_path_in_name="image_path",
+        )
+        _drain(ds)
+        capsys.readouterr()
+
+        _drain(ds)
+
+        out = capsys.readouterr().out
+        assert "Skipped re-validation" in out
+        assert "Fast validation passed" not in out
+
+    def test_first_epoch_populates_but_does_not_skip(self, tmp_path, capsys):
+        """First epoch must actually validate, not skip."""
+        paths, tensors = self._setup_files(tmp_path, n=3)
+
+        ds, _, _ = _build_smart_pipeline(
+            tmp_path,
+            concepts=[{"name": "A", "path": "dummy"}],
+            dummy_data={"latent": tensors, "image_path": paths},
+            dummy_length=len(paths),
+            split_names=["latent"],
+            aggregate_names=[],
+            modeltype="testmodel",
+            source_path_in_name="image_path",
+        )
+        _drain(ds)
+
+        out = capsys.readouterr().out
+        assert "Skipped re-validation" not in out
+
+    def test_touched_file_within_run_is_not_rechecked(self, tmp_path, capsys):
+        """Documents the trade-off: mid-run source edits are NOT detected.
+        Within one process, session-skip bypasses validation entirely."""
+        paths, tensors = self._setup_files(tmp_path, n=3)
+
+        ds, cache_dir, _ = _build_smart_pipeline(
+            tmp_path,
+            concepts=[{"name": "A", "path": "dummy"}],
+            dummy_data={"latent": tensors, "image_path": paths},
+            dummy_length=len(paths),
+            split_names=["latent"],
+            aggregate_names=[],
+            modeltype="testmodel",
+            source_path_in_name="image_path",
+        )
+        _drain(ds)
+        idx_before = _read_cache_json(cache_dir)
+        norm_path = os.path.normpath(paths[0])
+        old_hash = idx_before["entries"][norm_path]["hash"]
+        capsys.readouterr()
+
+        time.sleep(0.05)
+        with open(paths[0], "wb") as f:
+            f.write(b"edited content after first epoch")
+
+        _drain(ds)
+
+        out = capsys.readouterr().out
+        assert "Skipped re-validation" in out
+        idx_after = _read_cache_json(cache_dir)
+        assert idx_after["entries"][norm_path]["hash"] == old_hash
+
+    def test_fresh_pipeline_resets_session_skip(self, tmp_path, capsys):
+        """A new pipeline instance = new process; session-skip must NOT apply."""
+        paths, tensors = self._setup_files(tmp_path, n=3)
+
+        def build():
+            return _build_smart_pipeline(
+                tmp_path,
+                concepts=[{"name": "A", "path": "dummy"}],
+                dummy_data={"latent": tensors, "image_path": paths},
+                dummy_length=len(paths),
+                split_names=["latent"],
+                aggregate_names=[],
+                modeltype="testmodel",
+                source_path_in_name="image_path",
+            )
+
+        ds, _, _ = build()
+        _drain(ds)
+        capsys.readouterr()
+
+        ds2, _, _ = build()
+        _drain(ds2)
+
+        out = capsys.readouterr().out
+        assert "Skipped re-validation" not in out
+
+    def test_repeated_epochs_all_skip(self, tmp_path, capsys):
+        """Epochs 2..N all hit the session-skip path."""
+        paths, tensors = self._setup_files(tmp_path, n=4)
+
+        ds, _, _ = _build_smart_pipeline(
+            tmp_path,
+            concepts=[{"name": "A", "path": "dummy"}],
+            dummy_data={"latent": tensors, "image_path": paths},
+            dummy_length=len(paths),
+            split_names=["latent"],
+            aggregate_names=[],
+            modeltype="testmodel",
+            source_path_in_name="image_path",
+        )
+        _drain(ds)
+        capsys.readouterr()
+
+        for _ in range(5):
+            _drain(ds)
+
+        out = capsys.readouterr().out
+        assert out.count("Skipped re-validation") == 5

@@ -79,6 +79,12 @@ class SmartDiskCache(
         self._last_flush_time = 0.0
         self._source_path_cache = {}
         self._aggregate_cache = {}
+        # Source filepaths whose cache entries have already been validated in
+        # this process. Once a filepath is in this set we skip re-validating
+        # it for the rest of the run — the dataset is static within a run
+        # (users use repeats, not changing samples_per_epoch) so the
+        # per-epoch revalidation was pure overhead.
+        self._session_validated_filepaths: set[str] = set()
 
     def length(self) -> int:
         if not self.variations_initialized:
@@ -551,26 +557,42 @@ class SmartDiskCache(
         self._source_path_cache = {}
         self._aggregate_cache = {}
 
+        # Resolve the source filepaths this call will deliver.
+        required_filepaths: set[str] = set()
+        index_to_filepath: dict[int, str] = {}
+        for group_key in self.group_variations.keys():
+            for in_index in self.group_indices[group_key]:
+                filepath = self._get_source_path(0, in_index)
+                if filepath is None:
+                    continue
+                filepath = os.path.normpath(filepath)
+                index_to_filepath[in_index] = filepath
+                required_filepaths.add(filepath)
+
+        # --- Session skip path ---
+        # If every required filepath was already validated earlier in this
+        # process and is still present in the on-disk index, skip validation
+        # entirely. This avoids per-epoch revalidation on static datasets.
+        if (required_filepaths
+                and self.cache_index.get('entries')
+                and required_filepaths.issubset(self._session_validated_filepaths)
+                and all(fp in self.cache_index['entries'] for fp in required_filepaths)):
+            self._source_path_cache = dict(index_to_filepath)
+            print(f"SmartDiskCache: Skipped re-validation ({len(required_filepaths)} entries already validated this run)")
+            self._load_aggregate_cache(out_variation)
+            return
+
         # --- Fast validation path ---
         if self.cache_index.get('entries') and self._fast_validate():
-            all_in_index = True
-            for group_key in self.group_variations.keys():
-                for in_index in self.group_indices[group_key]:
-                    filepath = self._get_source_path(0, in_index)
-                    if filepath is None:
-                        continue
-                    filepath = os.path.normpath(filepath)
-                    self._source_path_cache[in_index] = filepath
-                    if filepath not in self.cache_index['entries']:
-                        all_in_index = False
-                        break
-                if not all_in_index:
-                    break
-
+            all_in_index = all(
+                fp in self.cache_index['entries'] for fp in required_filepaths
+            )
             if all_in_index:
+                self._source_path_cache = dict(index_to_filepath)
                 n = len(self.cache_index['entries'])
                 checked = getattr(self, '_fast_validate_sample_size', '?')
                 print(f"SmartDiskCache: Fast validation passed ({n} entries, {checked} spot-checked)")
+                self._session_validated_filepaths.update(required_filepaths)
                 self._load_aggregate_cache(out_variation)
                 return
 
@@ -709,6 +731,13 @@ class SmartDiskCache(
 
         self.cache_index['last_validated'] = time.time()
         self._save_cache_index()
+
+        # Mark every required filepath that ended up with a valid entry as
+        # validated for this process so subsequent epochs can skip outright.
+        entries = self.cache_index.get('entries', {})
+        self._session_validated_filepaths.update(
+            fp for fp in required_filepaths if fp in entries
+        )
 
         total = files_built + files_skipped + len(files_failed)
         if total > 0:
