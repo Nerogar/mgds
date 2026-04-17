@@ -838,6 +838,9 @@ class SmartDiskCache(
                     }
                 return item
 
+        if self.before_cache_fun is not None:
+            self.before_cache_fun()
+
         item = {}
         with torch.no_grad():
             if requested_name in self.split_names:
