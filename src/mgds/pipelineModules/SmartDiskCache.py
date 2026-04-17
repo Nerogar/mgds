@@ -796,6 +796,79 @@ class SmartDiskCache(
             self.__refresh_cache_sourceless(out_variation)
         else:
             self.__refresh_cache(out_variation)
+        self._ensure_blank_sentinel()
+
+    def _ensure_blank_sentinel(self):
+        """Persist a zero-tensor sentinel for cache-miss fallback.
+
+        Why: files that failed to cache (build_failed / missing / hash_failed)
+        leave gaps in the index. At training time the text encoder has been
+        offloaded to CPU, so re-encoding those gaps risks both a device
+        mismatch and an OOM. Returning zeros for those few samples is
+        preferable to crashing training.
+        """
+        if not self.cache_index:
+            return
+
+        sentinel_name = self.cache_index.get('blank_sentinel')
+        if sentinel_name:
+            existing_path = os.path.join(self._real_cache_dir, sentinel_name)
+            if os.path.isfile(existing_path):
+                try:
+                    existing = torch.load(existing_path, weights_only=False, map_location='cpu')
+                    if existing.get('__modeltype') == self.modeltype:
+                        return
+                except Exception:
+                    pass
+
+        template = None
+        for entry in self.cache_index.get('entries', {}).values():
+            if entry.get('modeltype') != self.modeltype:
+                continue
+            pt = self._real_pt_path(entry['cache_file'], 0)
+            if os.path.isfile(pt):
+                try:
+                    template = torch.load(pt, weights_only=False, map_location='cpu')
+                    break
+                except Exception:
+                    template = None
+        if template is None:
+            return
+
+        sentinel = {'__cache_version': CACHE_VERSION, '__modeltype': self.modeltype}
+        for name in self.split_names + self.aggregate_names:
+            v = template.get(name)
+            if torch.is_tensor(v):
+                sentinel[name] = torch.zeros_like(v)
+            elif v is not None:
+                sentinel[name] = v
+
+        out_name = 'blank_sentinel.pt'
+        out_path = os.path.join(self._real_cache_dir, out_name)
+        tmp_path = out_path + f'.{os.getpid()}.tmp'
+        try:
+            torch.save(sentinel, tmp_path)
+            os.replace(tmp_path, out_path)
+        except OSError:
+            return
+
+        with self._index_lock:
+            self.cache_index['blank_sentinel'] = out_name
+        self._save_cache_index()
+
+    def _load_blank_sentinel(self) -> dict | None:
+        if not self.cache_index:
+            return None
+        sentinel_name = self.cache_index.get('blank_sentinel')
+        if not sentinel_name:
+            return None
+        sentinel_path = os.path.join(self._real_cache_dir, sentinel_name)
+        if not os.path.isfile(sentinel_path):
+            return None
+        try:
+            return torch.load(sentinel_path, weights_only=False, map_location=self.pipeline.device)
+        except Exception:
+            return None
 
     def get_item(self, index: int, requested_name: str = None) -> dict:
         result = self.__get_input_index(self.current_variation, index)
@@ -837,6 +910,14 @@ class SmartDiskCache(
                         'seed': cached.get('__concept_seed', 0),
                     }
                 return item
+
+        sentinel = self._load_blank_sentinel()
+        if sentinel is not None:
+            item = {}
+            for name in self.split_names + self.aggregate_names:
+                if name in sentinel:
+                    item[name] = sentinel[name]
+            return item
 
         if self.before_cache_fun is not None:
             self.before_cache_fun()
