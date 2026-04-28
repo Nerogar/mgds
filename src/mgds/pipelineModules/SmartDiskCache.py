@@ -582,8 +582,25 @@ class SmartDiskCache(
             self._load_aggregate_cache(out_variation)
             return
 
+        # --- Trust mode (OT_SKIP_CACHE_VALIDATION=1) ---
+        # Skip per-file mtime/hash/.pt-existence validation. Any filepath
+        # already in the on-disk index is trusted; only missing filepaths are
+        # cached. Modeltype is still verified up-front to fail loud on
+        # accidentally reusing another model's cache.
+        skip_validation = os.environ.get("OT_SKIP_CACHE_VALIDATION") == "1"
+        if skip_validation and self.cache_index.get('entries'):
+            entries = self.cache_index['entries']
+            for fp in required_filepaths:
+                entry = entries.get(fp)
+                if entry is not None and entry.get('modeltype') != self.modeltype:
+                    raise RuntimeError(
+                        f"Cache modeltype mismatch for '{fp}': "
+                        f"cached as '{entry.get('modeltype')}', current model is '{self.modeltype}'. "
+                        f"Delete the cache directory or use a separate cache_dir for this model type."
+                    )
+
         # --- Fast validation path ---
-        if self.cache_index.get('entries') and self._fast_validate():
+        if not skip_validation and self.cache_index.get('entries') and self._fast_validate():
             all_in_index = all(
                 fp in self.cache_index['entries'] for fp in required_filepaths
             )
@@ -623,6 +640,18 @@ class SmartDiskCache(
             with tqdm(total=validate_total, smoothing=0.1, desc='validating cache') as bar:
                 for in_variation in needed_variations:
                     for group_index, in_index in enumerate(self.group_indices[group_key]):
+                        # Trust-mode early skip: avoid upstream pipeline calls
+                        # (_get_source_path triggers crop_resolution upstream,
+                        # which can do per-image I/O on slow cloud storage)
+                        if skip_validation:
+                            cached_fp = index_to_filepath.get(in_index)
+                            if cached_fp is not None and cached_fp in self.cache_index['entries']:
+                                if in_index not in self._source_path_cache:
+                                    self._source_path_cache[in_index] = cached_fp
+                                files_skipped += 1
+                                bar.update(1)
+                                continue
+
                         filepath = self._get_source_path(in_variation, in_index)
                         if filepath is None:
                             bar.update(1)
@@ -635,6 +664,10 @@ class SmartDiskCache(
 
                         entry = self.cache_index['entries'].get(filepath)
                         if entry is not None:
+                            if skip_validation:
+                                files_skipped += 1
+                                bar.update(1)
+                                continue
                             status = self._validate_entry(filepath, entry, resolution, variations)
                             if status == 'valid':
                                 files_skipped += 1
@@ -729,7 +762,8 @@ class SmartDiskCache(
                         print(f"SmartDiskCache: Stopped early. Cached {files_built} files this session, {files_skipped} reused from cache.")
                         raise CachingStoppedException()
 
-        self.cache_index['last_validated'] = time.time()
+        if not skip_validation:
+            self.cache_index['last_validated'] = time.time()
         self._save_cache_index()
 
         # Mark every required filepath that ended up with a valid entry as
