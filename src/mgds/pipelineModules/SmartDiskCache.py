@@ -8,14 +8,16 @@ import random
 import shutil
 import threading
 import time
-from typing import Any, Callable
-
-import torch
-import xxhash
-from tqdm import tqdm
+from collections.abc import Callable
+from typing import Any
 
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.SingleVariationRandomAccessPipelineModule import SingleVariationRandomAccessPipelineModule
+
+import torch
+
+import xxhash
+from tqdm import tqdm
 
 CACHE_VERSION = 2
 
@@ -48,7 +50,7 @@ class SmartDiskCache(
             source_path_in_name: str | None = None,
             sourceless: bool = False,
     ):
-        super(SmartDiskCache, self).__init__()
+        super().__init__()
         self.cache_dir = cache_dir
         self._real_cache_dir = os.path.realpath(cache_dir)
 
@@ -144,10 +146,8 @@ class SmartDiskCache(
                 with open(cache_path, 'r') as f:
                     data = json.load(f)
                 for p in (tmp_path, bak_path):
-                    try:
+                    with contextlib.suppress(OSError):
                         os.remove(p)
-                    except OSError:
-                        pass
                 return data
             except (json.JSONDecodeError, OSError):
                 pass
@@ -183,10 +183,8 @@ class SmartDiskCache(
                 json.dump(self.cache_index, f, indent=None if compact else 2)
 
             if os.path.exists(cache_path):
-                try:
+                with contextlib.suppress(OSError):
                     shutil.copy2(cache_path, bak_path)
-                except OSError:
-                    pass
 
             os.replace(tmp_path, cache_path)
 
@@ -665,7 +663,7 @@ class SmartDiskCache(
             first_previous_name = self.split_names[0] if len(self.split_names) > 0 else self.aggregate_names[0]
 
             group_variations = {'': 1}
-            group_indices = {'': [in_index for in_index in range(self._get_previous_length(first_previous_name))]}
+            group_indices = {'': list(range(self._get_previous_length(first_previous_name)))}
             group_output_samples = {'': len(group_indices[''])}
             group_balancing_strategy = {}
             group_balancing = {}
@@ -693,6 +691,7 @@ class SmartDiskCache(
             in_index = self.group_indices[group_key][group_index]
 
             return group_key, in_variation, group_index, in_index
+        return None
 
     def __reshuffle_samples(self, out_variation: int):
         for group_key, strategy in self.group_balancing_strategy.items():
@@ -747,7 +746,7 @@ class SmartDiskCache(
         self._aggregate_cache = {}
         if self.aggregate_names:
             with tqdm(total=len(self._sourceless_filepaths), smoothing=0.1, desc='loading aggregate cache') as bar:
-                for group_index, fp in enumerate(self._sourceless_filepaths):
+                for _group_index, fp in enumerate(self._sourceless_filepaths):
                     entry = self.cache_index['entries'].get(fp)
                     if entry is None:
                         bar.update(1)
@@ -812,7 +811,7 @@ class SmartDiskCache(
         # Resolve the source filepaths this call will deliver.
         required_filepaths: set[str] = set()
         index_to_filepath: dict[int, str] = {}
-        for group_key in self.group_variations.keys():
+        for group_key in self.group_variations:
             for in_index in self.group_indices[group_key]:
                 filepath = self._get_source_path(0, in_index)
                 if filepath is None:
@@ -876,7 +875,7 @@ class SmartDiskCache(
         files_skipped = 0
         files_failed = []
 
-        for group_key in self.group_variations.keys():
+        for group_key in self.group_variations:
             start_index = self.group_output_samples[group_key] * out_variation
             end_index = self.group_output_samples[group_key] * (out_variation + 1) - 1
 
@@ -991,8 +990,7 @@ class SmartDiskCache(
                     fn, filepath, group_key, in_variation, in_index, group_index, variations, resolution, current_device)
                       for (filepath, group_key, in_variation, in_index, group_index, variations, resolution)
                       in unique_items]
-                build_count = 0
-                for i, f in enumerate(concurrent.futures.as_completed(fs)):
+                for build_count, f in enumerate(concurrent.futures.as_completed(fs), 1):
                     try:
                         filepath, status = f.result()
                     except Exception:
@@ -1003,7 +1001,6 @@ class SmartDiskCache(
                     elif status.startswith('build_failed') or status == 'missing' or status == 'hash_failed':
                         files_failed.append((filepath, status))
                         print(f"Warning: failed to cache '{filepath}': {status}")
-                    build_count += 1
                     if build_count % 250 == 0:
                         self._torch_gc()
                     self._flush_cache_index()
@@ -1012,7 +1009,7 @@ class SmartDiskCache(
                         self._state.executor.shutdown(wait=True, cancel_futures=True)
                         self._save_cache_index()
                         print(f"SmartDiskCache: Stopped early. Cached {files_built} files this session, {files_skipped} reused from cache.")
-                        raise CachingStoppedException()
+                        raise CachingStoppedException
 
         if not skip_validation:
             self.cache_index['last_validated'] = time.time()
@@ -1043,7 +1040,7 @@ class SmartDiskCache(
             return
 
         load_items = []
-        for group_key in self.group_variations.keys():
+        for group_key in self.group_variations:
             start_index = self.group_output_samples[group_key] * out_variation
             end_index = self.group_output_samples[group_key] * (out_variation + 1) - 1
 
@@ -1054,7 +1051,7 @@ class SmartDiskCache(
             needed_variations = [(x % variations) for x in range(start_variation, end_variation + 1)]
 
             for in_variation in needed_variations:
-                for group_index, in_index in enumerate(self.group_indices[group_key]):
+                for _group_index, in_index in enumerate(self.group_indices[group_key]):
                     filepath = self._source_path_cache.get(in_index)
                     if filepath is None:
                         continue
@@ -1168,10 +1165,7 @@ class SmartDiskCache(
 
         group_key, in_variation, group_index, in_index = result
 
-        if self.sourceless:
-            filepath = self._sourceless_filepaths[group_index]
-        else:
-            filepath = self._source_path_cache.get(in_index)
+        filepath = self._sourceless_filepaths[group_index] if self.sourceless else self._source_path_cache.get(in_index)
 
         if filepath is not None:
             cache_entry = self.cache_index['entries'].get(filepath)
@@ -1306,7 +1300,7 @@ class SmartDiskCache(
                             break
 
         referenced_cache_files = set()
-        for fp, entry in entries.items():
+        for entry in entries.values():
             cf = entry.get('cache_file', '')
             for v in range(1, 100):
                 pt = os.path.join(cache_dir, f"{cf}_{v}.pt")
