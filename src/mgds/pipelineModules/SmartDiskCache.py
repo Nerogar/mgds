@@ -1,4 +1,5 @@
 import concurrent
+import contextlib
 import hashlib
 import json
 import math
@@ -243,6 +244,155 @@ class SmartDiskCache(
                 return 'missing_pt'
 
         return 'valid'
+
+    def _detect_cache_schema_drift(self) -> set[str]:
+        """Return the currently-required names that aren't in on-disk cache files.
+
+        Schema drift happens when a setting like ``masked_training`` is toggled
+        between runs: ``split_names``/``aggregate_names`` now include keys that
+        weren't written when the existing ``.pt`` files were built. All entries
+        are produced by the same code path, so spot-checking one valid cache
+        file is enough to determine the on-disk schema.
+        """
+        if not self.cache_index or not self.cache_index.get('entries'):
+            return set()
+        required = set(self.split_names) | set(self.aggregate_names)
+        if not required:
+            return set()
+
+        for entry in self.cache_index['entries'].values():
+            if entry.get('modeltype') != self.modeltype:
+                continue
+            cache_file = entry.get('cache_file')
+            if not cache_file:
+                continue
+            pt = self._real_pt_path(cache_file, 0)
+            if not os.path.isfile(pt):
+                continue
+            try:
+                cached = torch.load(pt, weights_only=False, map_location='cpu')
+            except Exception:
+                continue
+            cached_keys = {k for k in cached if not k.startswith('__')}
+            return required - cached_keys
+
+        return set()
+
+    def _augment_cache_with_missing_names(self, missing_names: set[str]):
+        """Append computed values for ``missing_names`` to existing cache files.
+
+        Walks every entry in the on-disk index, resolves it back to an
+        ``in_index`` via the upstream pipeline, computes the requested names
+        through ``_get_previous_item``, and rewrites the ``.pt`` file with the
+        new keys merged in. Existing keys are preserved so this is a one-time
+        backfill rather than a full rebuild.
+        """
+        if not missing_names:
+            return
+
+        sorted_missing = sorted(missing_names)
+        print(
+            f"SmartDiskCache: schema drift detected (missing {sorted_missing}). "
+            f"Augmenting cache in place."
+        )
+
+        # Map every cached filepath to an upstream in_index and its variation count.
+        augment_items: list[tuple[str, int, int]] = []
+        seen_paths: set[str] = set()
+        for group_key, variations in self.group_variations.items():
+            for in_index in self.group_full_indices.get(group_key, []):
+                filepath = self._get_source_path(0, in_index)
+                if filepath is None:
+                    continue
+                filepath = os.path.normpath(filepath)
+                if filepath in seen_paths:
+                    continue
+                entry = self.cache_index['entries'].get(filepath)
+                if entry is None:
+                    continue
+                if entry.get('modeltype') != self.modeltype:
+                    continue
+                seen_paths.add(filepath)
+                augment_items.append((filepath, in_index, variations))
+
+        if not augment_items:
+            return
+
+        if self.before_cache_fun is not None:
+            self.before_cache_fun()
+
+        current_device = torch.cuda.current_device() if torch.cuda.is_available() else None
+
+        def fn(filepath, in_index, variations, current_device):
+            if torch.cuda.is_available() and current_device is not None:
+                torch.cuda.set_device(current_device)
+
+            entry = self.cache_index['entries'].get(filepath)
+            if entry is None:
+                return filepath, 'no_entry'
+            cache_file = entry.get('cache_file')
+            if not cache_file:
+                return filepath, 'no_cache_file'
+
+            for v in range(variations):
+                real_pt = self._real_pt_path(cache_file, v)
+                if not os.path.isfile(real_pt):
+                    continue
+                try:
+                    cache_data = torch.load(real_pt, weights_only=False, map_location='cpu')
+                except Exception as e:
+                    return filepath, f'load_failed: {e}'
+
+                if all(name in cache_data for name in sorted_missing):
+                    continue
+
+                try:
+                    with torch.no_grad():
+                        for name in sorted_missing:
+                            if name in cache_data:
+                                continue
+                            value = self._get_previous_item(v, name, in_index)
+                            cache_data[name] = self.__clone_for_cache(value)
+                except Exception as e:
+                    return filepath, f'compute_failed: {e}'
+
+                tmp_path = real_pt + f'.{os.getpid()}.{threading.get_ident()}.aug.tmp'
+                try:
+                    torch.save(cache_data, tmp_path)
+                    os.replace(tmp_path, real_pt)
+                except Exception as e:
+                    with contextlib.suppress(OSError):
+                        os.remove(tmp_path)
+                    return filepath, f'save_failed: {e}'
+
+            return filepath, 'augmented'
+
+        failed: list[tuple[str, str]] = []
+        with tqdm(total=len(augment_items), smoothing=0.1, desc='augmenting cache') as bar:
+            fs = [self._state.executor.submit(fn, fp, idx, var, current_device)
+                  for fp, idx, var in augment_items]
+            for count, f in enumerate(concurrent.futures.as_completed(fs), 1):
+                try:
+                    fp, status = f.result()
+                except Exception:
+                    self._state.executor.shutdown(wait=True, cancel_futures=True)
+                    raise
+                if status not in ('augmented', 'no_entry', 'no_cache_file'):
+                    failed.append((fp, status))
+                if count % 250 == 0:
+                    self._torch_gc()
+                bar.update(1)
+                if self.stop_check_fun():
+                    self._state.executor.shutdown(wait=True, cancel_futures=True)
+                    raise CachingStoppedException
+
+        succeeded = len(augment_items) - len(failed)
+        print(f"SmartDiskCache: augmentation complete ({succeeded}/{len(augment_items)} files).")
+        if failed:
+            for fp, reason in failed[:10]:
+                print(f"  augment failed: {fp}: {reason}")
+            if len(failed) > 10:
+                print(f"  ... and {len(failed) - 10} more")
 
     def _fast_validate(self) -> bool:
         """Fast validation: directory mtime check + random spot check.
@@ -557,6 +707,19 @@ class SmartDiskCache(
         self._source_path_cache = {}
         self._aggregate_cache = {}
 
+        # Schema drift: if split_names/aggregate_names changed since the cache
+        # was built (e.g. masked_training was just enabled), the on-disk .pt
+        # files won't contain the new keys. Augment them once before any
+        # fast-path return so downstream readers always find what they need.
+        required_schema = sorted(set(self.split_names) | set(self.aggregate_names))
+        if (self.cache_index.get('entries')
+                and self.cache_index.get('schema') != required_schema):
+            missing = self._detect_cache_schema_drift()
+            if missing:
+                self._augment_cache_with_missing_names(missing)
+            self.cache_index['schema'] = required_schema
+            self._save_cache_index()
+
         # Resolve the source filepaths this call will deliver.
         required_filepaths: set[str] = set()
         index_to_filepath: dict[int, str] = {}
@@ -764,6 +927,7 @@ class SmartDiskCache(
 
         if not skip_validation:
             self.cache_index['last_validated'] = time.time()
+        self.cache_index['schema'] = required_schema
         self._save_cache_index()
 
         # Mark every required filepath that ended up with a valid entry as
@@ -845,12 +1009,15 @@ class SmartDiskCache(
             return
 
         sentinel_name = self.cache_index.get('blank_sentinel')
+        required = set(self.split_names) | set(self.aggregate_names)
         if sentinel_name:
             existing_path = os.path.join(self._real_cache_dir, sentinel_name)
             if os.path.isfile(existing_path):
                 try:
                     existing = torch.load(existing_path, weights_only=False, map_location='cpu')
-                    if existing.get('__modeltype') == self.modeltype:
+                    existing_keys = {k for k in existing if not k.startswith('__')}
+                    if (existing.get('__modeltype') == self.modeltype
+                            and required.issubset(existing_keys)):
                         return
                 except Exception:
                     pass
@@ -932,9 +1099,22 @@ class SmartDiskCache(
                 cached = torch.load(real_cache_path, weights_only=False, map_location=self.pipeline.device)
 
                 item = {}
+                missing_for_file: list[str] = []
                 for name in self.split_names + self.aggregate_names:
                     if name in cached:
                         item[name] = cached[name]
+                    else:
+                        missing_for_file.append(name)
+                if missing_for_file:
+                    # The schema-drift pass should have populated these, but a
+                    # per-file augmentation failure can still leave gaps. Borrow
+                    # the sentinel's zero-tensors for the missing keys so
+                    # downstream readers don't crash on a single bad file.
+                    sentinel = self._load_blank_sentinel()
+                    if sentinel is not None:
+                        for name in missing_for_file:
+                            if name in sentinel:
+                                item[name] = sentinel[name]
                 if self.sourceless and '__concept_loss_weight' in cached:
                     item['concept'] = {
                         'loss_weight': cached['__concept_loss_weight'],
