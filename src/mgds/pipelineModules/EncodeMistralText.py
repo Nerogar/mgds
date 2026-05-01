@@ -3,7 +3,7 @@ from contextlib import nullcontext
 import torch
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
-from transformers import Mistral3ForConditionalGeneration
+from transformers import Mistral3ForConditionalGeneration, Mistral3Model
 
 
 class EncodeMistralText(
@@ -16,7 +16,7 @@ class EncodeMistralText(
             tokens_attention_mask_in_name: str | None,
             hidden_state_out_name: str,
             tokens_attention_mask_out_name: str | None,
-            text_encoder: Mistral3ForConditionalGeneration,
+            text_encoder: Mistral3ForConditionalGeneration | Mistral3Model,
             hidden_state_output_index: int | list[int],
             autocast_contexts: list[torch.autocast | None] = None,
             dtype: torch.dtype | None = None,
