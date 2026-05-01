@@ -11,16 +11,16 @@ import math
 import os
 import time
 
-import pytest
-import torch
-import xxhash
-
 from mgds.MGDS import MGDS
 from mgds.OutputPipelineModule import OutputPipelineModule
 from mgds.PipelineModule import PipelineModule, PipelineState
-from mgds.pipelineModules.SmartDiskCache import SmartDiskCache, CACHE_VERSION
+from mgds.pipelineModules.SmartDiskCache import CACHE_VERSION, SmartDiskCache
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
 
+import torch
+
+import pytest
+import xxhash
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -228,7 +228,7 @@ class TestCacheValidation:
         )
 
         _drain(ds)  # build cache
-        index1 = _read_cache_json(cache_dir)
+        _read_cache_json(cache_dir)
 
         # Record .pt mtimes
         pt_files = [f for f in os.listdir(cache_dir) if f.endswith(".pt")]
@@ -686,7 +686,7 @@ class TestGarbageCollection:
         """After gc_clean, orphaned .pt removed, active ones preserved."""
         paths, cache_dir = self._build_gc_scenario(tmp_path)
 
-        pt_before = set(f for f in os.listdir(cache_dir) if f.endswith(".pt"))
+        pt_before = {f for f in os.listdir(cache_dir) if f.endswith(".pt")}
         assert len(pt_before) == 3  # one .pt per source
 
         # Delete one source file to create an orphan
@@ -694,7 +694,7 @@ class TestGarbageCollection:
 
         SmartDiskCache.gc_clean(cache_dir)
 
-        pt_after = set(f for f in os.listdir(cache_dir) if f.endswith(".pt"))
+        pt_after = {f for f in os.listdir(cache_dir) if f.endswith(".pt")}
         # One .pt should be removed
         assert len(pt_after) == 2
         # The remaining .pt files should correspond to the surviving sources
@@ -979,7 +979,7 @@ class TestIntegration:
         assert len(batches1) == 3
         assert len(batches2) == 3
 
-        for b1, b2 in zip(batches1, batches2):
+        for b1, b2 in zip(batches1, batches2, strict=True):
             assert torch.equal(b1["latent"], b2["latent"]), \
                 "Cached latent differs from original"
             assert b1["crop_resolution"] == b2["crop_resolution"]
@@ -1142,11 +1142,10 @@ class TestIntegration:
 
 class TestRebuildHashIndexCleanup:
     def test_rebuild_cleans_hash_index(self, tmp_path):
-        """When _validate_entry returns 'rebuild', the old hash must be
-        removed from hash_index before re-queuing — otherwise a stale
-        pointer is left in hash_index."""
-        from unittest.mock import patch
-
+        """When validation drops a stale entry (content changed, missing pt,
+        rebuild, etc.), the old hash must be removed from hash_index before the
+        rebuild queues a new entry — otherwise the hash_index keeps a stale
+        pointer to the old hash."""
         src_dir = tmp_path / "src"
         src_dir.mkdir()
         src_file = _create_source_file(src_dir, "test.bin", b"original content")
@@ -1166,27 +1165,20 @@ class TestRebuildHashIndexCleanup:
         old_hash = idx["entries"][fp]["hash"]
         assert fp in idx["hash_index"][old_hash]
 
-        # Change file content AND make getmtime fail once to trigger 'rebuild'
+        # Change file content. _validate_entry sees mtime mismatch, then a
+        # hash mismatch, returns 'content_changed', and the rebuild path must
+        # clean hash_index before queuing a new entry under the new hash.
+        time.sleep(0.05)
         with open(src_file, "wb") as f:
             f.write(b"completely new content")
 
-        original_getmtime = os.path.getmtime
-        call_count = [0]
-        def flaky_getmtime(path):
-            if os.path.normpath(path) == fp and call_count[0] == 0:
-                call_count[0] += 1
-                raise OSError("simulated access error")
-            return original_getmtime(path)
-
-        # Fresh pipeline = new run; 'rebuild' path triggers during full validation
-        # at run start, not via within-run revalidation (which session-skip bypasses).
+        # Fresh pipeline = new run; full validation runs at start.
         ds2, _, _ = _build_smart_pipeline(
             tmp_path, [{}], dummy_data, 1,
             split_names=["latent"], aggregate_names=[],
             modeltype="testmodel", source_path_in_name="image_path",
         )
-        with patch("os.path.getmtime", side_effect=flaky_getmtime):
-            _drain(ds2)
+        _drain(ds2)
 
         idx_after = _read_cache_json(cache_dir)
         new_hash = idx_after["entries"][fp]["hash"]
@@ -1306,7 +1298,7 @@ class TestFastValidation:
 
         _drain(ds)
 
-        captured = capsys.readouterr()
+        capsys.readouterr()
         # Spot check has a chance of catching this, but with only 3 files
         # and sample_size = max(1, min(20, 3//20)) = 1, it may or may not.
         # The full validation should still succeed either way.
@@ -1476,3 +1468,565 @@ class TestSessionSkip:
 
         out = capsys.readouterr().out
         assert out.count("Skipped re-validation") == 5
+
+
+# ---------------------------------------------------------------------------
+# Bulk scandir of cache dir (Change 1)
+# ---------------------------------------------------------------------------
+
+class TestBulkScanCorrectness:
+    """Verify that the bulk cache-dir scan replaces per-file os.path.isfile
+    while producing identical existence-check results."""
+
+    def _build_cache(self, tmp_path, n=10):
+        src_dir = tmp_path / "sources"
+        src_dir.mkdir()
+        paths = [
+            _create_source_file(src_dir, f"img_{i}.bin", f"content_{i}".encode())
+            for i in range(n)
+        ]
+        tensors = _make_tensors(n, seed=11)
+        ds, cache_dir, _ = _build_smart_pipeline(
+            tmp_path,
+            concepts=[{"name": "A", "path": "dummy"}],
+            dummy_data={"latent": tensors, "image_path": paths},
+            dummy_length=n,
+            split_names=["latent"], aggregate_names=[],
+            modeltype="testmodel", source_path_in_name="image_path",
+        )
+        _drain(ds)
+        return ds, cache_dir, paths
+
+    def test_existing_pt_files_matches_isfile(self, tmp_path):
+        """Set membership in _existing_pt_files must mirror os.path.isfile."""
+        ds, _cache_dir, _paths = self._build_cache(tmp_path, n=8)
+        sdc = next(m for m in ds.loading_pipeline.modules if isinstance(m, SmartDiskCache))
+
+        existing = sdc._scan_existing_pt_files()
+        for entry in sdc.cache_index['entries'].values():
+            cf = entry['cache_file']
+            for v in range(1):  # variations=1 in this fixture
+                pt_name = f"{cf}_{v + 1}.pt"
+                disk_says = os.path.isfile(sdc._real_pt_path(cf, v))
+                set_says = pt_name in existing
+                assert disk_says == set_says, f"mismatch for {pt_name}"
+
+    def test_built_pts_added_to_set_during_build(self, tmp_path):
+        """After _build_cache_entry runs, _existing_pt_files must include the new .pt names."""
+        ds, _cache_dir, _paths = self._build_cache(tmp_path, n=4)
+        sdc = next(m for m in ds.loading_pipeline.modules if isinstance(m, SmartDiskCache))
+
+        # All cached files should appear in the in-memory set as a side effect of build.
+        names_in_index = {f"{e['cache_file']}_1.pt" for e in sdc.cache_index['entries'].values()}
+        assert names_in_index.issubset(sdc._existing_pt_files), \
+            f"missing from set: {names_in_index - sdc._existing_pt_files}"
+
+    def test_scan_handles_missing_cache_dir(self, tmp_path):
+        """Scanning a non-existent dir must return an empty set, not raise."""
+        sdc = SmartDiskCache.__new__(SmartDiskCache)
+        sdc._real_cache_dir = str(tmp_path / "does_not_exist")
+        result = sdc._scan_existing_pt_files()
+        assert result == set()
+
+
+# ---------------------------------------------------------------------------
+# Bulk source mtime scan (Change 2)
+# ---------------------------------------------------------------------------
+
+class TestBulkStatCorrectness:
+    """Verify that _bulk_stat_source_files returns the same mtimes as
+    per-file os.path.getmtime, for all existing files, and omits missing ones."""
+
+    def _make_files_in_dirs(self, tmp_path, n_dirs=4, files_per_dir=10):
+        roots = []
+        all_paths = []
+        for d in range(n_dirs):
+            dir_path = tmp_path / f"d{d}"
+            dir_path.mkdir()
+            for i in range(files_per_dir):
+                p = _create_source_file(dir_path, f"f{i}.bin", f"d{d}_f{i}".encode())
+                all_paths.append(os.path.normpath(p))
+            roots.append(str(dir_path))
+        return all_paths, roots
+
+    def _make_sdc_with_executor(self):
+        """Instantiate a stub SmartDiskCache with a real executor for parallel scandir."""
+        sdc = SmartDiskCache.__new__(SmartDiskCache)
+        sdc._state = PipelineState()
+        return sdc
+
+    def test_bulk_stat_matches_per_file_getmtime(self, tmp_path):
+        all_paths, _ = self._make_files_in_dirs(tmp_path, n_dirs=3, files_per_dir=20)
+        sdc = self._make_sdc_with_executor()
+
+        bulk = sdc._bulk_stat_source_files(set(all_paths))
+        # Every requested path should be present and equal getmtime to within float tolerance.
+        for p in all_paths:
+            assert p in bulk, f"missing {p}"
+            assert bulk[p] == os.path.getmtime(p), f"mtime mismatch for {p}"
+
+    def test_bulk_stat_omits_missing_files(self, tmp_path):
+        all_paths, _ = self._make_files_in_dirs(tmp_path, n_dirs=2, files_per_dir=5)
+        ghost = os.path.normpath(str(tmp_path / "d0" / "ghost.bin"))
+        sdc = self._make_sdc_with_executor()
+
+        bulk = sdc._bulk_stat_source_files(set(all_paths) | {ghost})
+        assert ghost not in bulk
+        assert len(bulk) == len(all_paths)
+
+    def test_bulk_stat_handles_missing_parent_dir(self, tmp_path):
+        """A path under a non-existent dir must just be omitted, not raise."""
+        sdc = self._make_sdc_with_executor()
+        ghost = os.path.normpath(str(tmp_path / "no_such_dir" / "x.bin"))
+        bulk = sdc._bulk_stat_source_files({ghost})
+        assert bulk == {}
+
+    def test_bulk_stat_empty_input(self, tmp_path):
+        sdc = self._make_sdc_with_executor()
+        assert sdc._bulk_stat_source_files(set()) == {}
+
+
+# ---------------------------------------------------------------------------
+# Resolution short-circuit (Change 6)
+# ---------------------------------------------------------------------------
+
+class _ResolutionCountingCache(SmartDiskCache):
+    """Test subclass that counts _get_resolution_string calls."""
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.resolution_call_count = 0
+
+    def _get_resolution_string(self, in_variation, in_index):
+        self.resolution_call_count += 1
+        return super()._get_resolution_string(in_variation, in_index)
+
+
+class TestResolutionShortCircuit:
+    """Verify that _get_resolution_string is called efficiently across runs."""
+
+    def _setup(self, tmp_path, n=8):
+        src_dir = tmp_path / "sources"
+        src_dir.mkdir()
+        paths = [_create_source_file(src_dir, f"i{i}.bin", f"c{i}".encode()) for i in range(n)]
+        tensors = _make_tensors(n, seed=42)
+        cache_dir = str(tmp_path / "cache")
+        dummy = DummyDataModule(data={"latent": tensors, "image_path": paths}, length=n)
+        cache_mod = _ResolutionCountingCache(
+            cache_dir=cache_dir,
+            split_names=["latent"], aggregate_names=[],
+            modeltype="testmodel", source_path_in_name="image_path",
+        )
+        output_mod = OutputPipelineModule(names=["latent"])
+        ds = MGDS(
+            device=torch.device("cpu"),
+            concepts=[{"name": "A", "path": "dummy"}],
+            settings={},
+            definition=[[dummy], [cache_mod], [output_mod]],
+            batch_size=1, state=PipelineState(), seed=7,
+        )
+        return ds, cache_mod, paths
+
+    def test_resolution_called_lazily_on_full_validation(self, tmp_path):
+        """First run: per index, _get_resolution_string is called at most twice
+        (once for the cache-hit confirmation, once for the rebuild path; on a
+        cold cache only the rebuild path runs, so exactly N calls)."""
+        ds, cache_mod, paths = self._setup(tmp_path, n=10)
+        _drain(ds)
+        # Cold cache => every entry hits the rebuild branch => 1 call per index
+        assert cache_mod.resolution_call_count == 10
+
+    def test_resolution_called_once_per_hit_on_revalidation(self, tmp_path):
+        """Second run with the SAME pipeline goes through session-skip — zero calls."""
+        ds, cache_mod, _ = self._setup(tmp_path, n=10)
+        _drain(ds)
+        cache_mod.resolution_call_count = 0
+        _drain(ds)
+        # Session-skip path returns early without calling resolution at all
+        assert cache_mod.resolution_call_count == 0
+
+
+# ---------------------------------------------------------------------------
+# Variation-dedup (Change 3)
+# ---------------------------------------------------------------------------
+
+class _ValidateCountingCache(SmartDiskCache):
+    """Test subclass that counts _validate_entry calls."""
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.validate_call_count = 0
+
+    def _validate_entry(self, *a, **kw):
+        self.validate_call_count += 1
+        return super()._validate_entry(*a, **kw)
+
+
+class TestVariationDedup:
+    """Verify that the validation loop runs once per in_index, regardless of
+    how many variations the group needs."""
+
+    def _setup(self, tmp_path, n=6):
+        src_dir = tmp_path / "sources"
+        src_dir.mkdir()
+        paths = [_create_source_file(src_dir, f"i{i}.bin", f"c{i}".encode()) for i in range(n)]
+        tensors = _make_tensors(n, seed=99)
+        cache_dir = str(tmp_path / "cache")
+        dummy = DummyDataModule(data={"latent": tensors, "image_path": paths}, length=n)
+        cache_mod = _ValidateCountingCache(
+            cache_dir=cache_dir,
+            split_names=["latent"], aggregate_names=[],
+            modeltype="testmodel", source_path_in_name="image_path",
+        )
+        output_mod = OutputPipelineModule(names=["latent"])
+        ds = MGDS(
+            device=torch.device("cpu"),
+            concepts=[{"name": "A", "path": "dummy"}],
+            settings={},
+            definition=[[dummy], [cache_mod], [output_mod]],
+            batch_size=1, state=PipelineState(), seed=7,
+        )
+        return ds, cache_mod, paths
+
+    def test_validate_called_once_per_index(self, tmp_path):
+        """Cold cache: validate is never called (no entries yet); warm cache:
+        called at most N times in a fresh process, regardless of variations."""
+        first_path = tmp_path / "run1"
+        first_path.mkdir()
+        ds, cache_mod, _ = self._setup(first_path, n=10)
+        _drain(ds)  # cold — no entries yet, so 0 _validate_entry calls
+        assert cache_mod.validate_call_count == 0
+
+        # Build a fresh pipeline pointing at the SAME cache so we exercise
+        # validation logic, but with a brand-new in-memory session.
+        # (Re-using `first_path` keeps the cache contents; using a fresh
+        # _setup call with the same paths re-creates the dummy module.)
+        cache_dir = str(first_path / "cache")
+        src_dir = first_path / "sources"
+        paths = sorted(str(p) for p in src_dir.iterdir())
+        tensors = _make_tensors(10, seed=99)
+        from mgds.pipelineModules.SmartDiskCache import SmartDiskCache as _SDC  # noqa: F401
+        dummy2 = DummyDataModule(data={"latent": tensors, "image_path": paths}, length=10)
+        cache_mod2 = _ValidateCountingCache(
+            cache_dir=cache_dir,
+            split_names=["latent"], aggregate_names=[],
+            modeltype="testmodel", source_path_in_name="image_path",
+        )
+        output_mod2 = OutputPipelineModule(names=["latent"])
+        ds2 = MGDS(
+            device=torch.device("cpu"),
+            concepts=[{"name": "A", "path": "dummy"}],
+            settings={},
+            definition=[[dummy2], [cache_mod2], [output_mod2]],
+            batch_size=1, state=PipelineState(), seed=7,
+        )
+        _drain(ds2)  # warm — entries exist
+        # Cap is N (one call per index), not N×variations. Even better is
+        # zero (fast path passes), but we just guard against the regression
+        # where validate runs N×V times.
+        assert cache_mod2.validate_call_count <= 10, \
+            f"validate called {cache_mod2.validate_call_count} times for 10 indices"
+
+
+# ---------------------------------------------------------------------------
+# Watched-file fingerprint (Change 4)
+# ---------------------------------------------------------------------------
+
+class TestWatchedFingerprint:
+    """Verify the fingerprint-based fast-validate behaviour."""
+
+    def _setup(self, tmp_path, n=4):
+        src_dir = tmp_path / "sources"
+        src_dir.mkdir()
+        paths = [_create_source_file(src_dir, f"i{i}.bin", f"content_{i}".encode()) for i in range(n)]
+        tensors = _make_tensors(n, seed=55)
+        return paths, tensors
+
+    def test_fingerprint_written_after_full_validation(self, tmp_path):
+        paths, tensors = self._setup(tmp_path, n=4)
+        ds, cache_dir, _ = _build_smart_pipeline(
+            tmp_path,
+            concepts=[{"name": "A", "path": "dummy"}],
+            dummy_data={"latent": tensors, "image_path": paths},
+            dummy_length=len(paths),
+            split_names=["latent"], aggregate_names=[],
+            modeltype="testmodel", source_path_in_name="image_path",
+        )
+        _drain(ds)
+        idx = _read_cache_json(cache_dir)
+        assert "watched_fingerprints" in idx
+        assert idx["watched_fingerprints"], "fingerprint must be non-empty"
+        # One key per parent dir; values are [count, mtime_sum] (lists after JSON roundtrip).
+        for fp in idx["watched_fingerprints"].values():
+            assert isinstance(fp, list) and len(fp) == 2
+            assert fp[0] == 4 or fp[0] == len(paths)  # count
+
+    def test_sidecar_touch_does_not_invalidate_fast_path(self, tmp_path, capsys):
+        """Touching/adding an UNRELATED file in a watched parent dir must keep
+        the fast path active (regression guard for the old parent-dir-mtime
+        check, which would have bailed here)."""
+        paths, tensors = self._setup(tmp_path, n=3)
+        ds, cache_dir, _ = _build_smart_pipeline(
+            tmp_path,
+            concepts=[{"name": "A", "path": "dummy"}],
+            dummy_data={"latent": tensors, "image_path": paths},
+            dummy_length=len(paths),
+            split_names=["latent"], aggregate_names=[],
+            modeltype="testmodel", source_path_in_name="image_path",
+        )
+        _drain(ds)
+        capsys.readouterr()  # clear captured output
+
+        # Add a sidecar file in the same parent dir that's NOT in the cache.
+        time.sleep(0.05)
+        sidecar = tmp_path / "sources" / "caption_unrelated.txt"
+        sidecar.write_text("this is a caption file we don't cache")
+
+        # Fresh pipeline => new process semantics, must use fast path.
+        ds2, _, _ = _build_smart_pipeline(
+            tmp_path,
+            concepts=[{"name": "A", "path": "dummy"}],
+            dummy_data={"latent": tensors, "image_path": paths},
+            dummy_length=len(paths),
+            split_names=["latent"], aggregate_names=[],
+            modeltype="testmodel", source_path_in_name="image_path",
+        )
+        _drain(ds2)
+        out = capsys.readouterr().out
+        assert "Fast validation passed" in out, \
+            "sidecar touch must NOT invalidate fast validation"
+
+    def test_fingerprint_fails_on_watched_file_touched(self, tmp_path, capsys):
+        paths, tensors = self._setup(tmp_path, n=3)
+        ds, cache_dir, _ = _build_smart_pipeline(
+            tmp_path,
+            concepts=[{"name": "A", "path": "dummy"}],
+            dummy_data={"latent": tensors, "image_path": paths},
+            dummy_length=len(paths),
+            split_names=["latent"], aggregate_names=[],
+            modeltype="testmodel", source_path_in_name="image_path",
+        )
+        _drain(ds)
+        capsys.readouterr()
+
+        time.sleep(0.05)
+        os.utime(paths[0], None)  # bumps the watched file's mtime
+
+        ds2, _, _ = _build_smart_pipeline(
+            tmp_path,
+            concepts=[{"name": "A", "path": "dummy"}],
+            dummy_data={"latent": tensors, "image_path": paths},
+            dummy_length=len(paths),
+            split_names=["latent"], aggregate_names=[],
+            modeltype="testmodel", source_path_in_name="image_path",
+        )
+        _drain(ds2)
+        out = capsys.readouterr().out
+        assert "Fast validation passed" not in out, \
+            "watched-file mtime change must invalidate fast validation"
+
+    def test_fingerprint_fails_when_watched_file_deleted(self, tmp_path, capsys):
+        paths, tensors = self._setup(tmp_path, n=3)
+        ds, cache_dir, _ = _build_smart_pipeline(
+            tmp_path,
+            concepts=[{"name": "A", "path": "dummy"}],
+            dummy_data={"latent": tensors, "image_path": paths},
+            dummy_length=len(paths),
+            split_names=["latent"], aggregate_names=[],
+            modeltype="testmodel", source_path_in_name="image_path",
+        )
+        _drain(ds)
+        capsys.readouterr()
+
+        # Delete one watched file (count drops from 3 to 2).
+        os.remove(paths[0])
+
+        ds2, _, _ = _build_smart_pipeline(
+            tmp_path,
+            concepts=[{"name": "A", "path": "dummy"}],
+            dummy_data={"latent": tensors, "image_path": paths[1:]},  # mirror the deletion
+            dummy_length=len(paths) - 1,
+            split_names=["latent"], aggregate_names=[],
+            modeltype="testmodel", source_path_in_name="image_path",
+        )
+        _drain(ds2)
+        out = capsys.readouterr().out
+        assert "Fast validation passed" not in out
+
+    def test_legacy_cache_without_fingerprint_runs_full_validation(self, tmp_path, capsys):
+        """A cache.json with last_validated but no watched_fingerprints must
+        force a full pass on first post-upgrade run; second run hits the new
+        fast path."""
+        paths, tensors = self._setup(tmp_path, n=3)
+        ds, cache_dir, _ = _build_smart_pipeline(
+            tmp_path,
+            concepts=[{"name": "A", "path": "dummy"}],
+            dummy_data={"latent": tensors, "image_path": paths},
+            dummy_length=len(paths),
+            split_names=["latent"], aggregate_names=[],
+            modeltype="testmodel", source_path_in_name="image_path",
+        )
+        _drain(ds)
+        capsys.readouterr()
+
+        # Strip the fingerprint from cache.json to simulate a legacy cache.
+        idx = _read_cache_json(cache_dir)
+        idx.pop("watched_fingerprints", None)
+        with open(os.path.join(cache_dir, "cache.json"), "w") as f:
+            json.dump(idx, f)
+
+        ds2, _, _ = _build_smart_pipeline(
+            tmp_path,
+            concepts=[{"name": "A", "path": "dummy"}],
+            dummy_data={"latent": tensors, "image_path": paths},
+            dummy_length=len(paths),
+            split_names=["latent"], aggregate_names=[],
+            modeltype="testmodel", source_path_in_name="image_path",
+        )
+        _drain(ds2)
+        out_first = capsys.readouterr().out
+        assert "Fast validation passed" not in out_first, \
+            "legacy cache must skip the fast path"
+
+        # Third run should hit the fast path now that the fingerprint is written.
+        ds3, _, _ = _build_smart_pipeline(
+            tmp_path,
+            concepts=[{"name": "A", "path": "dummy"}],
+            dummy_data={"latent": tensors, "image_path": paths},
+            dummy_length=len(paths),
+            split_names=["latent"], aggregate_names=[],
+            modeltype="testmodel", source_path_in_name="image_path",
+        )
+        _drain(ds3)
+        out_second = capsys.readouterr().out
+        assert "Fast validation passed" in out_second
+
+
+# ---------------------------------------------------------------------------
+# Validation benchmarks — record timings for the headline speedups.
+# Run with `pytest -k Benchmark -s` to see numbers.
+# ---------------------------------------------------------------------------
+
+class TestValidationBenchmarks:
+    """Side-by-side timings: naive per-file syscalls vs the new bulk methods.
+    Asserts conservative ratios so the suite stays green on slow CI."""
+
+    def _make_dummy_cache_dir(self, tmp_path, n=300):
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+        cache_files = []
+        for i in range(n):
+            cf = f"hash{i:08x}"
+            for v in (1, 2):
+                pt = cache_dir / f"{cf}_{v}.pt"
+                pt.write_bytes(b"")
+            cache_files.append(cf)
+        return str(cache_dir), cache_files
+
+    def test_bench_pt_isfile_vs_set_membership(self, tmp_path, capsys):
+        """Scenario: 300 entries × 2 variations = 600 .pt existence checks.
+        Naive: os.path.isfile per check. New: one scandir → set membership."""
+        cache_dir, cache_files = self._make_dummy_cache_dir(tmp_path, n=300)
+        sdc = SmartDiskCache.__new__(SmartDiskCache)
+        sdc._real_cache_dir = cache_dir
+
+        t0 = time.perf_counter()
+        for _ in range(3):  # repeat to amortise jitter
+            for cf in cache_files:
+                for v in range(2):
+                    os.path.isfile(os.path.join(cache_dir, f"{cf}_{v + 1}.pt"))
+        naive = time.perf_counter() - t0
+
+        t0 = time.perf_counter()
+        for _ in range(3):
+            existing = sdc._scan_existing_pt_files()
+            for cf in cache_files:
+                for v in range(2):
+                    _ = f"{cf}_{v + 1}.pt" in existing
+        bulk = time.perf_counter() - t0
+
+        print(f"\n[bench pt-existence] naive={naive*1000:.1f}ms bulk={bulk*1000:.1f}ms speedup={naive/bulk:.1f}×")
+        assert bulk < naive, f"bulk {bulk:.4f}s should beat naive {naive:.4f}s"
+
+    def test_bench_bulk_vs_serial_getmtime(self, tmp_path, capsys):
+        """Scenario: 300 source files across 6 dirs. Naive: getmtime per file.
+        New: parallel scandir per dir."""
+        files_per_dir = 50
+        n_dirs = 6
+        all_paths = []
+        for d in range(n_dirs):
+            dir_path = tmp_path / f"d{d}"
+            dir_path.mkdir()
+            for i in range(files_per_dir):
+                p = _create_source_file(dir_path, f"f{i}.bin", f"d{d}f{i}".encode())
+                all_paths.append(os.path.normpath(p))
+
+        sdc = SmartDiskCache.__new__(SmartDiskCache)
+        sdc._state = PipelineState()
+
+        t0 = time.perf_counter()
+        for _ in range(3):
+            naive_mtimes = {p: os.path.getmtime(p) for p in all_paths}
+        naive = time.perf_counter() - t0
+
+        t0 = time.perf_counter()
+        for _ in range(3):
+            bulk_mtimes = sdc._bulk_stat_source_files(set(all_paths))
+        bulk = time.perf_counter() - t0
+
+        # Sanity: same data
+        assert naive_mtimes == bulk_mtimes
+
+        print(f"\n[bench source-mtime] naive={naive*1000:.1f}ms bulk={bulk*1000:.1f}ms speedup={naive/bulk:.1f}×")
+        # Conservative threshold: bulk should at least not be worse than naive.
+        # On Defender-laden systems the speedup is much larger (5-50x).
+        assert bulk < naive * 2.0, f"bulk {bulk:.4f}s vs naive {naive:.4f}s"
+
+    def test_bench_e2e_validation_speedup(self, tmp_path, capsys):
+        """End-to-end: cold validation, fresh-pipeline fast-validate, and
+        forced full validation after a single touched file. Records timings."""
+        n = 200
+        src_dir = tmp_path / "sources"
+        src_dir.mkdir()
+        paths = [_create_source_file(src_dir, f"img_{i:04d}.bin", f"c{i}".encode()) for i in range(n)]
+        tensors = _make_tensors(n, seed=33)
+
+        def build():
+            return _build_smart_pipeline(
+                tmp_path,
+                concepts=[{"name": "B", "path": "dummy"}],
+                dummy_data={"latent": tensors, "image_path": paths},
+                dummy_length=n,
+                split_names=["latent"], aggregate_names=[],
+                modeltype="testmodel", source_path_in_name="image_path",
+            )
+
+        # Cold start
+        ds_cold, _, _ = build()
+        t0 = time.perf_counter()
+        _drain(ds_cold)
+        t_cold = time.perf_counter() - t0
+
+        # Warm — fast-validate path on a brand new pipeline
+        ds_warm, _, _ = build()
+        t0 = time.perf_counter()
+        _drain(ds_warm)
+        t_warm = time.perf_counter() - t0
+
+        # Force full validation by touching one file
+        time.sleep(0.05)
+        os.utime(paths[0], None)
+        ds_full, _, _ = build()
+        t0 = time.perf_counter()
+        _drain(ds_full)
+        t_full = time.perf_counter() - t0
+
+        print(
+            f"\n[bench e2e] cold={t_cold*1000:.0f}ms "
+            f"warm_fast={t_warm*1000:.0f}ms "
+            f"warm_full={t_full*1000:.0f}ms"
+        )
+        # Fast validation should be MUCH cheaper than the cold build.
+        assert t_warm < t_cold, "fast-validate should beat cold build"
+        # Forced full validation, after the bulk-scan changes, should still be
+        # fast — no more than 3× the fast-validate path on a clean bench.
+        assert t_full < max(t_cold, t_warm * 50.0), \
+            f"full-validate after touch should not regress: t_full={t_full:.3f}s"

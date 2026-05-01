@@ -93,6 +93,15 @@ class SmartDiskCache(
         # per-epoch revalidation was pure overhead.
         self._session_validated_filepaths: set[str] = set()
 
+        # Filled at the start of __refresh_cache by a single os.scandir of the
+        # cache dir, then consulted for .pt existence checks instead of one
+        # os.path.isfile syscall per (entry, variation). Updated by builders.
+        self._existing_pt_files: set[str] = set()
+        # Filled at the start of __refresh_cache by parallel os.scandir of the
+        # source files' parent dirs. Lookup replaces per-file os.path.getmtime
+        # in _validate_entry.
+        self._source_mtimes: dict[str, float] = {}
+
     def length(self) -> int:
         if not self.variations_initialized:
             name = self.split_names[0] if len(self.split_names) > 0 else self.aggregate_names[0]
@@ -213,7 +222,91 @@ class SmartDiskCache(
     def _real_pt_path(self, cache_file: str, variation: int) -> str:
         return os.path.join(self._real_cache_dir, f"{cache_file}_{variation + 1}.pt")
 
-    def _validate_entry(self, filepath: str, entry: dict, resolution: str | None, variations: int) -> str:
+    def _scan_existing_pt_files(self) -> set[str]:
+        """Single os.scandir of the real cache dir; returns set of .pt filenames.
+
+        On Windows, os.scandir uses FindFirstFile/FindNextFile which returns
+        attributes in the same syscall as the directory enumeration, so
+        DirEntry.is_file() needs no extra stat. This collapses the
+        per-(entry, variation) os.path.isfile loop to one syscall per dir.
+        """
+        found: set[str] = set()
+        try:
+            with os.scandir(self._real_cache_dir) as it:
+                for e in it:
+                    if e.name.endswith('.pt') and e.is_file(follow_symlinks=False):
+                        found.add(e.name)
+        except OSError:
+            pass
+        return found
+
+    def _bulk_stat_source_files(self, filepaths) -> dict[str, float]:
+        """Parallel os.scandir per parent dir; returns {normpath: mtime}.
+
+        Replaces N×os.path.getmtime syscalls with K×os.scandir (K = number of
+        distinct parent dirs). Files that don't exist are simply absent from
+        the returned dict (so callers must treat a missing key as "rebuild").
+        """
+        by_parent: dict[str, set[str]] = {}
+        for fp in filepaths:
+            by_parent.setdefault(os.path.dirname(fp), set()).add(os.path.basename(fp))
+
+        if not by_parent:
+            return {}
+
+        mtimes: dict[str, float] = {}
+        lock = threading.Lock()
+
+        def scan_one(parent: str, names: set[str]):
+            local: dict[str, float] = {}
+            try:
+                with os.scandir(parent) as it:
+                    for e in it:
+                        if e.name in names:
+                            with contextlib.suppress(OSError):
+                                local[os.path.normpath(os.path.join(parent, e.name))] = e.stat().st_mtime
+            except OSError:
+                pass
+            if local:
+                with lock:
+                    mtimes.update(local)
+
+        futures = [self._state.executor.submit(scan_one, p, n) for p, n in by_parent.items()]
+        for f in futures:
+            f.result()
+        return mtimes
+
+    def _compute_watched_fingerprints(self, entries: dict) -> dict[str, tuple[int, float]] | None:
+        """Per-parent-dir fingerprint of (count, mtime_sum) restricted to the
+        basenames present in `entries`. Unrelated files in the same dir don't
+        perturb the fingerprint, so sidecar caption/mask touches won't
+        invalidate the fast path. Returns None if any directory is unreachable.
+        """
+        by_parent: dict[str, set[str]] = {}
+        for fp in entries:
+            by_parent.setdefault(os.path.dirname(fp), set()).add(os.path.basename(fp))
+
+        fp_map: dict[str, tuple[int, float]] = {}
+        for parent, names in by_parent.items():
+            count = 0
+            mtime_sum = 0.0
+            try:
+                with os.scandir(parent) as it:
+                    for e in it:
+                        if e.name not in names:
+                            continue
+                        try:
+                            mtime = e.stat().st_mtime
+                        except OSError:
+                            continue
+                        count += 1
+                        mtime_sum += mtime
+            except OSError:
+                return None
+            fp_map[parent] = (count, mtime_sum)
+        return fp_map
+
+    def _validate_entry(self, filepath: str, entry: dict, resolution: str | None, variations: int, current_mtime: float | None) -> str:
         if entry['modeltype'] != self.modeltype:
             raise RuntimeError(
                 f"Cache modeltype mismatch for '{filepath}': "
@@ -224,14 +317,13 @@ class SmartDiskCache(
         if resolution and entry.get('resolution') and resolution != entry['resolution']:
             return 'resolution_changed'
 
-        try:
-            current_mtime = os.path.getmtime(filepath)
-        except OSError:
+        if current_mtime is None:
             return 'rebuild'
 
+        cache_file = entry['cache_file']
         if current_mtime == entry['mtime']:
             for v in range(variations):
-                if not os.path.isfile(self._real_pt_path(entry['cache_file'], v)):
+                if f"{cache_file}_{v + 1}.pt" not in self._existing_pt_files:
                     return 'missing_pt'
             return 'valid'
 
@@ -242,7 +334,7 @@ class SmartDiskCache(
         entry['mtime'] = current_mtime
 
         for v in range(variations):
-            if not os.path.isfile(self._real_pt_path(entry['cache_file'], v)):
+            if f"{cache_file}_{v + 1}.pt" not in self._existing_pt_files:
                 return 'missing_pt'
 
         return 'valid'
@@ -465,10 +557,16 @@ class SmartDiskCache(
                 print(f"  ... and {len(failed) - 10} more")
 
     def _fast_validate(self) -> bool:
-        """Fast validation: directory mtime check + random spot check.
+        """Fast validation: per-watched-file directory fingerprint + random spot check.
 
         Skips the expensive per-file validation loop when nothing has changed.
         Returns True if cache appears valid.
+
+        The fingerprint is restricted to source basenames in the cache index, so
+        unrelated sidecar files (.txt captions, masks, .npz) added or touched in
+        the same parent directory don't invalidate the fast path. Renames within
+        a directory that don't shift count or mtime sum are caught by the spot
+        check downstream.
         """
         last_validated = self.cache_index.get('last_validated')
         if last_validated is None:
@@ -478,19 +576,18 @@ class SmartDiskCache(
         if not entries:
             return False
 
-        # Check if any source directory was modified after last validation
-        # (catches added/removed/renamed files)
-        parent_dirs = set()
-        for filepath in entries:
-            parent_dirs.add(os.path.dirname(filepath))
-
-        for d in parent_dirs:
-            try:
-                dir_mtime = os.path.getmtime(d)
-            except OSError:
-                return False
-            if dir_mtime > last_validated:
-                return False
+        stored_fp_raw = self.cache_index.get('watched_fingerprints')
+        if stored_fp_raw is None:
+            # Legacy cache without fingerprint — force a full pass so the
+            # fingerprint gets written for next time.
+            return False
+        current_fp = self._compute_watched_fingerprints(entries)
+        if current_fp is None:
+            return False
+        # JSON round-trip turns tuples into lists; normalise before compare.
+        stored_fp = {k: tuple(v) for k, v in stored_fp_raw.items()}
+        if stored_fp != current_fp:
+            return False
 
         # Spot-check: mtime compare + .pt existence (no hashing)
         # Small datasets: check everything (still instant). Large: random sample.
@@ -513,7 +610,7 @@ class SmartDiskCache(
             if current_mtime != entry.get('mtime'):
                 return False
             cache_file = entry.get('cache_file')
-            if cache_file and not os.path.isfile(self._real_pt_path(cache_file, 0)):
+            if cache_file and f"{cache_file}_1.pt" not in self._existing_pt_files:
                 return False
 
         self._fast_validate_sample_size = sample_size
@@ -575,8 +672,8 @@ class SmartDiskCache(
         cache_file = self._make_cache_file(file_hash, resolution)
 
         for v in range(variations):
-            real_pt = self._real_pt_path(cache_file, v)
-            if os.path.isfile(real_pt):
+            pt_name = f"{cache_file}_{v + 1}.pt"
+            if pt_name in self._existing_pt_files:
                 continue
 
             cache_data = {}
@@ -603,6 +700,9 @@ class SmartDiskCache(
             real_tmp_path = real_pt_path + f'.{os.getpid()}.{threading.get_ident()}.tmp'
             torch.save(cache_data, real_tmp_path)
             os.replace(real_tmp_path, real_pt_path)
+
+            with self._index_lock:
+                self._existing_pt_files.add(pt_name)
 
         with self._index_lock:
             self.cache_index['entries'][filepath] = {
@@ -850,6 +950,9 @@ class SmartDiskCache(
                         f"Delete the cache directory or use a separate cache_dir for this model type."
                     )
 
+        # Single os.scandir of the cache dir — used by fast and full paths.
+        self._existing_pt_files = self._scan_existing_pt_files()
+
         # --- Fast validation path ---
         if not skip_validation and self.cache_index.get('entries') and self._fast_validate():
             all_in_index = all(
@@ -867,6 +970,15 @@ class SmartDiskCache(
             # Index mismatch — fall through to full validation
             self._source_path_cache = {}
 
+        # Bulk-stat all source files once via parallel os.scandir per parent dir.
+        # Subsequent _validate_entry calls read mtimes from this dict instead of
+        # firing one os.path.getmtime syscall per file. Skipped under trust mode
+        # since we won't be calling _validate_entry at all.
+        if not skip_validation:
+            self._source_mtimes = self._bulk_stat_source_files(required_filepaths)
+        else:
+            self._source_mtimes = {}
+
         # Clear fast-validation token during full validation
         self.cache_index.pop('last_validated', None)
 
@@ -876,62 +988,70 @@ class SmartDiskCache(
         files_failed = []
 
         for group_key in self.group_variations:
-            start_index = self.group_output_samples[group_key] * out_variation
-            end_index = self.group_output_samples[group_key] * (out_variation + 1) - 1
-
-            start_variation = start_index // len(self.group_indices[group_key])
-            end_variation = end_index // len(self.group_indices[group_key])
-
             variations = self.group_variations[group_key]
-            needed_variations = [(x % variations) for x in range(start_variation, end_variation + 1, 1)]
 
-            items_to_build = []
-            validate_total = len(needed_variations) * len(self.group_indices[group_key])
+            # _validate_entry is invariant in `in_variation` (source path uses
+            # variation 0; resolution is variation-independent in the bucketing
+            # pipeline; .pt existence iterates `range(variations)` internally).
+            # Validate each in_index exactly once and dedupe across needed
+            # variations afterwards.
+            items_to_build_by_index: dict[int, tuple] = {}
 
-            with tqdm(total=validate_total, smoothing=0.1, desc='validating cache') as bar:
-                for in_variation in needed_variations:
-                    for group_index, in_index in enumerate(self.group_indices[group_key]):
-                        # Trust-mode early skip: avoid upstream pipeline calls
-                        # (_get_source_path triggers crop_resolution upstream,
-                        # which can do per-image I/O on slow cloud storage)
-                        if skip_validation:
-                            cached_fp = index_to_filepath.get(in_index)
-                            if cached_fp is not None and cached_fp in self.cache_index['entries']:
-                                if in_index not in self._source_path_cache:
-                                    self._source_path_cache[in_index] = cached_fp
-                                files_skipped += 1
-                                bar.update(1)
-                                continue
-
-                        filepath = self._get_source_path(in_variation, in_index)
-                        if filepath is None:
+            with tqdm(total=len(self.group_indices[group_key]), smoothing=0.1, desc='validating cache') as bar:
+                for group_index, in_index in enumerate(self.group_indices[group_key]):
+                    # Trust-mode early skip: avoid upstream pipeline calls
+                    # (_get_source_path triggers crop_resolution upstream,
+                    # which can do per-image I/O on slow cloud storage)
+                    if skip_validation:
+                        cached_fp = index_to_filepath.get(in_index)
+                        if cached_fp is not None and cached_fp in self.cache_index['entries']:
+                            self._source_path_cache[in_index] = cached_fp
+                            files_skipped += 1
                             bar.update(1)
                             continue
 
-                        filepath = os.path.normpath(filepath)
-                        if in_index not in self._source_path_cache:
-                            self._source_path_cache[in_index] = filepath
-                        resolution = self._get_resolution_string(in_variation, in_index)
+                    filepath = self._get_source_path(0, in_index)
+                    if filepath is None:
+                        bar.update(1)
+                        continue
 
-                        entry = self.cache_index['entries'].get(filepath)
-                        if entry is not None:
-                            if skip_validation:
+                    filepath = os.path.normpath(filepath)
+                    self._source_path_cache[in_index] = filepath
+
+                    entry = self.cache_index['entries'].get(filepath)
+                    if entry is not None:
+                        if skip_validation:
+                            files_skipped += 1
+                            bar.update(1)
+                            continue
+                        cached_res = entry.get('resolution')
+                        # Pass cached resolution; it's invariant across our
+                        # validation pass and avoids a pipeline traversal.
+                        mtime = self._source_mtimes.get(filepath)
+                        status = self._validate_entry(filepath, entry, cached_res, variations, mtime)
+                        if status == 'valid':
+                            # Confirm the cached resolution matches the current
+                            # bucketing config — only one pipeline call, and
+                            # only when the file otherwise looks valid.
+                            current_res = self._get_resolution_string(0, in_index)
+                            if current_res is None or current_res == cached_res:
                                 files_skipped += 1
                                 bar.update(1)
                                 continue
-                            status = self._validate_entry(filepath, entry, resolution, variations)
-                            if status == 'valid':
-                                files_skipped += 1
-                                bar.update(1)
-                                continue
-                            with self._index_lock:
-                                old_hash = entry.get('hash')
-                                if old_hash:
-                                    self._remove_from_hash_index(old_hash, filepath)
+                        # Otherwise: rebuild. Drop the stale entry.
+                        with self._index_lock:
+                            old_hash = entry.get('hash')
+                            if old_hash:
+                                self._remove_from_hash_index(old_hash, filepath)
+                            if filepath in self.cache_index['entries']:
                                 del self.cache_index['entries'][filepath]
 
-                        items_to_build.append((filepath, group_key, in_variation, in_index, group_index, variations, resolution))
-                        bar.update(1)
+                    # Need current resolution for the rebuild.
+                    resolution = self._get_resolution_string(0, in_index)
+                    items_to_build_by_index[in_index] = (filepath, group_key, 0, in_index, group_index, variations, resolution)
+                    bar.update(1)
+
+            items_to_build = list(items_to_build_by_index.values())
 
             if not items_to_build:
                 continue
@@ -967,8 +1087,9 @@ class SmartDiskCache(
                     if filepath not in self.cache_index['entries']:
                         if self._try_dedup(filepath, file_hash, resolution, mtime):
                             entry = self.cache_index['entries'][filepath]
+                            cf = entry['cache_file']
                             all_present = all(
-                                os.path.isfile(self._real_pt_path(entry['cache_file'], v))
+                                f"{cf}_{v + 1}.pt" in self._existing_pt_files
                                 for v in range(variations)
                             )
                             if all_present:
@@ -1013,6 +1134,12 @@ class SmartDiskCache(
 
         if not skip_validation:
             self.cache_index['last_validated'] = time.time()
+            # Per-watched-file fingerprint: ignored if any parent dir is
+            # unreachable (returns None); a missing fingerprint just means the
+            # next run pays for one extra full validation pass.
+            self.cache_index['watched_fingerprints'] = (
+                self._compute_watched_fingerprints(self.cache_index['entries']) or {}
+            )
         self.cache_index['schema'] = required_schema
         self.cache_index['schema_method'] = SCHEMA_METHOD
         self._save_cache_index()
