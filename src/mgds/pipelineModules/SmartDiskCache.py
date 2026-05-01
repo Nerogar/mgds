@@ -19,6 +19,10 @@ from mgds.pipelineModuleTypes.SingleVariationRandomAccessPipelineModule import S
 
 CACHE_VERSION = 2
 
+# Bumped whenever ``_augment_cache_with_missing_names`` changes behaviorally so
+# caches stamped by an older version get re-augmented on the new path.
+SCHEMA_METHOD = 'shape_v1'
+
 
 class CachingStoppedException(Exception):
     pass
@@ -278,22 +282,63 @@ class SmartDiskCache(
 
         return set()
 
-    def _augment_cache_with_missing_names(self, missing_names: set[str]):
-        """Append computed values for ``missing_names`` to existing cache files.
+    @staticmethod
+    def _resize_to_ref_shape(value, ref_shape):
+        """Force ``value``'s spatial dims to match ``ref_shape`` via interpolation.
+
+        Why: when augmenting a cache built under different settings
+        (e.g. ``masked_training`` toggled, which adds
+        ``mask_augmentation`` modules to the upstream chain), the
+        upstream pipeline can produce a different ``crop_resolution``
+        than what's stored alongside ``latent_image``. Saving an
+        augmented value with a divergent spatial shape later breaks
+        ``torch.stack`` inside the dataloader's collate. Resizing
+        keeps downstream batching working without rebuilding the
+        cache from scratch -- the mask is approximate when the cache
+        crosses pipelines, but a full re-encode of every entry is
+        unacceptable for large datasets.
+        """
+        if ref_shape is None or not torch.is_tensor(value):
+            return value
+        if value.dim() < 2 or tuple(value.shape[-2:]) == ref_shape:
+            return value
+
+        needs_batch_dim = value.dim() == 3
+        x = value.unsqueeze(0) if needs_batch_dim else value
+        orig_dtype = x.dtype
+        x = torch.nn.functional.interpolate(
+            x.to(torch.float32),
+            size=tuple(ref_shape),
+            mode='bilinear',
+            align_corners=False,
+        ).to(orig_dtype)
+        return x.squeeze(0) if needs_batch_dim else x
+
+    def _augment_cache_with_missing_names(self, target_names: set[str]):
+        """Ensure each cached entry has every name in ``target_names``.
 
         Walks every entry in the on-disk index, resolves it back to an
-        ``in_index`` via the upstream pipeline, computes the requested names
-        through ``_get_previous_item``, and rewrites the ``.pt`` file with the
-        new keys merged in. Existing keys are preserved so this is a one-time
-        backfill rather than a full rebuild.
+        ``in_index`` via the upstream pipeline, and (per variation):
+
+        1. Loads the cached ``.pt``.
+        2. Skips names that are already present and whose spatial shape
+           matches ``latent_image``.
+        3. For names that are missing **or** shape-mismatched, computes
+           a fresh value via ``_get_previous_item`` and resizes it to the
+           cached ``latent_image`` shape if the upstream-produced value
+           has different spatial dims.
+        4. Writes the merged dict back atomically.
+
+        Existing correctly-shaped keys are preserved untouched, so this
+        is a targeted backfill, not a full rebuild.
         """
-        if not missing_names:
+        if not target_names:
             return
 
-        sorted_missing = sorted(missing_names)
+        sorted_targets = sorted(target_names)
         print(
-            f"SmartDiskCache: schema drift detected (missing {sorted_missing}). "
-            f"Augmenting cache in place."
+            f"SmartDiskCache: ensuring cache contains {sorted_targets} "
+            f"with shapes consistent against cached latent_image."
         )
 
         # Map every cached filepath to an upstream in_index and its variation count.
@@ -334,6 +379,7 @@ class SmartDiskCache(
             if not cache_file:
                 return filepath, 'no_cache_file'
 
+            wrote_anything = False
             for v in range(variations):
                 real_pt = self._real_pt_path(cache_file, v)
                 if not os.path.isfile(real_pt):
@@ -343,15 +389,33 @@ class SmartDiskCache(
                 except Exception as e:
                     return filepath, f'load_failed: {e}'
 
-                if all(name in cache_data for name in sorted_missing):
+                # Reference shape from cached latent_image; everything spatial
+                # in the same .pt must match this so collate_fn can stack the
+                # batch without crashing.
+                ref_shape = None
+                latent_image = cache_data.get('latent_image')
+                if torch.is_tensor(latent_image) and latent_image.dim() >= 2:
+                    ref_shape = tuple(latent_image.shape[-2:])
+
+                needs_work: list[str] = []
+                for name in sorted_targets:
+                    cached_val = cache_data.get(name)
+                    if cached_val is None:
+                        needs_work.append(name)
+                        continue
+                    if (ref_shape is not None and torch.is_tensor(cached_val)
+                            and cached_val.dim() >= 2
+                            and tuple(cached_val.shape[-2:]) != ref_shape):
+                        needs_work.append(name)
+
+                if not needs_work:
                     continue
 
                 try:
                     with torch.no_grad():
-                        for name in sorted_missing:
-                            if name in cache_data:
-                                continue
+                        for name in needs_work:
                             value = self._get_previous_item(v, name, in_index)
+                            value = self._resize_to_ref_shape(value, ref_shape)
                             cache_data[name] = self.__clone_for_cache(value)
                 except Exception as e:
                     return filepath, f'compute_failed: {e}'
@@ -360,14 +424,16 @@ class SmartDiskCache(
                 try:
                     torch.save(cache_data, tmp_path)
                     os.replace(tmp_path, real_pt)
+                    wrote_anything = True
                 except Exception as e:
                     with contextlib.suppress(OSError):
                         os.remove(tmp_path)
                     return filepath, f'save_failed: {e}'
 
-            return filepath, 'augmented'
+            return filepath, 'augmented' if wrote_anything else 'already_consistent'
 
         failed: list[tuple[str, str]] = []
+        skipped = 0
         with tqdm(total=len(augment_items), smoothing=0.1, desc='augmenting cache') as bar:
             fs = [self._state.executor.submit(fn, fp, idx, var, current_device)
                   for fp, idx, var in augment_items]
@@ -377,7 +443,9 @@ class SmartDiskCache(
                 except Exception:
                     self._state.executor.shutdown(wait=True, cancel_futures=True)
                     raise
-                if status not in ('augmented', 'no_entry', 'no_cache_file'):
+                if status == 'already_consistent':
+                    skipped += 1
+                elif status not in ('augmented', 'no_entry', 'no_cache_file'):
                     failed.append((fp, status))
                 if count % 250 == 0:
                     self._torch_gc()
@@ -386,8 +454,12 @@ class SmartDiskCache(
                     self._state.executor.shutdown(wait=True, cancel_futures=True)
                     raise CachingStoppedException
 
-        succeeded = len(augment_items) - len(failed)
-        print(f"SmartDiskCache: augmentation complete ({succeeded}/{len(augment_items)} files).")
+        succeeded = len(augment_items) - len(failed) - skipped
+        print(
+            f"SmartDiskCache: augmentation complete "
+            f"({succeeded} updated, {skipped} already consistent, "
+            f"{len(failed)} failed)."
+        )
         if failed:
             for fp, reason in failed[:10]:
                 print(f"  augment failed: {fp}: {reason}")
@@ -709,15 +781,32 @@ class SmartDiskCache(
 
         # Schema drift: if split_names/aggregate_names changed since the cache
         # was built (e.g. masked_training was just enabled), the on-disk .pt
-        # files won't contain the new keys. Augment them once before any
-        # fast-path return so downstream readers always find what they need.
+        # files won't contain the new keys. Also re-augment when the stored
+        # schema_method doesn't match -- caches stamped by an older augment
+        # version may have shape-inconsistent values that need fixing in
+        # place. Run before any fast-path return so downstream readers
+        # always find what they need.
         required_schema = sorted(set(self.split_names) | set(self.aggregate_names))
+        stored_schema = self.cache_index.get('schema')
+        stored_method = self.cache_index.get('schema_method')
         if (self.cache_index.get('entries')
-                and self.cache_index.get('schema') != required_schema):
-            missing = self._detect_cache_schema_drift()
-            if missing:
-                self._augment_cache_with_missing_names(missing)
+                and (stored_schema != required_schema or stored_method != SCHEMA_METHOD)):
+            targets: set[str] = set()
+            if stored_schema is not None and stored_method != SCHEMA_METHOD:
+                # Cache was stamped by an older augment that may have written
+                # shape-inconsistent values. Re-augment every required name so
+                # the new shape-correction logic can fix them in place.
+                targets = set(required_schema)
+            else:
+                missing = self._detect_cache_schema_drift()
+                if missing:
+                    targets = missing
+
+            if targets:
+                self._augment_cache_with_missing_names(targets)
+
             self.cache_index['schema'] = required_schema
+            self.cache_index['schema_method'] = SCHEMA_METHOD
             self._save_cache_index()
 
         # Resolve the source filepaths this call will deliver.
@@ -928,6 +1017,7 @@ class SmartDiskCache(
         if not skip_validation:
             self.cache_index['last_validated'] = time.time()
         self.cache_index['schema'] = required_schema
+        self.cache_index['schema_method'] = SCHEMA_METHOD
         self._save_cache_index()
 
         # Mark every required filepath that ended up with a valid entry as
