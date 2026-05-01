@@ -19,10 +19,6 @@ from mgds.pipelineModuleTypes.SingleVariationRandomAccessPipelineModule import S
 
 CACHE_VERSION = 2
 
-# Bumped whenever the schema-drift handler changes behaviorally so caches
-# stamped by an older version get rebuilt cleanly on the new path.
-SCHEMA_METHOD = 'rebuild_v1'
-
 
 class CachingStoppedException(Exception):
     pass
@@ -282,50 +278,121 @@ class SmartDiskCache(
 
         return set()
 
-    def _invalidate_all_entries(self, reason: str):
-        """Drop every entry from the index and remove its ``.pt`` files.
+    def _augment_cache_with_missing_names(self, missing_names: set[str]):
+        """Append computed values for ``missing_names`` to existing cache files.
 
-        Used when the cache schema or method has drifted: re-running just the
-        missing keys through the upstream pipeline can produce shapes
-        inconsistent with already-cached values (e.g. ``mask_augmentation``
-        modules added when ``masked_training`` toggles can change
-        ``crop_resolution``). Wiping the entries forces the regular build
-        loop downstream to recompute every key in one upstream pass so all
-        values share the same shape and resolution.
+        Walks every entry in the on-disk index, resolves it back to an
+        ``in_index`` via the upstream pipeline, computes the requested names
+        through ``_get_previous_item``, and rewrites the ``.pt`` file with the
+        new keys merged in. Existing keys are preserved so this is a one-time
+        backfill rather than a full rebuild.
         """
-        entries = self.cache_index.get('entries', {})
-        if not entries:
+        if not missing_names:
             return
 
-        print(f"SmartDiskCache: invalidating {len(entries)} entries -- {reason}")
+        sorted_missing = sorted(missing_names)
+        print(
+            f"SmartDiskCache: schema drift detected (missing {sorted_missing}). "
+            f"Augmenting cache in place."
+        )
 
-        seen_cache_files: set[str] = set()
-        for entry in entries.values():
+        # Map every cached filepath to an upstream in_index and its variation count.
+        augment_items: list[tuple[str, int, int]] = []
+        seen_paths: set[str] = set()
+        for group_key, variations in self.group_variations.items():
+            for in_index in self.group_full_indices.get(group_key, []):
+                filepath = self._get_source_path(0, in_index)
+                if filepath is None:
+                    continue
+                filepath = os.path.normpath(filepath)
+                if filepath in seen_paths:
+                    continue
+                entry = self.cache_index['entries'].get(filepath)
+                if entry is None:
+                    continue
+                if entry.get('modeltype') != self.modeltype:
+                    continue
+                seen_paths.add(filepath)
+                augment_items.append((filepath, in_index, variations))
+
+        if not augment_items:
+            return
+
+        if self.before_cache_fun is not None:
+            self.before_cache_fun()
+
+        current_device = torch.cuda.current_device() if torch.cuda.is_available() else None
+
+        def fn(filepath, in_index, variations, current_device):
+            if torch.cuda.is_available() and current_device is not None:
+                torch.cuda.set_device(current_device)
+
+            entry = self.cache_index['entries'].get(filepath)
+            if entry is None:
+                return filepath, 'no_entry'
             cache_file = entry.get('cache_file')
-            if not cache_file or cache_file in seen_cache_files:
-                continue
-            seen_cache_files.add(cache_file)
-            v = 0
-            while True:
-                pt = self._real_pt_path(cache_file, v)
-                if not os.path.isfile(pt):
-                    break
-                with contextlib.suppress(OSError):
-                    os.remove(pt)
-                v += 1
+            if not cache_file:
+                return filepath, 'no_cache_file'
 
-        for filepath in list(entries.keys()):
-            old_hash = entries[filepath].get('hash')
-            if old_hash:
-                self._remove_from_hash_index(old_hash, filepath)
+            for v in range(variations):
+                real_pt = self._real_pt_path(cache_file, v)
+                if not os.path.isfile(real_pt):
+                    continue
+                try:
+                    cache_data = torch.load(real_pt, weights_only=False, map_location='cpu')
+                except Exception as e:
+                    return filepath, f'load_failed: {e}'
 
-        self.cache_index['entries'] = {}
-        # Force fast-validation to re-run from scratch as well.
-        self.cache_index.pop('last_validated', None)
-        # Drop the in-process "already validated" set so the next epoch
-        # actually re-validates against the now-empty index.
-        self._session_validated_filepaths = set()
-        self._save_cache_index()
+                if all(name in cache_data for name in sorted_missing):
+                    continue
+
+                try:
+                    with torch.no_grad():
+                        for name in sorted_missing:
+                            if name in cache_data:
+                                continue
+                            value = self._get_previous_item(v, name, in_index)
+                            cache_data[name] = self.__clone_for_cache(value)
+                except Exception as e:
+                    return filepath, f'compute_failed: {e}'
+
+                tmp_path = real_pt + f'.{os.getpid()}.{threading.get_ident()}.aug.tmp'
+                try:
+                    torch.save(cache_data, tmp_path)
+                    os.replace(tmp_path, real_pt)
+                except Exception as e:
+                    with contextlib.suppress(OSError):
+                        os.remove(tmp_path)
+                    return filepath, f'save_failed: {e}'
+
+            return filepath, 'augmented'
+
+        failed: list[tuple[str, str]] = []
+        with tqdm(total=len(augment_items), smoothing=0.1, desc='augmenting cache') as bar:
+            fs = [self._state.executor.submit(fn, fp, idx, var, current_device)
+                  for fp, idx, var in augment_items]
+            for count, f in enumerate(concurrent.futures.as_completed(fs), 1):
+                try:
+                    fp, status = f.result()
+                except Exception:
+                    self._state.executor.shutdown(wait=True, cancel_futures=True)
+                    raise
+                if status not in ('augmented', 'no_entry', 'no_cache_file'):
+                    failed.append((fp, status))
+                if count % 250 == 0:
+                    self._torch_gc()
+                bar.update(1)
+                if self.stop_check_fun():
+                    self._state.executor.shutdown(wait=True, cancel_futures=True)
+                    raise CachingStoppedException
+
+        succeeded = len(augment_items) - len(failed)
+        print(f"SmartDiskCache: augmentation complete ({succeeded}/{len(augment_items)} files).")
+        if failed:
+            for fp, reason in failed[:10]:
+                print(f"  augment failed: {fp}: {reason}")
+            if len(failed) > 10:
+                print(f"  ... and {len(failed) - 10} more")
 
     def _fast_validate(self) -> bool:
         """Fast validation: directory mtime check + random spot check.
@@ -641,36 +708,16 @@ class SmartDiskCache(
         self._aggregate_cache = {}
 
         # Schema drift: if split_names/aggregate_names changed since the cache
-        # was built (e.g. masked_training was just enabled), or if the cache
-        # was stamped by a previous schema-drift handler that wrote
-        # shape-inconsistent values, invalidate every entry so the regular
-        # build loop below can rebuild them in one consistent upstream pass.
+        # was built (e.g. masked_training was just enabled), the on-disk .pt
+        # files won't contain the new keys. Augment them once before any
+        # fast-path return so downstream readers always find what they need.
         required_schema = sorted(set(self.split_names) | set(self.aggregate_names))
-        stored_schema = self.cache_index.get('schema')
-        stored_method = self.cache_index.get('schema_method')
         if (self.cache_index.get('entries')
-                and (stored_schema != required_schema or stored_method != SCHEMA_METHOD)):
-            invalidate_reason = None
-            if stored_schema is not None and stored_method != SCHEMA_METHOD:
-                invalidate_reason = (
-                    "schema-drift method changed; rebuilding so every cached "
-                    "key is produced in a single upstream pass (older "
-                    "augment-in-place could mismatch shapes against cached "
-                    "latent_image)"
-                )
-            else:
-                missing = self._detect_cache_schema_drift()
-                if missing:
-                    invalidate_reason = (
-                        f"split/aggregate names changed (missing in cache: "
-                        f"{sorted(missing)}); rebuilding to keep all keys consistent"
-                    )
-
-            if invalidate_reason:
-                self._invalidate_all_entries(invalidate_reason)
-
+                and self.cache_index.get('schema') != required_schema):
+            missing = self._detect_cache_schema_drift()
+            if missing:
+                self._augment_cache_with_missing_names(missing)
             self.cache_index['schema'] = required_schema
-            self.cache_index['schema_method'] = SCHEMA_METHOD
             self._save_cache_index()
 
         # Resolve the source filepaths this call will deliver.
@@ -881,7 +928,6 @@ class SmartDiskCache(
         if not skip_validation:
             self.cache_index['last_validated'] = time.time()
         self.cache_index['schema'] = required_schema
-        self.cache_index['schema_method'] = SCHEMA_METHOD
         self._save_cache_index()
 
         # Mark every required filepath that ended up with a valid entry as
