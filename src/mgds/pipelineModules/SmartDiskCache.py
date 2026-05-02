@@ -1025,19 +1025,20 @@ class SmartDiskCache(
                             bar.update(1)
                             continue
                         cached_res = entry.get('resolution')
-                        # Pass cached resolution; it's invariant across our
-                        # validation pass and avoids a pipeline traversal.
+                        # Pass cached resolution; we trust it on the happy path.
+                        # Recomputing _get_resolution_string here would chain
+                        # AspectBucketing -> CalcAspect -> LoadImage and open
+                        # every source image just to confirm a value that the
+                        # cache already knows. If bucket config changed the
+                        # user must clear the cache (same contract as the
+                        # original DiskCache). schema_method drift is detected
+                        # earlier in __refresh_cache and triggers re-augment.
                         mtime = self._source_mtimes.get(filepath)
                         status = self._validate_entry(filepath, entry, cached_res, variations, mtime)
                         if status == 'valid':
-                            # Confirm the cached resolution matches the current
-                            # bucketing config — only one pipeline call, and
-                            # only when the file otherwise looks valid.
-                            current_res = self._get_resolution_string(0, in_index)
-                            if current_res is None or current_res == cached_res:
-                                files_skipped += 1
-                                bar.update(1)
-                                continue
+                            files_skipped += 1
+                            bar.update(1)
+                            continue
                         # Otherwise: rebuild. Drop the stale entry.
                         with self._index_lock:
                             old_hash = entry.get('hash')
@@ -1046,7 +1047,9 @@ class SmartDiskCache(
                             if filepath in self.cache_index['entries']:
                                 del self.cache_index['entries'][filepath]
 
-                    # Need current resolution for the rebuild.
+                    # Rebuild path: now we DO need the current resolution.
+                    # This opens the image (via CalcAspect) but only for files
+                    # that are missing or stale, not for the whole dataset.
                     resolution = self._get_resolution_string(0, in_index)
                     items_to_build_by_index[in_index] = (filepath, group_key, 0, in_index, group_index, variations, resolution)
                     bar.update(1)
