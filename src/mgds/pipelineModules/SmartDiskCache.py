@@ -19,11 +19,16 @@ import torch
 import xxhash
 from tqdm import tqdm
 
-CACHE_VERSION = 2
+CACHE_VERSION = 3
 
 # Bumped whenever ``_augment_cache_with_missing_names`` changes behaviorally so
 # caches stamped by an older version get re-augmented on the new path.
 SCHEMA_METHOD = 'shape_v1'
+
+# Sentinel resolution key used for sourceless / text-style entries that have
+# no resolution dimension. Lives inside ``entry['variants']`` like any other
+# variant key, but the cache filename collapses to bare ``hash12``.
+NO_RESOLUTION_KEY = '_'
 
 
 class CachingStoppedException(Exception):
@@ -49,6 +54,8 @@ class SmartDiskCache(
             modeltype: str = "",
             source_path_in_name: str | None = None,
             sourceless: bool = False,
+            bucket_method_provider: Callable[[], str] | None = None,
+            rebucket_provider: Callable[[float], list[str]] | None = None,
     ):
         super().__init__()
         self.cache_dir = cache_dir
@@ -71,6 +78,15 @@ class SmartDiskCache(
         self.modeltype = modeltype
         self.source_path_in_name = source_path_in_name
         self.sourceless = sourceless
+
+        # Optional providers for multi-resolution variant caching. Both default
+        # to None for text caches and any data loader that doesn't construct
+        # an AspectBucketing module — drift detection auto-disables in that
+        # case and the cache behaves as a single-variant store keyed on the
+        # cached resolution (or NO_RESOLUTION_KEY when there's no resolution
+        # at all).
+        self.bucket_method_provider = bucket_method_provider
+        self.rebucket_provider = rebucket_provider
 
         self.group_variations = {}
         self.group_indices = {}
@@ -101,6 +117,12 @@ class SmartDiskCache(
         # source files' parent dirs. Lookup replaces per-file os.path.getmtime
         # in _validate_entry.
         self._source_mtimes: dict[str, float] = {}
+        # Resolution variant key in use this session, per source filepath.
+        # Set during validation/build; consulted by get_item and
+        # _load_aggregate_cache to load the right variant's .pt. Empty for
+        # text caches (no resolution dimension) — those callers fall back to
+        # _any_variant_cache_file. Reset at the top of __refresh_cache.
+        self._active_key_by_filepath: dict[str, str] = {}
 
     def length(self) -> int:
         if not self.variations_initialized:
@@ -157,6 +179,7 @@ class SmartDiskCache(
                 for p in (tmp_path, bak_path):
                     with contextlib.suppress(OSError):
                         os.remove(p)
+                self._migrate_legacy_index_in_place(data)
                 return data
             except (json.JSONDecodeError, OSError):
                 pass
@@ -166,6 +189,7 @@ class SmartDiskCache(
                 with open(tmp_path, 'r') as f:
                     data = json.load(f)
                 os.replace(tmp_path, cache_path)
+                self._migrate_legacy_index_in_place(data)
                 return data
             except (json.JSONDecodeError, OSError):
                 pass
@@ -175,11 +199,41 @@ class SmartDiskCache(
                 with open(bak_path, 'r') as f:
                     data = json.load(f)
                 os.replace(bak_path, cache_path)
+                self._migrate_legacy_index_in_place(data)
                 return data
             except (json.JSONDecodeError, OSError):
                 pass
 
         return {"version": CACHE_VERSION, "entries": {}, "hash_index": {}}
+
+    @staticmethod
+    def _migrate_legacy_index_in_place(idx: dict) -> None:
+        """Lift v2 cache-index entries into v3 single-variant shape.
+
+        v2 entries had top-level ``cache_file`` and ``resolution`` fields. v3
+        moves those into ``variants[<resolution_key>]['cache_file']`` so a
+        single source file can hold multiple resolution variants side-by-side.
+        Existing on-disk ``.pt`` files are reused verbatim — no rebuild — and
+        stay referenced under whatever resolution they were originally built
+        for. New variants get added as the user trains at new resolutions.
+
+        Idempotent. Cheap (dict munging, no I/O). Called every time the index
+        is loaded.
+        """
+        if idx.get('version', 0) >= CACHE_VERSION:
+            return
+        for entry in idx.get('entries', {}).values():
+            if 'variants' in entry:
+                continue
+            legacy_cache_file = entry.pop('cache_file', None)
+            legacy_resolution = entry.pop('resolution', None)
+            if legacy_cache_file:
+                key = legacy_resolution if legacy_resolution else NO_RESOLUTION_KEY
+                entry['variants'] = {key: {'cache_file': legacy_cache_file}}
+            else:
+                entry['variants'] = {}
+            entry['cache_version'] = CACHE_VERSION
+        idx['version'] = CACHE_VERSION
 
     def _save_cache_index(self, compact: bool = False):
         os.makedirs(self.cache_dir, exist_ok=True)
@@ -215,6 +269,138 @@ class SmartDiskCache(
         if resolution:
             return f"{hash12}_{resolution}"
         return hash12
+
+    @staticmethod
+    def _resolution_key(resolution: str | None) -> str:
+        return resolution if resolution else NO_RESOLUTION_KEY
+
+    def _compute_bucket_method(self) -> str | None:
+        """Hash of the upstream bucket config, or None when no provider is wired.
+
+        None means "drift detection disabled" — the cache behaves as a single-
+        variant store and never re-derives keys. Used by text caches and any
+        data loader without an AspectBucketing module.
+        """
+        if self.bucket_method_provider is None:
+            return None
+        try:
+            return self.bucket_method_provider()
+        except Exception:
+            return None
+
+    def _populate_active_keys(self, filepaths) -> None:
+        """Set this session's active variant key per filepath to the first
+        registered variant. Used by the session-skip and fast-validate paths
+        which don't run per-entry validation. Reads the dict ordering set up
+        by drift recovery (when applicable) so the first key is the one for
+        the current bucket config.
+        """
+        entries = self.cache_index.get('entries', {})
+        for fp in filepaths:
+            entry = entries.get(fp)
+            if entry is None:
+                continue
+            self._active_key_by_filepath[fp] = next(
+                iter(entry.get('variants', {}).keys()),
+                NO_RESOLUTION_KEY,
+            )
+
+    def _drift_recovery_pass(self) -> None:
+        """Re-derive variant keys from cached aspects when bucket config drifted.
+
+        For each entry:
+          1. Parse aspect from any existing variant key (e.g. ``"896x640"``
+             → 1.4).
+          2. Call the rebucket provider to get the resolution keys the
+             *current* bucket config would assign for that aspect.
+          3. Reuse any pre-existing .pt file matching a derived key (cache
+             hit via dedup, no rebuild). Other keys are left for the
+             per-index loop to rebuild.
+          4. Reorder ``entry['variants']`` so newly-derived keys come first.
+             This way the "first variant" heuristic in validation/get_item
+             picks the current-config key.
+          5. Pre-set ``_active_key_by_filepath`` to the first derived key
+             for each known filepath so the per-index loop validates
+             against the new key (and rebuilds it if no .pt exists).
+
+        Pure arithmetic — no image decode. O(N) cheap work.
+        """
+        if self.rebucket_provider is None:
+            return
+        entries = self.cache_index.get('entries')
+        if not entries:
+            return
+        # Build a reverse map filename → filepath so we can pre-set the
+        # active key per filepath. Entries are keyed by filepath already, so
+        # this is just a list comprehension.
+        derived = 0
+        reused = 0
+        with self._index_lock:
+            for filepath, entry in entries.items():
+                if entry.get('modeltype') != self.modeltype:
+                    continue
+                variants = entry.get('variants') or {}
+                aspect = self._aspect_from_variant_keys(variants)
+                if aspect is None:
+                    continue
+                try:
+                    new_keys = self.rebucket_provider(aspect)
+                except Exception:
+                    continue
+                if not new_keys:
+                    continue
+                file_hash = entry.get('hash')
+                if not file_hash:
+                    continue
+                for nk in new_keys:
+                    if nk in variants:
+                        continue
+                    cache_file = self._make_cache_file(
+                        file_hash,
+                        None if nk == NO_RESOLUTION_KEY else nk,
+                    )
+                    if f"{cache_file}_1.pt" in self._existing_pt_files:
+                        variants[nk] = {'cache_file': cache_file}
+                        reused += 1
+                    derived += 1
+                # Move newly-derived keys to the front so the "first
+                # variant" picks them, preserving any reused .pt links.
+                new_keys_set = set(new_keys)
+                reordered = {nk: variants[nk] for nk in new_keys if nk in variants}
+                reordered.update(
+                    (k, v) for k, v in variants.items() if k not in new_keys_set
+                )
+                entry['variants'] = reordered
+                # Pin this run's active key to the first derived key —
+                # even if its .pt doesn't exist yet (per-index loop will
+                # rebuild on 'missing_variant' status).
+                self._active_key_by_filepath[filepath] = new_keys[0]
+        if derived:
+            print(
+                f"SmartDiskCache: bucket method drift — re-derived {derived} variant keys "
+                f"({reused} reused from disk, no image decode)."
+            )
+
+    @staticmethod
+    def _aspect_from_variant_keys(variants: dict) -> float | None:
+        """Recover aspect ratio from any HxW-shaped variant key. None if
+        none of the keys parse (e.g. only ``NO_RESOLUTION_KEY`` present).
+        """
+        for k in variants:
+            if k == NO_RESOLUTION_KEY:
+                continue
+            parts = k.split('x')
+            if len(parts) != 2:
+                continue
+            try:
+                h = int(parts[0])
+                w = int(parts[1])
+            except ValueError:
+                continue
+            if w <= 0:
+                continue
+            return h / w
+        return None
 
     def _pt_path(self, cache_file: str, variation: int) -> str:
         return os.path.join(self.cache_dir, f"{cache_file}_{variation + 1}.pt")
@@ -306,7 +492,19 @@ class SmartDiskCache(
             fp_map[parent] = (count, mtime_sum)
         return fp_map
 
-    def _validate_entry(self, filepath: str, entry: dict, resolution: str | None, variations: int, current_mtime: float | None) -> str:
+    def _validate_entry(self, filepath: str, entry: dict, requested_key: str, variations: int, current_mtime: float | None) -> str:
+        """Validate ``entry``'s variant for ``requested_key`` against disk.
+
+        Returns one of:
+          - ``'valid'``: variant present and all .pt files exist.
+          - ``'missing_variant'``: entry is fine but doesn't have this
+            resolution key — caller queues a rebuild for *just this variant*
+            and keeps the entry plus its other variants intact.
+          - ``'missing_pt'``: variant key is registered but a .pt is missing.
+            Caller drops the broken variant and rebuilds it.
+          - ``'content_changed'``: source file changed; full entry rebuild.
+          - ``'rebuild'``: source file unreadable.
+        """
         if entry['modeltype'] != self.modeltype:
             raise RuntimeError(
                 f"Cache modeltype mismatch for '{filepath}': "
@@ -314,14 +512,16 @@ class SmartDiskCache(
                 f"Delete the cache directory or use a separate cache_dir for this model type."
             )
 
-        if resolution and entry.get('resolution') and resolution != entry['resolution']:
-            return 'resolution_changed'
-
         if current_mtime is None:
             return 'rebuild'
 
-        cache_file = entry['cache_file']
+        variants = entry.get('variants', {})
+        variant = variants.get(requested_key)
+
         if current_mtime == entry['mtime']:
+            if variant is None:
+                return 'missing_variant'
+            cache_file = variant['cache_file']
             for v in range(variations):
                 if f"{cache_file}_{v + 1}.pt" not in self._existing_pt_files:
                     return 'missing_pt'
@@ -333,6 +533,9 @@ class SmartDiskCache(
 
         entry['mtime'] = current_mtime
 
+        if variant is None:
+            return 'missing_variant'
+        cache_file = variant['cache_file']
         for v in range(variations):
             if f"{cache_file}_{v + 1}.pt" not in self._existing_pt_files:
                 return 'missing_pt'
@@ -357,7 +560,7 @@ class SmartDiskCache(
         for entry in self.cache_index['entries'].values():
             if entry.get('modeltype') != self.modeltype:
                 continue
-            cache_file = entry.get('cache_file')
+            cache_file = self._any_variant_cache_file(entry)
             if not cache_file:
                 continue
             pt = self._real_pt_path(cache_file, 0)
@@ -371,6 +574,36 @@ class SmartDiskCache(
             return required - cached_keys
 
         return set()
+
+    @staticmethod
+    def _any_variant_cache_file(entry: dict) -> str | None:
+        """Return *any* variant's cache_file, or None if the entry has none.
+
+        Used by code paths that don't care which resolution they're inspecting
+        (sentinel templating, schema-drift spot check, sourceless aggregate
+        load) — they just need *some* representative .pt.
+        """
+        variants = entry.get('variants') or {}
+        for variant in variants.values():
+            cache_file = variant.get('cache_file')
+            if cache_file:
+                return cache_file
+        return None
+
+    def _active_cache_file(self, filepath: str, entry: dict) -> str | None:
+        """Cache file for the variant chosen for ``filepath`` this session.
+
+        Falls back to any-variant when no active key has been recorded (e.g.
+        sourceless mode, or a freshly-loaded entry not yet validated).
+        """
+        key = self._active_key_by_filepath.get(filepath)
+        if key is not None:
+            variant = entry.get('variants', {}).get(key)
+            if variant is not None:
+                cache_file = variant.get('cache_file')
+                if cache_file:
+                    return cache_file
+        return self._any_variant_cache_file(entry)
 
     @staticmethod
     def _resize_to_ref_shape(value, ref_shape):
@@ -465,60 +698,64 @@ class SmartDiskCache(
             entry = self.cache_index['entries'].get(filepath)
             if entry is None:
                 return filepath, 'no_entry'
-            cache_file = entry.get('cache_file')
-            if not cache_file:
+            variants = entry.get('variants') or {}
+            if not variants:
                 return filepath, 'no_cache_file'
 
             wrote_anything = False
-            for v in range(variations):
-                real_pt = self._real_pt_path(cache_file, v)
-                if not os.path.isfile(real_pt):
+            for variant in variants.values():
+                cache_file = variant.get('cache_file')
+                if not cache_file:
                     continue
-                try:
-                    cache_data = torch.load(real_pt, weights_only=False, map_location='cpu')
-                except Exception as e:
-                    return filepath, f'load_failed: {e}'
-
-                # Reference shape from cached latent_image; everything spatial
-                # in the same .pt must match this so collate_fn can stack the
-                # batch without crashing.
-                ref_shape = None
-                latent_image = cache_data.get('latent_image')
-                if torch.is_tensor(latent_image) and latent_image.dim() >= 2:
-                    ref_shape = tuple(latent_image.shape[-2:])
-
-                needs_work: list[str] = []
-                for name in sorted_targets:
-                    cached_val = cache_data.get(name)
-                    if cached_val is None:
-                        needs_work.append(name)
+                for v in range(variations):
+                    real_pt = self._real_pt_path(cache_file, v)
+                    if not os.path.isfile(real_pt):
                         continue
-                    if (ref_shape is not None and torch.is_tensor(cached_val)
-                            and cached_val.dim() >= 2
-                            and tuple(cached_val.shape[-2:]) != ref_shape):
-                        needs_work.append(name)
+                    try:
+                        cache_data = torch.load(real_pt, weights_only=False, map_location='cpu')
+                    except Exception as e:
+                        return filepath, f'load_failed: {e}'
 
-                if not needs_work:
-                    continue
+                    # Reference shape from cached latent_image; everything spatial
+                    # in the same .pt must match this so collate_fn can stack the
+                    # batch without crashing.
+                    ref_shape = None
+                    latent_image = cache_data.get('latent_image')
+                    if torch.is_tensor(latent_image) and latent_image.dim() >= 2:
+                        ref_shape = tuple(latent_image.shape[-2:])
 
-                try:
-                    with torch.no_grad():
-                        for name in needs_work:
-                            value = self._get_previous_item(v, name, in_index)
-                            value = self._resize_to_ref_shape(value, ref_shape)
-                            cache_data[name] = self.__clone_for_cache(value)
-                except Exception as e:
-                    return filepath, f'compute_failed: {e}'
+                    needs_work: list[str] = []
+                    for name in sorted_targets:
+                        cached_val = cache_data.get(name)
+                        if cached_val is None:
+                            needs_work.append(name)
+                            continue
+                        if (ref_shape is not None and torch.is_tensor(cached_val)
+                                and cached_val.dim() >= 2
+                                and tuple(cached_val.shape[-2:]) != ref_shape):
+                            needs_work.append(name)
 
-                tmp_path = real_pt + f'.{os.getpid()}.{threading.get_ident()}.aug.tmp'
-                try:
-                    torch.save(cache_data, tmp_path)
-                    os.replace(tmp_path, real_pt)
-                    wrote_anything = True
-                except Exception as e:
-                    with contextlib.suppress(OSError):
-                        os.remove(tmp_path)
-                    return filepath, f'save_failed: {e}'
+                    if not needs_work:
+                        continue
+
+                    try:
+                        with torch.no_grad():
+                            for name in needs_work:
+                                value = self._get_previous_item(v, name, in_index)
+                                value = self._resize_to_ref_shape(value, ref_shape)
+                                cache_data[name] = self.__clone_for_cache(value)
+                    except Exception as e:
+                        return filepath, f'compute_failed: {e}'
+
+                    tmp_path = real_pt + f'.{os.getpid()}.{threading.get_ident()}.aug.tmp'
+                    try:
+                        torch.save(cache_data, tmp_path)
+                        os.replace(tmp_path, real_pt)
+                        wrote_anything = True
+                    except Exception as e:
+                        with contextlib.suppress(OSError):
+                            os.remove(tmp_path)
+                        return filepath, f'save_failed: {e}'
 
             return filepath, 'augmented' if wrote_anything else 'already_consistent'
 
@@ -609,7 +846,7 @@ class SmartDiskCache(
                 return False
             if current_mtime != entry.get('mtime'):
                 return False
-            cache_file = entry.get('cache_file')
+            cache_file = self._any_variant_cache_file(entry)
             if cache_file and f"{cache_file}_1.pt" not in self._existing_pt_files:
                 return False
 
@@ -631,6 +868,15 @@ class SmartDiskCache(
                 del self.cache_index['hash_index'][file_hash]
 
     def _try_dedup(self, filepath: str, file_hash: str, resolution: str | None, mtime: float) -> bool:
+        """Reuse an existing entry's variant when content+resolution match.
+
+        Hash-index lookup finds entries built from the same source bytes; we
+        only dedup when one of those entries already has a variant at the
+        requested resolution key. Different resolution requests of the same
+        content are still allowed to share a single entry — we just register
+        an additional variant under a different key.
+        """
+        key = self._resolution_key(resolution)
         with self._index_lock:
             if file_hash not in self.cache_index['hash_index']:
                 return False
@@ -641,19 +887,24 @@ class SmartDiskCache(
                     continue
                 if existing_entry['modeltype'] != self.modeltype:
                     continue
-                if resolution and existing_entry.get('resolution') != resolution:
+                existing_variants = existing_entry.get('variants', {})
+                variant = existing_variants.get(key)
+                if variant is None:
                     continue
-                cache_file = existing_entry['cache_file']
+                cache_file = variant['cache_file']
 
-                self.cache_index['entries'][filepath] = {
-                    'filename': os.path.basename(filepath),
-                    'hash': file_hash,
-                    'mtime': mtime,
-                    'modeltype': self.modeltype,
-                    'resolution': resolution,
-                    'cache_file': cache_file,
-                    'cache_version': CACHE_VERSION,
-                }
+                target_entry = self.cache_index['entries'].get(filepath)
+                if target_entry is None:
+                    target_entry = {
+                        'filename': os.path.basename(filepath),
+                        'hash': file_hash,
+                        'mtime': mtime,
+                        'modeltype': self.modeltype,
+                        'variants': {},
+                        'cache_version': CACHE_VERSION,
+                    }
+                    self.cache_index['entries'][filepath] = target_entry
+                target_entry['variants'][key] = {'cache_file': cache_file}
                 self._add_to_hash_index(file_hash, filepath)
                 return True
 
@@ -704,16 +955,29 @@ class SmartDiskCache(
             with self._index_lock:
                 self._existing_pt_files.add(pt_name)
 
+        key = self._resolution_key(resolution)
         with self._index_lock:
-            self.cache_index['entries'][filepath] = {
-                'filename': os.path.basename(filepath),
-                'hash': file_hash,
-                'mtime': mtime,
-                'modeltype': self.modeltype,
-                'resolution': resolution,
-                'cache_file': cache_file,
-                'cache_version': CACHE_VERSION,
-            }
+            entry = self.cache_index['entries'].get(filepath)
+            if entry is None:
+                entry = {
+                    'filename': os.path.basename(filepath),
+                    'hash': file_hash,
+                    'mtime': mtime,
+                    'modeltype': self.modeltype,
+                    'variants': {},
+                    'cache_version': CACHE_VERSION,
+                }
+                self.cache_index['entries'][filepath] = entry
+            else:
+                # Refresh metadata; the source content may have changed and
+                # been re-hashed since this entry was first created.
+                entry['hash'] = file_hash
+                entry['mtime'] = mtime
+                entry['modeltype'] = self.modeltype
+                entry['cache_version'] = CACHE_VERSION
+                if 'variants' not in entry:
+                    entry['variants'] = {}
+            entry['variants'][key] = {'cache_file': cache_file}
             self._add_to_hash_index(file_hash, filepath)
 
     def _get_source_path(self, in_variation: int, in_index: int) -> str | None:
@@ -827,7 +1091,13 @@ class SmartDiskCache(
 
         for fp in self._sourceless_filepaths:
             entry = self.cache_index['entries'][fp]
-            pt_path = self._real_pt_path(entry['cache_file'], 0)
+            cache_file = self._any_variant_cache_file(entry)
+            if cache_file is None:
+                raise RuntimeError(
+                    f"Sourceless training: cache entry for '{fp}' has no variants. "
+                    f"Rebuild your cache."
+                )
+            pt_path = self._real_pt_path(cache_file, 0)
             if not os.path.isfile(pt_path):
                 raise RuntimeError(
                     f"Sourceless training: cache file '{pt_path}' is missing. "
@@ -851,7 +1121,11 @@ class SmartDiskCache(
                     if entry is None:
                         bar.update(1)
                         continue
-                    real_path = self._real_pt_path(entry['cache_file'], 0)
+                    cache_file = self._any_variant_cache_file(entry)
+                    if cache_file is None:
+                        bar.update(1)
+                        continue
+                    real_path = self._real_pt_path(cache_file, 0)
                     try:
                         cached = torch.load(real_path, weights_only=False, map_location='cpu')
                         agg_data = {}
@@ -877,6 +1151,21 @@ class SmartDiskCache(
         os.makedirs(self.cache_dir, exist_ok=True)
         self._source_path_cache = {}
         self._aggregate_cache = {}
+        self._active_key_by_filepath = {}
+
+        # Bucket-method drift: the AspectBucketing config may have changed
+        # since the cache was last validated (e.g. user edited
+        # target_resolutions or quantization). Compare the stamped
+        # bucket_method against what the upstream provider says now. On
+        # drift, run the aspect-math recovery pass to register variants for
+        # the new keys without re-decoding any source images.
+        current_bucket_method = self._compute_bucket_method()
+        stored_bucket_method = self.cache_index.get('bucket_method')
+        bucket_drift = (
+            current_bucket_method is not None
+            and stored_bucket_method is not None
+            and stored_bucket_method != current_bucket_method
+        )
 
         # Schema drift: if split_names/aggregate_names changed since the cache
         # was built (e.g. masked_training was just enabled), the on-disk .pt
@@ -924,11 +1213,15 @@ class SmartDiskCache(
         # If every required filepath was already validated earlier in this
         # process and is still present in the on-disk index, skip validation
         # entirely. This avoids per-epoch revalidation on static datasets.
-        if (required_filepaths
+        # Bypassed on bucket drift: drift recovery needs to run once before we
+        # can trust session-skip again.
+        if (not bucket_drift
+                and required_filepaths
                 and self.cache_index.get('entries')
                 and required_filepaths.issubset(self._session_validated_filepaths)
                 and all(fp in self.cache_index['entries'] for fp in required_filepaths)):
             self._source_path_cache = dict(index_to_filepath)
+            self._populate_active_keys(required_filepaths)
             print(f"SmartDiskCache: Skipped re-validation ({len(required_filepaths)} entries already validated this run)")
             self._load_aggregate_cache(out_variation)
             return
@@ -953,13 +1246,26 @@ class SmartDiskCache(
         # Single os.scandir of the cache dir — used by fast and full paths.
         self._existing_pt_files = self._scan_existing_pt_files()
 
+        # Bucket-method drift recovery: aspect-math derives new variant keys
+        # from cached resolutions and links any pre-existing .pt files. Pure
+        # arithmetic, no image decode. Runs before validation so the per-index
+        # loop sees the new variants registered.
+        if bucket_drift:
+            self._drift_recovery_pass()
+
         # --- Fast validation path ---
-        if not skip_validation and self.cache_index.get('entries') and self._fast_validate():
+        # Bypassed on bucket drift: the recovery pass may have queued new
+        # variants that need rebuild, so we have to fall through.
+        if (not skip_validation
+                and not bucket_drift
+                and self.cache_index.get('entries')
+                and self._fast_validate()):
             all_in_index = all(
                 fp in self.cache_index['entries'] for fp in required_filepaths
             )
             if all_in_index:
                 self._source_path_cache = dict(index_to_filepath)
+                self._populate_active_keys(required_filepaths)
                 n = len(self.cache_index['entries'])
                 checked = getattr(self, '_fast_validate_sample_size', '?')
                 print(f"SmartDiskCache: Fast validation passed ({n} entries, {checked} spot-checked)")
@@ -1024,19 +1330,35 @@ class SmartDiskCache(
                             files_skipped += 1
                             bar.update(1)
                             continue
-                        cached_res = entry.get('resolution')
-                        # Pass cached resolution; we trust it on the happy path.
-                        # Recomputing _get_resolution_string here would chain
-                        # AspectBucketing -> CalcAspect -> LoadImage and open
-                        # every source image just to confirm a value that the
-                        # cache already knows. If bucket config changed the
-                        # user must clear the cache (same contract as the
-                        # original DiskCache). schema_method drift is detected
-                        # earlier in __refresh_cache and triggers re-augment.
+                        # Active key for this session: drift recovery may
+                        # have pre-set it to a re-derived key. Otherwise
+                        # pick the first registered variant — for
+                        # bucket_method-matching runs that's the previous
+                        # run's key, which is still valid. Trusting the
+                        # cached key lets us skip the AspectBucketing
+                        # ->LoadImage chain that _get_resolution_string
+                        # would otherwise trigger per cache hit.
+                        active_key = self._active_key_by_filepath.get(filepath)
+                        if active_key is None:
+                            active_key = next(
+                                iter(entry.get('variants', {}).keys()),
+                                NO_RESOLUTION_KEY,
+                            )
+                            self._active_key_by_filepath[filepath] = active_key
                         mtime = self._source_mtimes.get(filepath)
-                        status = self._validate_entry(filepath, entry, cached_res, variations, mtime)
+                        status = self._validate_entry(filepath, entry, active_key, variations, mtime)
                         if status == 'valid':
                             files_skipped += 1
+                            bar.update(1)
+                            continue
+                        if status == 'missing_variant':
+                            # Entry is fine but doesn't have a variant for
+                            # this session's expected key. Rebuild that
+                            # variant only — leave the entry and other
+                            # variants in place.
+                            resolution = self._get_resolution_string(0, in_index)
+                            self._active_key_by_filepath[filepath] = self._resolution_key(resolution)
+                            items_to_build_by_index[in_index] = (filepath, group_key, 0, in_index, group_index, variations, resolution)
                             bar.update(1)
                             continue
                         # Otherwise: rebuild. Drop the stale entry.
@@ -1046,11 +1368,13 @@ class SmartDiskCache(
                                 self._remove_from_hash_index(old_hash, filepath)
                             if filepath in self.cache_index['entries']:
                                 del self.cache_index['entries'][filepath]
+                            self._active_key_by_filepath.pop(filepath, None)
 
                     # Rebuild path: now we DO need the current resolution.
                     # This opens the image (via CalcAspect) but only for files
                     # that are missing or stale, not for the whole dataset.
                     resolution = self._get_resolution_string(0, in_index)
+                    self._active_key_by_filepath[filepath] = self._resolution_key(resolution)
                     items_to_build_by_index[in_index] = (filepath, group_key, 0, in_index, group_index, variations, resolution)
                     bar.update(1)
 
@@ -1087,16 +1411,20 @@ class SmartDiskCache(
                     except OSError:
                         return filepath, 'hash_failed'
 
-                    if filepath not in self.cache_index['entries']:
-                        if self._try_dedup(filepath, file_hash, resolution, mtime):
-                            entry = self.cache_index['entries'][filepath]
-                            cf = entry['cache_file']
-                            all_present = all(
+                    if self._try_dedup(filepath, file_hash, resolution, mtime):
+                        entry = self.cache_index['entries'][filepath]
+                        key = self._resolution_key(resolution)
+                        variant = entry.get('variants', {}).get(key)
+                        cf = variant['cache_file'] if variant else None
+                        all_present = (
+                            cf is not None
+                            and all(
                                 f"{cf}_{v + 1}.pt" in self._existing_pt_files
                                 for v in range(variations)
                             )
-                            if all_present:
-                                return filepath, 'dedup'
+                        )
+                        if all_present:
+                            return filepath, 'dedup'
 
                     try:
                         self._build_cache_entry(
@@ -1145,6 +1473,8 @@ class SmartDiskCache(
             )
         self.cache_index['schema'] = required_schema
         self.cache_index['schema_method'] = SCHEMA_METHOD
+        if current_bucket_method is not None:
+            self.cache_index['bucket_method'] = current_bucket_method
         self._save_cache_index()
 
         # Mark every required filepath that ended up with a valid entry as
@@ -1193,7 +1523,11 @@ class SmartDiskCache(
 
         with tqdm(total=len(load_items), smoothing=0.1, desc='loading aggregate cache') as bar:
             for filepath, cache_entry, variation in load_items:
-                real_path = self._real_pt_path(cache_entry['cache_file'], variation)
+                cache_file = self._active_cache_file(filepath, cache_entry)
+                if cache_file is None:
+                    bar.update(1)
+                    continue
+                real_path = self._real_pt_path(cache_file, variation)
                 try:
                     cached = torch.load(real_path, weights_only=False, map_location='cpu')
                     agg_data = {}
@@ -1243,7 +1577,10 @@ class SmartDiskCache(
         for entry in self.cache_index.get('entries', {}).values():
             if entry.get('modeltype') != self.modeltype:
                 continue
-            pt = self._real_pt_path(entry['cache_file'], 0)
+            cache_file = self._any_variant_cache_file(entry)
+            if not cache_file:
+                continue
+            pt = self._real_pt_path(cache_file, 0)
             if os.path.isfile(pt):
                 try:
                     template = torch.load(pt, weights_only=False, map_location='cpu')
@@ -1308,7 +1645,18 @@ class SmartDiskCache(
                     if agg_data is not None:
                         return agg_data
 
-                real_cache_path = self._real_pt_path(cache_entry['cache_file'], variation)
+                cache_file = self._active_cache_file(filepath, cache_entry)
+                if cache_file is None:
+                    # Entry has no variants — fall through to sentinel.
+                    sentinel = self._load_blank_sentinel()
+                    if sentinel is not None:
+                        item = {}
+                        for name in self.split_names + self.aggregate_names:
+                            if name in sentinel:
+                                item[name] = sentinel[name]
+                        return item
+                    return {}
+                real_cache_path = self._real_pt_path(cache_file, variation)
 
                 cached = torch.load(real_cache_path, weights_only=False, map_location=self.pipeline.device)
 
@@ -1372,20 +1720,30 @@ class SmartDiskCache(
         with open(cache_path, 'r') as f:
             index = json.load(f)
 
+        SmartDiskCache._migrate_legacy_index_in_place(index)
         entries = index.get('entries', {})
 
         dead_filepaths = [fp for fp in entries if not os.path.isfile(fp)]
 
         referenced_cache_files = set()
         for fp, entry in entries.items():
-            if fp not in dead_filepaths:
-                cf = entry.get('cache_file', '')
+            if fp in dead_filepaths:
+                continue
+            for cf in SmartDiskCache._iter_variant_cache_files(entry):
                 for v in range(1, 100):
                     pt = os.path.join(cache_dir, f"{cf}_{v}.pt")
                     if os.path.isfile(pt):
                         referenced_cache_files.add(os.path.normpath(pt))
                     else:
                         break
+
+        # Top-level non-entry .pt files (currently just blank_sentinel.pt)
+        # are intentional artifacts, not orphans.
+        sentinel_name = index.get('blank_sentinel')
+        if sentinel_name:
+            referenced_cache_files.add(
+                os.path.normpath(os.path.join(cache_dir, sentinel_name))
+            )
 
         orphan_count = 0
         orphan_bytes = 0
@@ -1399,6 +1757,18 @@ class SmartDiskCache(
         return {'orphan_count': orphan_count, 'orphan_bytes': orphan_bytes}
 
     @staticmethod
+    def _iter_variant_cache_files(entry: dict):
+        """Yield every cache_file string registered under ``entry['variants']``.
+
+        Used by the static gc helpers which walk all variants for both
+        orphan-detection and cleanup.
+        """
+        for variant in (entry.get('variants') or {}).values():
+            cf = variant.get('cache_file')
+            if cf:
+                yield cf
+
+    @staticmethod
     def gc_clean(cache_dir: str):
         cache_path = os.path.join(cache_dir, 'cache.json')
         if not os.path.isfile(cache_path):
@@ -1407,6 +1777,7 @@ class SmartDiskCache(
         with open(cache_path, 'r') as f:
             index = json.load(f)
 
+        SmartDiskCache._migrate_legacy_index_in_place(index)
         entries = index.get('entries', {})
         hash_index = index.get('hash_index', {})
 
@@ -1421,23 +1792,29 @@ class SmartDiskCache(
                     paths.remove(fp)
                 if not paths:
                     del hash_index[file_hash]
-                    cf = entry.get('cache_file', '')
-                    for v in range(1, 100):
-                        pt = os.path.join(cache_dir, f"{cf}_{v}.pt")
-                        if os.path.isfile(pt):
-                            os.remove(pt)
-                        else:
-                            break
+                    for cf in SmartDiskCache._iter_variant_cache_files(entry):
+                        for v in range(1, 100):
+                            pt = os.path.join(cache_dir, f"{cf}_{v}.pt")
+                            if os.path.isfile(pt):
+                                os.remove(pt)
+                            else:
+                                break
 
         referenced_cache_files = set()
         for entry in entries.values():
-            cf = entry.get('cache_file', '')
-            for v in range(1, 100):
-                pt = os.path.join(cache_dir, f"{cf}_{v}.pt")
-                if os.path.isfile(pt):
-                    referenced_cache_files.add(os.path.normpath(pt))
-                else:
-                    break
+            for cf in SmartDiskCache._iter_variant_cache_files(entry):
+                for v in range(1, 100):
+                    pt = os.path.join(cache_dir, f"{cf}_{v}.pt")
+                    if os.path.isfile(pt):
+                        referenced_cache_files.add(os.path.normpath(pt))
+                    else:
+                        break
+
+        sentinel_name = index.get('blank_sentinel')
+        if sentinel_name:
+            referenced_cache_files.add(
+                os.path.normpath(os.path.join(cache_dir, sentinel_name))
+            )
 
         for entry in os.scandir(cache_dir):
             if entry.name.endswith('.pt') and entry.is_file():

@@ -158,6 +158,18 @@ def _read_cache_json(cache_dir: str) -> dict:
         return json.load(f)
 
 
+def _entry_cache_file(entry: dict) -> str:
+    """Return any variant's cache_file from a v3 entry. Tests that don't
+    care which variant they're looking at (single-resolution caches) use
+    this to avoid hard-coding the variant key."""
+    return next(iter(entry["variants"].values()))["cache_file"]
+
+
+def _entry_variant(entry: dict, key: str) -> dict:
+    """Return entry['variants'][key]. Raises KeyError if not present."""
+    return entry["variants"][key]
+
+
 # ---------------------------------------------------------------------------
 # Hashing tests
 # ---------------------------------------------------------------------------
@@ -498,7 +510,7 @@ class TestDeduplication:
         norm_b = os.path.normpath(path_b)
 
         # Both entries should share the same cache_file
-        assert index["entries"][norm_a]["cache_file"] == index["entries"][norm_b]["cache_file"]
+        assert _entry_cache_file(index["entries"][norm_a]) == _entry_cache_file(index["entries"][norm_b])
 
         # hash_index should list both paths under the same hash
         file_hash = index["entries"][norm_a]["hash"]
@@ -533,7 +545,7 @@ class TestDeduplication:
         index_before = _read_cache_json(cache_dir)
         norm_a = os.path.normpath(path_a)
         norm_b = os.path.normpath(path_b)
-        shared_cache_file = index_before["entries"][norm_a]["cache_file"]
+        shared_cache_file = _entry_cache_file(index_before["entries"][norm_a])
 
         # Edit path_b so it diverges
         time.sleep(0.05)
@@ -556,10 +568,10 @@ class TestDeduplication:
         index_after = _read_cache_json(cache_dir)
 
         # path_a should still have the original cache_file
-        assert index_after["entries"][norm_a]["cache_file"] == shared_cache_file
+        assert _entry_cache_file(index_after["entries"][norm_a]) == shared_cache_file
 
         # path_b should now have a different cache_file
-        assert index_after["entries"][norm_b]["cache_file"] != shared_cache_file
+        assert _entry_cache_file(index_after["entries"][norm_b]) != shared_cache_file
 
 
 # ---------------------------------------------------------------------------
@@ -579,8 +591,7 @@ class TestAtomicWrites:
                 "hash": "abcdef012345abcd",
                 "mtime": 1234567890.0,
                 "modeltype": "test",
-                "resolution": None,
-                "cache_file": "abcdef012345",
+                "variants": {"_": {"cache_file": "abcdef012345"}},
                 "cache_version": CACHE_VERSION,
             }},
             "hash_index": {"abcdef012345abcd": ["fake/path.bin"]},
@@ -686,7 +697,13 @@ class TestGarbageCollection:
         """After gc_clean, orphaned .pt removed, active ones preserved."""
         paths, cache_dir = self._build_gc_scenario(tmp_path)
 
-        pt_before = {f for f in os.listdir(cache_dir) if f.endswith(".pt")}
+        # blank_sentinel.pt is created by _ensure_blank_sentinel and
+        # intentionally referenced via cache.json's top-level 'blank_sentinel'
+        # field (not via 'entries'). Filter it out of these counts.
+        def _entry_pts(d):
+            return {f for f in os.listdir(d) if f.endswith(".pt") and f != "blank_sentinel.pt"}
+
+        pt_before = _entry_pts(cache_dir)
         assert len(pt_before) == 3  # one .pt per source
 
         # Delete one source file to create an orphan
@@ -694,7 +711,7 @@ class TestGarbageCollection:
 
         SmartDiskCache.gc_clean(cache_dir)
 
-        pt_after = {f for f in os.listdir(cache_dir) if f.endswith(".pt")}
+        pt_after = _entry_pts(cache_dir)
         # One .pt should be removed
         assert len(pt_after) == 2
         # The remaining .pt files should correspond to the surviving sources
@@ -1031,7 +1048,7 @@ class TestIntegration:
         for p in paths:
             norm = os.path.normpath(p)
             entry = index["entries"][norm]
-            cache_file = entry["cache_file"]
+            cache_file = _entry_cache_file(entry)
             for v in range(num_variations):
                 pt = os.path.join(cache_dir, f"{cache_file}_{v + 1}.pt")
                 assert os.path.isfile(pt), f"Missing variation {v} .pt file: {pt}"
@@ -1064,7 +1081,7 @@ class TestIntegration:
 
         index = _read_cache_json(cache_dir)
         norm = os.path.normpath(path)
-        cache_file = index["entries"][norm]["cache_file"]
+        cache_file = _entry_cache_file(index["entries"][norm])
         assert cache_file.startswith(expected_prefix), \
             f"Cache file '{cache_file}' should start with hash prefix '{expected_prefix}'"
 
@@ -1504,7 +1521,7 @@ class TestBulkScanCorrectness:
 
         existing = sdc._scan_existing_pt_files()
         for entry in sdc.cache_index['entries'].values():
-            cf = entry['cache_file']
+            cf = _entry_cache_file(entry)
             for v in range(1):  # variations=1 in this fixture
                 pt_name = f"{cf}_{v + 1}.pt"
                 disk_says = os.path.isfile(sdc._real_pt_path(cf, v))
@@ -1517,7 +1534,7 @@ class TestBulkScanCorrectness:
         sdc = next(m for m in ds.loading_pipeline.modules if isinstance(m, SmartDiskCache))
 
         # All cached files should appear in the in-memory set as a side effect of build.
-        names_in_index = {f"{e['cache_file']}_1.pt" for e in sdc.cache_index['entries'].values()}
+        names_in_index = {f"{_entry_cache_file(e)}_1.pt" for e in sdc.cache_index['entries'].values()}
         assert names_in_index.issubset(sdc._existing_pt_files), \
             f"missing from set: {names_in_index - sdc._existing_pt_files}"
 
@@ -2030,3 +2047,523 @@ class TestValidationBenchmarks:
         # fast — no more than 3× the fast-validate path on a clean bench.
         assert t_full < max(t_cold, t_warm * 50.0), \
             f"full-validate after touch should not regress: t_full={t_full:.3f}s"
+
+
+# ---------------------------------------------------------------------------
+# Multi-resolution variant cache: v2 -> v3 migration, drift recovery, GC
+# ---------------------------------------------------------------------------
+
+from mgds.pipelineModules.SmartDiskCache import NO_RESOLUTION_KEY
+
+
+class TestLegacyV2Migration:
+    """In-place migration of v2 entries (top-level cache_file/resolution)
+    to v3 entries (variants dict). No .pt rebuild required."""
+
+    def _write_v2_index(self, cache_dir: str, entries: dict) -> str:
+        os.makedirs(cache_dir, exist_ok=True)
+        v2_data = {
+            "version": 2,
+            "entries": entries,
+            "hash_index": {},
+        }
+        path = os.path.join(cache_dir, "cache.json")
+        with open(path, "w") as f:
+            json.dump(v2_data, f)
+        return path
+
+    def test_v2_with_resolution_lifts_to_keyed_variant(self, tmp_path):
+        cache_dir = str(tmp_path / "cache")
+        self._write_v2_index(cache_dir, {
+            "fake/img.png": {
+                "filename": "img.png",
+                "hash": "deadbeefcafe1234",
+                "mtime": 1234.0,
+                "modeltype": "test",
+                "resolution": "896x640",
+                "cache_file": "deadbeefcafe_896x640",
+                "cache_version": 2,
+            }
+        })
+
+        sdc = SmartDiskCache.__new__(SmartDiskCache)
+        sdc.cache_dir = cache_dir
+        loaded = sdc._load_cache_index()
+
+        entry = loaded["entries"]["fake/img.png"]
+        assert entry.get("resolution") is None  # lifted out
+        assert entry.get("cache_file") is None  # lifted out
+        assert entry["variants"] == {"896x640": {"cache_file": "deadbeefcafe_896x640"}}
+        assert loaded["version"] == CACHE_VERSION
+        assert entry["cache_version"] == CACHE_VERSION
+
+    def test_v2_without_resolution_uses_underscore_key(self, tmp_path):
+        cache_dir = str(tmp_path / "cache")
+        self._write_v2_index(cache_dir, {
+            "fake/text.txt": {
+                "filename": "text.txt",
+                "hash": "deadbeefcafe5678",
+                "mtime": 5678.0,
+                "modeltype": "test",
+                "resolution": None,
+                "cache_file": "deadbeefcafe",
+                "cache_version": 2,
+            }
+        })
+
+        sdc = SmartDiskCache.__new__(SmartDiskCache)
+        sdc.cache_dir = cache_dir
+        loaded = sdc._load_cache_index()
+
+        entry = loaded["entries"]["fake/text.txt"]
+        assert entry["variants"] == {NO_RESOLUTION_KEY: {"cache_file": "deadbeefcafe"}}
+
+    def test_migration_is_idempotent(self, tmp_path):
+        cache_dir = str(tmp_path / "cache")
+        self._write_v2_index(cache_dir, {
+            "fake/a.bin": {
+                "filename": "a.bin", "hash": "h1", "mtime": 1.0,
+                "modeltype": "test", "resolution": None, "cache_file": "h1",
+                "cache_version": 2,
+            }
+        })
+        sdc = SmartDiskCache.__new__(SmartDiskCache)
+        sdc.cache_dir = cache_dir
+        first = sdc._load_cache_index()
+        # Second read should not double-rewrite (idempotent).
+        second = sdc._load_cache_index()
+        assert first["entries"] == second["entries"]
+        assert second["entries"]["fake/a.bin"]["variants"] == {NO_RESOLUTION_KEY: {"cache_file": "h1"}}
+
+    def test_v3_index_passes_through_unchanged(self, tmp_path):
+        """Already-v3 entries must not be re-migrated."""
+        cache_dir = str(tmp_path / "cache")
+        os.makedirs(cache_dir, exist_ok=True)
+        v3_data = {
+            "version": CACHE_VERSION,
+            "entries": {
+                "fake/img.png": {
+                    "filename": "img.png",
+                    "hash": "h1",
+                    "mtime": 1.0,
+                    "modeltype": "test",
+                    "variants": {
+                        "512x512": {"cache_file": "h1_512x512"},
+                        "768x768": {"cache_file": "h1_768x768"},
+                    },
+                    "cache_version": CACHE_VERSION,
+                }
+            },
+            "hash_index": {},
+        }
+        with open(os.path.join(cache_dir, "cache.json"), "w") as f:
+            json.dump(v3_data, f)
+
+        sdc = SmartDiskCache.__new__(SmartDiskCache)
+        sdc.cache_dir = cache_dir
+        loaded = sdc._load_cache_index()
+        # Both variants survived.
+        assert set(loaded["entries"]["fake/img.png"]["variants"].keys()) == {"512x512", "768x768"}
+
+
+class TestVariantHelpers:
+    """Internal helper coverage: _resolution_key, _any_variant_cache_file,
+    _aspect_from_variant_keys, _make_cache_file."""
+
+    def test_resolution_key_with_value(self):
+        assert SmartDiskCache._resolution_key("896x640") == "896x640"
+
+    def test_resolution_key_falls_back_to_underscore(self):
+        assert SmartDiskCache._resolution_key(None) == NO_RESOLUTION_KEY
+        assert SmartDiskCache._resolution_key("") == NO_RESOLUTION_KEY
+
+    def test_any_variant_cache_file(self):
+        entry = {"variants": {"512x512": {"cache_file": "h_512x512"}}}
+        assert SmartDiskCache._any_variant_cache_file(entry) == "h_512x512"
+
+    def test_any_variant_cache_file_empty(self):
+        assert SmartDiskCache._any_variant_cache_file({}) is None
+        assert SmartDiskCache._any_variant_cache_file({"variants": {}}) is None
+
+    def test_aspect_from_variant_keys(self):
+        # 896x640 = aspect 1.4
+        variants = {"896x640": {"cache_file": "x"}}
+        assert SmartDiskCache._aspect_from_variant_keys(variants) == 896 / 640
+
+    def test_aspect_skips_underscore_key(self):
+        variants = {NO_RESOLUTION_KEY: {"cache_file": "x"}}
+        assert SmartDiskCache._aspect_from_variant_keys(variants) is None
+
+    def test_aspect_skips_malformed_key(self):
+        variants = {"not_a_resolution": {"cache_file": "x"}}
+        assert SmartDiskCache._aspect_from_variant_keys(variants) is None
+
+    def test_aspect_with_mixed_keys(self):
+        # First valid key wins.
+        variants = {NO_RESOLUTION_KEY: {}, "1024x512": {}}
+        assert SmartDiskCache._aspect_from_variant_keys(variants) == 1024 / 512
+
+
+class TestDriftRecoveryRebucket:
+    """The aspect-math drift recovery path: derives new variant keys from
+    cached resolutions and registers any pre-existing .pt files without
+    decoding source images."""
+
+    def _make_sdc(self, cache_dir, *, rebucket_provider, file_hash="abcdef012345abcd"):
+        sdc = SmartDiskCache.__new__(SmartDiskCache)
+        sdc.cache_dir = cache_dir
+        sdc._real_cache_dir = os.path.realpath(cache_dir)
+        sdc.modeltype = "testmodel"
+        sdc._index_lock = __import__('threading').Lock()
+        sdc.rebucket_provider = rebucket_provider
+        sdc.bucket_method_provider = None
+        sdc._existing_pt_files = set()
+        sdc._active_key_by_filepath = {}
+        sdc.cache_index = {
+            "version": CACHE_VERSION,
+            "entries": {
+                "fake/img1.png": {
+                    "filename": "img1.png",
+                    "hash": file_hash,
+                    "mtime": 1.0,
+                    "modeltype": "testmodel",
+                    "variants": {"512x512": {"cache_file": file_hash[:12] + "_512x512"}},
+                    "cache_version": CACHE_VERSION,
+                },
+            },
+            "hash_index": {},
+        }
+        return sdc
+
+    def test_collision_reuses_existing_pt(self, tmp_path):
+        """If the rebucketed key happens to match an existing .pt on disk,
+        register it as a new variant — no rebuild queued."""
+        cache_dir = str(tmp_path / "c")
+        os.makedirs(cache_dir, exist_ok=True)
+
+        def rebucket(aspect):
+            # Simulate bucket math returning a different key with the same hash prefix.
+            return ["768x768"]
+
+        sdc = self._make_sdc(cache_dir, rebucket_provider=rebucket)
+        # Plant a .pt that the new key would point at.
+        sdc._existing_pt_files = {"abcdef012345_768x768_1.pt"}
+
+        sdc._drift_recovery_pass()
+
+        entry = sdc.cache_index["entries"]["fake/img1.png"]
+        # New variant registered alongside the original.
+        assert "768x768" in entry["variants"]
+        assert entry["variants"]["768x768"]["cache_file"] == "abcdef012345_768x768"
+        # Old variant preserved.
+        assert "512x512" in entry["variants"]
+        # New key first (so next-iter picks it).
+        assert next(iter(entry["variants"].keys())) == "768x768"
+        # Active key pinned to first new key.
+        assert sdc._active_key_by_filepath["fake/img1.png"] == "768x768"
+
+    def test_no_collision_leaves_variant_unfilled(self, tmp_path):
+        """If the rebucketed key has no matching .pt on disk, the variant
+        slot is NOT registered — per-index rebuild loop handles it."""
+        cache_dir = str(tmp_path / "c")
+        os.makedirs(cache_dir, exist_ok=True)
+
+        def rebucket(aspect):
+            return ["1024x768"]
+
+        sdc = self._make_sdc(cache_dir, rebucket_provider=rebucket)
+        sdc._existing_pt_files = set()  # No .pt for the new key.
+
+        sdc._drift_recovery_pass()
+
+        entry = sdc.cache_index["entries"]["fake/img1.png"]
+        # New variant NOT in dict (would otherwise be a stale reference).
+        assert "1024x768" not in entry["variants"]
+        # Original variant preserved.
+        assert "512x512" in entry["variants"]
+        # Active key still pinned to the new key (so per-index loop sees
+        # 'missing_variant' and queues a rebuild).
+        assert sdc._active_key_by_filepath["fake/img1.png"] == "1024x768"
+
+    def test_no_provider_disables_drift(self, tmp_path):
+        """When rebucket_provider is None (text caches), drift recovery is
+        a no-op."""
+        cache_dir = str(tmp_path / "c")
+        os.makedirs(cache_dir, exist_ok=True)
+        sdc = self._make_sdc(cache_dir, rebucket_provider=None)
+        before = dict(sdc.cache_index["entries"]["fake/img1.png"]["variants"])
+        sdc._drift_recovery_pass()
+        after = dict(sdc.cache_index["entries"]["fake/img1.png"]["variants"])
+        assert before == after
+        assert sdc._active_key_by_filepath == {}
+
+    def test_multi_target_registers_all_keys(self, tmp_path):
+        """rebucket_provider returning multiple keys registers each variant."""
+        cache_dir = str(tmp_path / "c")
+        os.makedirs(cache_dir, exist_ok=True)
+
+        def rebucket(aspect):
+            return ["768x768", "1024x1024"]
+
+        sdc = self._make_sdc(cache_dir, rebucket_provider=rebucket)
+        sdc._existing_pt_files = {
+            "abcdef012345_768x768_1.pt",
+            "abcdef012345_1024x1024_1.pt",
+        }
+
+        sdc._drift_recovery_pass()
+        entry = sdc.cache_index["entries"]["fake/img1.png"]
+        assert "768x768" in entry["variants"]
+        assert "1024x1024" in entry["variants"]
+        # Active = first new key.
+        assert sdc._active_key_by_filepath["fake/img1.png"] == "768x768"
+
+
+class TestValidateEntryVariantStatus:
+    """_validate_entry returns 'missing_variant' when the requested key
+    isn't present, distinct from 'missing_pt' (key present but file gone)."""
+
+    def _make_sdc(self):
+        sdc = SmartDiskCache.__new__(SmartDiskCache)
+        sdc.modeltype = "testmodel"
+        sdc._existing_pt_files = set()
+        return sdc
+
+    def test_missing_variant_when_key_not_present(self):
+        sdc = self._make_sdc()
+        entry = {
+            "modeltype": "testmodel",
+            "mtime": 100.0,
+            "variants": {"512x512": {"cache_file": "h_512x512"}},
+            "hash": "h",
+        }
+        # Request a key that doesn't exist in variants.
+        status = sdc._validate_entry("path", entry, "768x768", 1, 100.0)
+        assert status == "missing_variant"
+
+    def test_missing_pt_when_variant_present_but_file_gone(self):
+        sdc = self._make_sdc()
+        entry = {
+            "modeltype": "testmodel",
+            "mtime": 100.0,
+            "variants": {"512x512": {"cache_file": "h_512x512"}},
+            "hash": "h",
+        }
+        # Variant exists in dict but no .pt on disk.
+        status = sdc._validate_entry("path", entry, "512x512", 1, 100.0)
+        assert status == "missing_pt"
+
+    def test_valid_when_variant_and_pt_both_present(self):
+        sdc = self._make_sdc()
+        sdc._existing_pt_files = {"h_512x512_1.pt"}
+        entry = {
+            "modeltype": "testmodel",
+            "mtime": 100.0,
+            "variants": {"512x512": {"cache_file": "h_512x512"}},
+            "hash": "h",
+        }
+        status = sdc._validate_entry("path", entry, "512x512", 1, 100.0)
+        assert status == "valid"
+
+
+class TestBucketMethodStamping:
+    """bucket_method is computed from the provider, stamped to cache.json,
+    and not stamped when no provider is wired."""
+
+    def _make_pipeline_with_provider(self, tmp_path, method_hash="testhash01"):
+        src_dir = tmp_path / "sources"
+        src_dir.mkdir()
+        paths = [_create_source_file(src_dir, f"i{i}.bin", f"c{i}".encode()) for i in range(3)]
+        tensors = _make_tensors(3, seed=11)
+        cache_dir = str(tmp_path / "cache")
+        dummy = DummyDataModule(data={"latent": tensors, "image_path": paths}, length=3)
+        cache_mod = SmartDiskCache(
+            cache_dir=cache_dir,
+            split_names=["latent"], aggregate_names=[],
+            modeltype="testmodel", source_path_in_name="image_path",
+            bucket_method_provider=lambda: method_hash,
+            rebucket_provider=lambda aspect: [],
+        )
+        output_mod = OutputPipelineModule(names=["latent"])
+        ds = MGDS(
+            device=torch.device("cpu"),
+            concepts=[{"name": "A", "path": "dummy"}],
+            settings={},
+            definition=[[dummy], [cache_mod], [output_mod]],
+            batch_size=1, state=PipelineState(), seed=7,
+        )
+        return ds, cache_dir
+
+    def test_bucket_method_stamped_after_first_run(self, tmp_path):
+        ds, cache_dir = self._make_pipeline_with_provider(tmp_path, "method_v1_hash")
+        _drain(ds)
+        index = _read_cache_json(cache_dir)
+        assert index.get("bucket_method") == "method_v1_hash"
+
+    def test_no_bucket_method_when_provider_returns_none(self, tmp_path):
+        """A None-returning provider (e.g. text cache) leaves the field unset."""
+        src_dir = tmp_path / "sources"
+        src_dir.mkdir()
+        path = _create_source_file(src_dir, "x.bin", b"x")
+        tensors = _make_tensors(1, seed=11)
+        cache_dir = str(tmp_path / "cache")
+        dummy = DummyDataModule(data={"latent": tensors, "image_path": [path]}, length=1)
+        cache_mod = SmartDiskCache(
+            cache_dir=cache_dir,
+            split_names=["latent"], aggregate_names=[],
+            modeltype="testmodel", source_path_in_name="image_path",
+            bucket_method_provider=None,
+            rebucket_provider=None,
+        )
+        output_mod = OutputPipelineModule(names=["latent"])
+        ds = MGDS(
+            device=torch.device("cpu"),
+            concepts=[{"name": "A", "path": "dummy"}],
+            settings={},
+            definition=[[dummy], [cache_mod], [output_mod]],
+            batch_size=1, state=PipelineState(), seed=7,
+        )
+        _drain(ds)
+        index = _read_cache_json(cache_dir)
+        assert "bucket_method" not in index
+
+
+class TestGCWalksVariants:
+    """gc_preview / gc_clean must walk all variants per entry, not just one."""
+
+    def test_gc_preview_counts_all_variants_as_referenced(self, tmp_path):
+        cache_dir = str(tmp_path / "c")
+        os.makedirs(cache_dir, exist_ok=True)
+        # Create source file so entry isn't dead.
+        src_dir = tmp_path / "src"
+        src_dir.mkdir()
+        src = _create_source_file(src_dir, "img.bin", b"data")
+        norm_src = os.path.normpath(src)
+
+        # Plant two variant .pt files for the same entry.
+        torch.save({"data": torch.zeros(1)}, os.path.join(cache_dir, "h12_512x512_1.pt"))
+        torch.save({"data": torch.zeros(1)}, os.path.join(cache_dir, "h12_768x768_1.pt"))
+
+        index = {
+            "version": CACHE_VERSION,
+            "entries": {
+                norm_src: {
+                    "filename": "img.bin",
+                    "hash": "h12abcdef012",
+                    "mtime": os.path.getmtime(src),
+                    "modeltype": "testmodel",
+                    "variants": {
+                        "512x512": {"cache_file": "h12_512x512"},
+                        "768x768": {"cache_file": "h12_768x768"},
+                    },
+                    "cache_version": CACHE_VERSION,
+                }
+            },
+            "hash_index": {},
+        }
+        with open(os.path.join(cache_dir, "cache.json"), "w") as f:
+            json.dump(index, f)
+
+        result = SmartDiskCache.gc_preview(cache_dir)
+        # Both variant .pts are referenced; no orphans.
+        assert result["orphan_count"] == 0
+
+    def test_gc_clean_keeps_all_variant_pts(self, tmp_path):
+        cache_dir = str(tmp_path / "c")
+        os.makedirs(cache_dir, exist_ok=True)
+        src_dir = tmp_path / "src"
+        src_dir.mkdir()
+        src = _create_source_file(src_dir, "img.bin", b"data")
+        norm_src = os.path.normpath(src)
+
+        torch.save({"data": torch.zeros(1)}, os.path.join(cache_dir, "h12_512x512_1.pt"))
+        torch.save({"data": torch.zeros(1)}, os.path.join(cache_dir, "h12_768x768_1.pt"))
+
+        index = {
+            "version": CACHE_VERSION,
+            "entries": {
+                norm_src: {
+                    "filename": "img.bin", "hash": "h12abcdef012",
+                    "mtime": os.path.getmtime(src),
+                    "modeltype": "testmodel",
+                    "variants": {
+                        "512x512": {"cache_file": "h12_512x512"},
+                        "768x768": {"cache_file": "h12_768x768"},
+                    },
+                    "cache_version": CACHE_VERSION,
+                }
+            },
+            "hash_index": {"h12abcdef012": [norm_src]},
+        }
+        with open(os.path.join(cache_dir, "cache.json"), "w") as f:
+            json.dump(index, f)
+
+        SmartDiskCache.gc_clean(cache_dir)
+
+        # Both variant .pts must survive.
+        assert os.path.isfile(os.path.join(cache_dir, "h12_512x512_1.pt"))
+        assert os.path.isfile(os.path.join(cache_dir, "h12_768x768_1.pt"))
+
+    def test_gc_clean_removes_all_variant_pts_when_source_dies(self, tmp_path):
+        cache_dir = str(tmp_path / "c")
+        os.makedirs(cache_dir, exist_ok=True)
+        # Reference a non-existent source.
+        torch.save({"data": torch.zeros(1)}, os.path.join(cache_dir, "h12_512x512_1.pt"))
+        torch.save({"data": torch.zeros(1)}, os.path.join(cache_dir, "h12_768x768_1.pt"))
+
+        dead_path = os.path.join(str(tmp_path), "no_such_source.bin")
+        index = {
+            "version": CACHE_VERSION,
+            "entries": {
+                dead_path: {
+                    "filename": "no_such_source.bin", "hash": "h12abcdef012",
+                    "mtime": 1.0,
+                    "modeltype": "testmodel",
+                    "variants": {
+                        "512x512": {"cache_file": "h12_512x512"},
+                        "768x768": {"cache_file": "h12_768x768"},
+                    },
+                    "cache_version": CACHE_VERSION,
+                }
+            },
+            "hash_index": {"h12abcdef012": [dead_path]},
+        }
+        with open(os.path.join(cache_dir, "cache.json"), "w") as f:
+            json.dump(index, f)
+
+        SmartDiskCache.gc_clean(cache_dir)
+
+        # Both variant .pts must be cleaned up.
+        assert not os.path.isfile(os.path.join(cache_dir, "h12_512x512_1.pt"))
+        assert not os.path.isfile(os.path.join(cache_dir, "h12_768x768_1.pt"))
+
+    def test_gc_handles_legacy_v2_index(self, tmp_path):
+        """gc helpers must auto-migrate v2 cache.json before walking."""
+        cache_dir = str(tmp_path / "c")
+        os.makedirs(cache_dir, exist_ok=True)
+        src_dir = tmp_path / "src"
+        src_dir.mkdir()
+        src = _create_source_file(src_dir, "img.bin", b"data")
+        norm_src = os.path.normpath(src)
+
+        torch.save({"data": torch.zeros(1)}, os.path.join(cache_dir, "h12abcd_1.pt"))
+        v2_index = {
+            "version": 2,
+            "entries": {
+                norm_src: {
+                    "filename": "img.bin", "hash": "h12abcdef012",
+                    "mtime": os.path.getmtime(src),
+                    "modeltype": "testmodel",
+                    "resolution": None,
+                    "cache_file": "h12abcd",
+                    "cache_version": 2,
+                }
+            },
+            "hash_index": {},
+        }
+        with open(os.path.join(cache_dir, "cache.json"), "w") as f:
+            json.dump(v2_index, f)
+
+        # gc_preview should not flag this as orphan.
+        result = SmartDiskCache.gc_preview(cache_dir)
+        assert result["orphan_count"] == 0

@@ -1,12 +1,14 @@
+import hashlib
 import itertools
+import json
 import math
 from random import Random
 from typing import Any
 
-import numpy as np
-
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
+
+import numpy as np
 
 
 class AspectBucketing(
@@ -112,9 +114,37 @@ class AspectBucketing(
         return possible_resolutions, possible_aspects
 
     def __get_bucket(self, rand: Random, h: int, w: int, target_resolution: int) -> tuple[int, int]:
-        aspect = h / w
+        return self.bucket_for_aspect(h / w, target_resolution)
+
+    def bucket_for_aspect(self, aspect: float, target_resolution: int) -> tuple[int, int]:
+        """Pure aspect-to-bucket assignment. No image read, no RNG.
+
+        Used by SmartDiskCache to re-derive bucket assignments from a cached
+        resolution string when the user changes target_resolutions, without
+        opening any source images.
+        """
         bucket_index = np.argmin(abs(self.bucket_aspects[target_resolution] - aspect))
         return self.bucket_resolutions[target_resolution][bucket_index]
+
+    def compute_bucket_method_hash(self) -> str:
+        """Hash of the post-start() bucketing config.
+
+        Stamped into ``cache_index['bucket_method']`` so a config change
+        (different target_resolutions, quantization, etc.) drives drift
+        recovery instead of silently serving stale .pt files. Must be called
+        after ``start()`` populates ``bucket_resolutions``.
+        """
+        payload = {
+            'method': 'aspect_v1',
+            'quantization': self.quantization,
+            'frame_dim_enabled': self.frame_dim_enabled,
+            'targets': sorted(self.bucket_resolutions.keys()),
+            'flattened': sorted(
+                [list(r) for r in self.flattened_possible_resolutions]
+            ),
+        }
+        encoded = json.dumps(payload, sort_keys=True, separators=(',', ':')).encode('utf-8')
+        return hashlib.sha256(encoded).hexdigest()[:16]
 
     def get_meta(self, variation: int, name: str) -> Any:
         if name == self.possible_resolutions_out_name:
