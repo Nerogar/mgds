@@ -135,7 +135,7 @@ class AspectBucketing(
         after ``start()`` populates ``bucket_resolutions``.
         """
         payload = {
-            'method': 'aspect_v1',
+            'method': 'aspect_v2',
             'quantization': self.quantization,
             'frame_dim_enabled': self.frame_dim_enabled,
             'targets': sorted(self.bucket_resolutions.keys()),

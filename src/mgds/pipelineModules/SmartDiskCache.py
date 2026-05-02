@@ -1159,11 +1159,16 @@ class SmartDiskCache(
         # bucket_method against what the upstream provider says now. On
         # drift, run the aspect-math recovery pass to register variants for
         # the new keys without re-decoding any source images.
+        #
+        # When stored is None (caches migrated from v2, or built before
+        # bucket_method stamping landed), we also run drift recovery — we
+        # can't assume the cache was built under the *current* config, and
+        # the recovery pass is cheap (O(N) aspect math, no image decode) on
+        # the happy path where keys already match.
         current_bucket_method = self._compute_bucket_method()
         stored_bucket_method = self.cache_index.get('bucket_method')
         bucket_drift = (
             current_bucket_method is not None
-            and stored_bucket_method is not None
             and stored_bucket_method != current_bucket_method
         )
 
