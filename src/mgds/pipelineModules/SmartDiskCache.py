@@ -316,7 +316,14 @@ class SmartDiskCache(
         which don't run per-entry validation. Reads the dict ordering set up
         by drift recovery (when applicable) so the first key is the one for
         the current bucket config.
+
+        Skipped under ``resolution_from_upstream`` — that mode resolves the
+        active key per-item at ``get_item`` time from upstream
+        ``crop_resolution`` so a stale dict ordering can't pin the wrong
+        variant for the session.
         """
+        if self.resolution_from_upstream:
+            return
         entries = self.cache_index.get('entries', {})
         for fp in filepaths:
             entry = entries.get(fp)
@@ -1766,6 +1773,10 @@ class SmartDiskCache(
                     agg_data = self._aggregate_cache.get((filepath, variation))
                     if agg_data is not None:
                         return agg_data
+
+                if self.resolution_from_upstream and filepath not in self._active_key_by_filepath:
+                    resolution = self._get_resolution_string(in_variation, in_index)
+                    self._active_key_by_filepath[filepath] = self._resolution_key(resolution)
 
                 cache_file = self._active_cache_file(filepath, cache_entry)
                 if cache_file is None:
