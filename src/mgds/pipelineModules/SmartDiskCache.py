@@ -54,6 +54,7 @@ class SmartDiskCache(
             modeltype: str = "",
             source_path_in_name: str | None = None,
             sourceless: bool = False,
+            tolerate_missing_source: bool = False,
             bucket_method_provider: Callable[[], str] | None = None,
             rebucket_provider: Callable[[float], list[str]] | None = None,
     ):
@@ -78,6 +79,13 @@ class SmartDiskCache(
         self.modeltype = modeltype
         self.source_path_in_name = source_path_in_name
         self.sourceless = sourceless
+        # When True, a missing source file is treated as "trust the cache
+        # entry as-is" instead of forcing a rebuild. Used by sidecar caches
+        # whose source path may legitimately not exist on disk (e.g. mask
+        # caches where the per-image mask file is optional and synthesised
+        # by an upstream pipeline module when absent). Once cached, those
+        # entries stay valid even though no source file is there to stat.
+        self.tolerate_missing_source = tolerate_missing_source
 
         # Optional providers for multi-resolution variant caching. Both default
         # to None for text caches and any data loader that doesn't construct
@@ -517,7 +525,13 @@ class SmartDiskCache(
             )
 
         if current_mtime is None:
-            return 'rebuild'
+            if not self.tolerate_missing_source:
+                return 'rebuild'
+            # Source file is gone but the cache has an entry; trust it.
+            # Reuse the equality-branch checks below by pinning current_mtime
+            # to the stored value so we don't fall through to the hash path
+            # (which would also fail without a readable file).
+            current_mtime = entry['mtime']
 
         variants = entry.get('variants', {})
         variant = variants.get(requested_key)
@@ -891,7 +905,12 @@ class SmartDiskCache(
             try:
                 current_mtime = os.path.getmtime(filepath)
             except OSError:
-                return False
+                if not self.tolerate_missing_source:
+                    return False
+                # Missing source under tolerate mode: cache entry is
+                # authoritative. Skip the mtime equality check; only the
+                # .pt existence check below still applies.
+                current_mtime = entry.get('mtime')
             if current_mtime != entry.get('mtime'):
                 return False
             cache_file = self._any_variant_cache_file(entry)
@@ -1480,12 +1499,20 @@ class SmartDiskCache(
                     try:
                         mtime = os.path.getmtime(filepath)
                     except OSError:
-                        return filepath, 'missing'
-
-                    try:
-                        file_hash = self._hash_file(filepath)
-                    except OSError:
-                        return filepath, 'hash_failed'
+                        if not self.tolerate_missing_source:
+                            return filepath, 'missing'
+                        # Synthetic source: no file to stat, no bytes to
+                        # hash. Use mtime=0 and a per-filepath synthetic
+                        # hash so distinct synthetic entries don't dedup
+                        # together (same content would, but the fallback
+                        # hash is intentionally derived from the path).
+                        mtime = 0.0
+                        file_hash = xxhash.xxh64(filepath.encode('utf-8')).hexdigest()
+                    else:
+                        try:
+                            file_hash = self._hash_file(filepath)
+                        except OSError:
+                            return filepath, 'hash_failed'
 
                     if self._try_dedup(filepath, file_hash, resolution, mtime):
                         entry = self.cache_index['entries'][filepath]
