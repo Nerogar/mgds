@@ -278,8 +278,16 @@ class SmartDiskCache(
     def _get_resolution_string(self, in_variation: int, in_index: int) -> str | None:
         if 'crop_resolution' not in self.aggregate_names and not self.resolution_from_upstream:
             return None
+        # Walk upstream at this module's current_variation, not the in-space
+        # variation we were called with. crop_resolution is variation-
+        # invariant by design, but the walker treats SingleVariation modules
+        # as strict — when an upstream cache (image cache, in the mask-cache
+        # case) has current_variation = N and we ask with variation 0, it
+        # raises and we silently lose resolution for every item. Aligning
+        # with current_variation keeps the path open across resumed runs.
+        variation = self.current_variation if self.current_variation >= 0 else in_variation
         try:
-            res = self._get_previous_item(in_variation, 'crop_resolution', in_index)
+            res = self._get_previous_item(variation, 'crop_resolution', in_index)
         except Exception:
             return None
         if res is not None:
