@@ -496,12 +496,16 @@ class SmartDiskCache(
         """Validate ``entry``'s variant for ``requested_key`` against disk.
 
         Returns one of:
-          - ``'valid'``: variant present and all .pt files exist.
+          - ``'valid'``: variant present, all .pt files exist, and each .pt
+            holds every name in ``split_names + aggregate_names``.
           - ``'missing_variant'``: entry is fine but doesn't have this
             resolution key — caller queues a rebuild for *just this variant*
             and keeps the entry plus its other variants intact.
-          - ``'missing_pt'``: variant key is registered but a .pt is missing.
-            Caller drops the broken variant and rebuilds it.
+          - ``'missing_pt'``: variant key is registered but a .pt is missing
+            from disk. Caller drops the broken variant and rebuilds it.
+          - ``'incomplete_schema'``: .pt exists but is missing one or more
+            required schema names (e.g. masked_training was enabled after
+            this .pt was originally cached). Caller rebuilds the variant.
           - ``'content_changed'``: source file changed; full entry rebuild.
           - ``'rebuild'``: source file unreadable.
         """
@@ -525,6 +529,8 @@ class SmartDiskCache(
             for v in range(variations):
                 if f"{cache_file}_{v + 1}.pt" not in self._existing_pt_files:
                     return 'missing_pt'
+            if not self._variant_schema_is_complete(variant, cache_file, variations):
+                return 'incomplete_schema'
             return 'valid'
 
         file_hash = self._hash_file(filepath)
@@ -540,7 +546,36 @@ class SmartDiskCache(
             if f"{cache_file}_{v + 1}.pt" not in self._existing_pt_files:
                 return 'missing_pt'
 
+        if not self._variant_schema_is_complete(variant, cache_file, variations):
+            return 'incomplete_schema'
+
         return 'valid'
+
+    def _variant_schema_is_complete(self, variant: dict, cache_file: str, variations: int) -> bool:
+        """True if every required schema name is present in this variant's .pt.
+
+        Uses an index-stored ``schema_keys`` list as a fast path so we avoid
+        re-reading every .pt on every validation pass; legacy variants
+        without that field get a one-time peek that populates it. Future
+        validations are then cheap dict comparisons.
+        """
+        required = set(self.split_names) | set(self.aggregate_names)
+        if not required:
+            return True
+        cached_keys = variant.get('schema_keys')
+        if cached_keys is not None:
+            return required.issubset(cached_keys)
+
+        # Legacy variant: peek the .pt once and stamp schema_keys.
+        real_pt = self._real_pt_path(cache_file, 0)
+        try:
+            data = torch.load(real_pt, weights_only=False, map_location='cpu')
+        except Exception:
+            return False
+        present = sorted(k for k in data if not k.startswith('__'))
+        with self._index_lock:
+            variant['schema_keys'] = present
+        return required.issubset(present)
 
     def _detect_cache_schema_drift(self) -> set[str]:
         """Return the currently-required names that aren't in on-disk cache files.
@@ -774,6 +809,19 @@ class SmartDiskCache(
                     skipped += 1
                 elif status not in ('augmented', 'no_entry', 'no_cache_file'):
                     failed.append((fp, status))
+                if status in ('augmented', 'already_consistent'):
+                    # Stamp every variant of this entry with the current
+                    # schema so future _validate_entry calls don't re-trigger
+                    # augmentation. Only entries whose augment actually
+                    # succeeded get stamped — failures stay flagged.
+                    entry = self.cache_index['entries'].get(fp)
+                    if entry is not None:
+                        new_keys = sorted(
+                            set(self.split_names) | set(self.aggregate_names)
+                        )
+                        with self._index_lock:
+                            for variant in (entry.get('variants') or {}).values():
+                                variant['schema_keys'] = new_keys
                 if count % 250 == 0:
                     self._torch_gc()
                 bar.update(1)
@@ -904,7 +952,10 @@ class SmartDiskCache(
                         'cache_version': CACHE_VERSION,
                     }
                     self.cache_index['entries'][filepath] = target_entry
-                target_entry['variants'][key] = {'cache_file': cache_file}
+                target_entry['variants'][key] = {
+                    'cache_file': cache_file,
+                    'schema_keys': variant.get('schema_keys'),
+                }
                 self._add_to_hash_index(file_hash, filepath)
                 return True
 
@@ -921,11 +972,28 @@ class SmartDiskCache(
             current_device,
     ):
         cache_file = self._make_cache_file(file_hash, resolution)
+        required_schema = set(self.split_names) | set(self.aggregate_names)
 
         for v in range(variations):
             pt_name = f"{cache_file}_{v + 1}.pt"
             if pt_name in self._existing_pt_files:
-                continue
+                # Reuse the existing .pt only if it actually contains every
+                # required schema name. An incomplete .pt (e.g. cached
+                # before masked_training was enabled) would otherwise be
+                # silently re-registered and quietly sentinel-padded at
+                # training time, dropping that sample from the loss.
+                if not required_schema:
+                    continue
+                real_pt = self._real_pt_path(cache_file, v)
+                try:
+                    existing = torch.load(real_pt, weights_only=False, map_location='cpu')
+                except Exception:
+                    existing = None
+                if isinstance(existing, dict):
+                    existing_keys = {k for k in existing if not k.startswith('__')}
+                    if required_schema.issubset(existing_keys):
+                        continue
+                # else: fall through to rewrite below.
 
             cache_data = {}
             with torch.no_grad():
@@ -977,7 +1045,10 @@ class SmartDiskCache(
                 entry['cache_version'] = CACHE_VERSION
                 if 'variants' not in entry:
                     entry['variants'] = {}
-            entry['variants'][key] = {'cache_file': cache_file}
+            entry['variants'][key] = {
+                'cache_file': cache_file,
+                'schema_keys': sorted(set(self.split_names) | set(self.aggregate_names)),
+            }
             self._add_to_hash_index(file_hash, filepath)
 
     def _get_source_path(self, in_variation: int, in_index: int) -> str | None:
@@ -1674,14 +1745,43 @@ class SmartDiskCache(
                         missing_for_file.append(name)
                 if missing_for_file:
                     # The schema-drift pass should have populated these, but a
-                    # per-file augmentation failure can still leave gaps. Borrow
-                    # the sentinel's zero-tensors for the missing keys so
-                    # downstream readers don't crash on a single bad file.
+                    # per-file augmentation failure (or a stale .pt that
+                    # survived a cache rebuild because its filename matched
+                    # an existing on-disk file) can still leave gaps. Borrow
+                    # the sentinel's zero-tensors for the missing keys.
+                    #
+                    # Critical: the sentinel is templated off some arbitrary
+                    # entry's spatial shape, which may not match this item's
+                    # orientation. Copying its tensors verbatim glues a
+                    # landscape mask onto a portrait latent (or vice versa)
+                    # and crashes torch.stack downstream when AspectBatchSorting
+                    # groups two items by their (matching) crop_resolution but
+                    # one of them was sentinel-filled at the wrong shape.
+                    # Resize tensor fields to match the item's actual spatial
+                    # dims, taking the ref from any already-loaded item tensor.
+                    ref_shape = None
+                    for v in item.values():
+                        if torch.is_tensor(v) and v.dim() >= 2:
+                            ref_shape = tuple(v.shape[-2:])
+                            break
                     sentinel = self._load_blank_sentinel()
                     if sentinel is not None:
                         for name in missing_for_file:
-                            if name in sentinel:
-                                item[name] = sentinel[name]
+                            if name not in sentinel:
+                                continue
+                            sval = sentinel[name]
+                            if (torch.is_tensor(sval)
+                                    and sval.dim() >= 2
+                                    and ref_shape is not None
+                                    and tuple(sval.shape[-2:]) != ref_shape):
+                                new_shape = tuple(sval.shape[:-2]) + ref_shape
+                                item[name] = torch.zeros(
+                                    new_shape,
+                                    dtype=sval.dtype,
+                                    device=sval.device,
+                                )
+                            else:
+                                item[name] = sval
                 if self.sourceless and '__concept_loss_weight' in cached:
                     item['concept'] = {
                         'loss_weight': cached['__concept_loss_weight'],
