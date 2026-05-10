@@ -2217,6 +2217,7 @@ class TestDriftRecoveryRebucket:
         sdc._index_lock = __import__('threading').Lock()
         sdc.rebucket_provider = rebucket_provider
         sdc.bucket_method_provider = None
+        sdc.resolution_from_upstream = False
         sdc._existing_pt_files = set()
         sdc._active_key_by_filepath = {}
         sdc.cache_index = {
@@ -2329,6 +2330,7 @@ class TestValidateEntryVariantStatus:
         sdc.split_names = []
         sdc.aggregate_names = []
         sdc.tolerate_missing_source = False
+        sdc.resolution_from_upstream = False
         sdc._existing_pt_files = set()
         return sdc
 

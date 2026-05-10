@@ -55,6 +55,7 @@ class SmartDiskCache(
             source_path_in_name: str | None = None,
             sourceless: bool = False,
             tolerate_missing_source: bool = False,
+            resolution_from_upstream: bool = False,
             bucket_method_provider: Callable[[], str] | None = None,
             rebucket_provider: Callable[[float], list[str]] | None = None,
     ):
@@ -86,6 +87,15 @@ class SmartDiskCache(
         # by an upstream pipeline module when absent). Once cached, those
         # entries stay valid even though no source file is there to stat.
         self.tolerate_missing_source = tolerate_missing_source
+        # Sidecar caches whose source path differs from the image path
+        # (e.g. mask cache keyed on -masklabel.png) must serve the variant
+        # matching the *image's* current bucket, not whatever variant key
+        # happens to come first in this entry's dict. With this flag,
+        # per-entry validation pulls crop_resolution from upstream and
+        # uses it to set the active variant key, and drift recovery is
+        # skipped (its variant-derived aspect can disagree with upstream
+        # when the sidecar's own aspect differs from the image's).
+        self.resolution_from_upstream = resolution_from_upstream
 
         # Optional providers for multi-resolution variant caching. Both default
         # to None for text caches and any data loader that doesn't construct
@@ -266,10 +276,14 @@ class SmartDiskCache(
             self._last_flush_time = now
 
     def _get_resolution_string(self, in_variation: int, in_index: int) -> str | None:
-        if 'crop_resolution' in self.aggregate_names:
+        if 'crop_resolution' not in self.aggregate_names and not self.resolution_from_upstream:
+            return None
+        try:
             res = self._get_previous_item(in_variation, 'crop_resolution', in_index)
-            if res is not None:
-                return f"{res[0]}x{res[1]}"
+        except Exception:
+            return None
+        if res is not None:
+            return f"{res[0]}x{res[1]}"
         return None
 
     def _make_cache_file(self, full_hash: str, resolution: str | None) -> str:
@@ -333,7 +347,7 @@ class SmartDiskCache(
 
         Pure arithmetic — no image decode. O(N) cheap work.
         """
-        if self.rebucket_provider is None:
+        if self.rebucket_provider is None or self.resolution_from_upstream:
             return
         entries = self.cache_index.get('entries')
         if not entries:
@@ -1433,13 +1447,18 @@ class SmartDiskCache(
                         # cached key lets us skip the AspectBucketing
                         # ->LoadImage chain that _get_resolution_string
                         # would otherwise trigger per cache hit.
-                        active_key = self._active_key_by_filepath.get(filepath)
-                        if active_key is None:
-                            active_key = next(
-                                iter(entry.get('variants', {}).keys()),
-                                NO_RESOLUTION_KEY,
-                            )
+                        if self.resolution_from_upstream:
+                            resolution = self._get_resolution_string(0, in_index)
+                            active_key = self._resolution_key(resolution)
                             self._active_key_by_filepath[filepath] = active_key
+                        else:
+                            active_key = self._active_key_by_filepath.get(filepath)
+                            if active_key is None:
+                                active_key = next(
+                                    iter(entry.get('variants', {}).keys()),
+                                    NO_RESOLUTION_KEY,
+                                )
+                                self._active_key_by_filepath[filepath] = active_key
                         mtime = self._source_mtimes.get(filepath)
                         status = self._validate_entry(filepath, entry, active_key, variations, mtime)
                         if status == 'valid':
