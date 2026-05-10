@@ -2326,6 +2326,9 @@ class TestValidateEntryVariantStatus:
     def _make_sdc(self):
         sdc = SmartDiskCache.__new__(SmartDiskCache)
         sdc.modeltype = "testmodel"
+        sdc.split_names = []
+        sdc.aggregate_names = []
+        sdc.tolerate_missing_source = False
         sdc._existing_pt_files = set()
         return sdc
 
