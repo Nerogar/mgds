@@ -58,6 +58,7 @@ class SmartDiskCache(
             resolution_from_upstream: bool = False,
             bucket_method_provider: Callable[[], str] | None = None,
             rebucket_provider: Callable[[float], list[str]] | None = None,
+            extra_watched_paths_in_names: list[str] | None = None,
     ):
         super().__init__()
         self.cache_dir = cache_dir
@@ -105,6 +106,18 @@ class SmartDiskCache(
         # at all).
         self.bucket_method_provider = bucket_method_provider
         self.rebucket_provider = rebucket_provider
+
+        # Additional per-sample sidecar in-name fields whose resolved paths
+        # should be watched alongside ``source_path_in_name``. Touching one of
+        # these files (e.g. a -masklabel.png sidecar that controls the
+        # ``latent_mask`` baked into the .pt) invalidates the entry. Empty by
+        # default: every existing caller is a no-op.
+        self.extra_watched_paths_in_names = list(extra_watched_paths_in_names or [])
+
+        # filepath -> {in_name: normpath} populated during __refresh_cache and
+        # read by _validate_entry / _build_cache_entry / _try_dedup so build
+        # threads don't need to walk the upstream pipeline themselves.
+        self._extra_paths_by_filepath: dict[str, dict[str, str]] = {}
 
         self.group_variations = {}
         self.group_indices = {}
@@ -501,13 +514,20 @@ class SmartDiskCache(
 
     def _compute_watched_fingerprints(self, entries: dict) -> dict[str, tuple[int, float]] | None:
         """Per-parent-dir fingerprint of (count, mtime_sum) restricted to the
-        basenames present in `entries`. Unrelated files in the same dir don't
-        perturb the fingerprint, so sidecar caption/mask touches won't
-        invalidate the fast path. Returns None if any directory is unreachable.
+        basenames present in `entries`, plus any sidecar paths each entry
+        recorded under ``sidecar_mtimes``. Unrelated files in the same dir
+        don't perturb the fingerprint. Returns None if any directory is
+        unreachable.
         """
         by_parent: dict[str, set[str]] = {}
-        for fp in entries:
+        for fp, entry in entries.items():
             by_parent.setdefault(os.path.dirname(fp), set()).add(os.path.basename(fp))
+            sidecar_paths = entry.get('sidecar_mtimes') if isinstance(entry, dict) else None
+            if sidecar_paths:
+                for sidecar_path in sidecar_paths:
+                    by_parent.setdefault(
+                        os.path.dirname(sidecar_path), set()
+                    ).add(os.path.basename(sidecar_path))
 
         fp_map: dict[str, tuple[int, float]] = {}
         for parent, names in by_parent.items():
@@ -566,6 +586,8 @@ class SmartDiskCache(
         variant = variants.get(requested_key)
 
         if current_mtime == entry['mtime']:
+            if not self._check_sidecars(filepath, entry):
+                return 'content_changed'
             if variant is None:
                 return 'missing_variant'
             cache_file = variant['cache_file']
@@ -581,6 +603,9 @@ class SmartDiskCache(
             return 'content_changed'
 
         entry['mtime'] = current_mtime
+
+        if not self._check_sidecars(filepath, entry):
+            return 'content_changed'
 
         if variant is None:
             return 'missing_variant'
@@ -890,11 +915,12 @@ class SmartDiskCache(
         Skips the expensive per-file validation loop when nothing has changed.
         Returns True if cache appears valid.
 
-        The fingerprint is restricted to source basenames in the cache index, so
-        unrelated sidecar files (.txt captions, masks, .npz) added or touched in
-        the same parent directory don't invalidate the fast path. Renames within
-        a directory that don't shift count or mtime sum are caught by the spot
-        check downstream.
+        The fingerprint is restricted to source basenames in the cache index
+        plus any explicitly-watched sidecars (e.g. -masklabel.png paths recorded
+        on each entry's ``sidecar_mtimes``). Unrelated files in the same
+        directory don't perturb the fingerprint. Renames within a directory
+        that don't shift count or mtime sum are caught by the spot check
+        downstream.
         """
         last_validated = self.cache_index.get('last_validated')
         if last_validated is None:
@@ -908,6 +934,14 @@ class SmartDiskCache(
         if stored_fp_raw is None:
             # Legacy cache without fingerprint — force a full pass so the
             # fingerprint gets written for next time.
+            return False
+
+        # Force migration: sidecar watching is configured but some entries
+        # pre-date the feature and have no recorded sidecar state. Fall
+        # through to slow validation so _check_sidecars can populate it.
+        if self.extra_watched_paths_in_names and any(
+                ('sidecar_mtimes' not in e) for e in entries.values()
+        ):
             return False
         current_fp = self._compute_watched_fingerprints(entries)
         if current_fp is None:
@@ -991,6 +1025,9 @@ class SmartDiskCache(
 
                 target_entry = self.cache_index['entries'].get(filepath)
                 if target_entry is None:
+                    sidecar_mtimes, sidecar_hashes = self._compute_sidecar_state(
+                        self._extra_paths_by_filepath.get(filepath, {})
+                    )
                     target_entry = {
                         'filename': os.path.basename(filepath),
                         'hash': file_hash,
@@ -998,6 +1035,8 @@ class SmartDiskCache(
                         'modeltype': self.modeltype,
                         'variants': {},
                         'cache_version': CACHE_VERSION,
+                        'sidecar_mtimes': sidecar_mtimes,
+                        'sidecar_hashes': sidecar_hashes,
                     }
                     self.cache_index['entries'][filepath] = target_entry
                 target_entry['variants'][key] = {
@@ -1071,6 +1110,9 @@ class SmartDiskCache(
             with self._index_lock:
                 self._existing_pt_files.add(pt_name)
 
+        sidecar_mtimes, sidecar_hashes = self._compute_sidecar_state(
+            self._extra_paths_by_filepath.get(filepath, {})
+        )
         key = self._resolution_key(resolution)
         with self._index_lock:
             entry = self.cache_index['entries'].get(filepath)
@@ -1082,6 +1124,8 @@ class SmartDiskCache(
                     'modeltype': self.modeltype,
                     'variants': {},
                     'cache_version': CACHE_VERSION,
+                    'sidecar_mtimes': sidecar_mtimes,
+                    'sidecar_hashes': sidecar_hashes,
                 }
                 self.cache_index['entries'][filepath] = entry
             else:
@@ -1091,6 +1135,8 @@ class SmartDiskCache(
                 entry['mtime'] = mtime
                 entry['modeltype'] = self.modeltype
                 entry['cache_version'] = CACHE_VERSION
+                entry['sidecar_mtimes'] = sidecar_mtimes
+                entry['sidecar_hashes'] = sidecar_hashes
                 if 'variants' not in entry:
                     entry['variants'] = {}
             entry['variants'][key] = {
@@ -1103,6 +1149,127 @@ class SmartDiskCache(
         if self.source_path_in_name:
             return self._get_previous_item(0, self.source_path_in_name, in_index)
         return None
+
+    def _get_extra_paths(self, in_index: int) -> dict[str, str]:
+        """Resolve each watched sidecar in-name to its normpath'd value.
+
+        Names that resolve to None / empty string are omitted, so callers that
+        iterate the result see only sidecars the upstream pipeline actually
+        produced for this index. Existence on disk is not checked here — that's
+        a per-validation concern in _check_sidecars.
+        """
+        if not self.extra_watched_paths_in_names:
+            return {}
+        out: dict[str, str] = {}
+        for name in self.extra_watched_paths_in_names:
+            try:
+                value = self._get_previous_item(0, name, 0 if in_index is None else in_index)
+            except Exception:
+                continue
+            if value is None or value == '':
+                continue
+            out[name] = os.path.normpath(value)
+        return out
+
+    def _compute_sidecar_state(
+            self, extra_paths: dict[str, str]
+    ) -> tuple[dict[str, float], dict[str, str]]:
+        """Snapshot per-sidecar (mtime, hash) for entry-build time.
+
+        Missing sidecars are omitted from both dicts — their absence is itself
+        the recorded state. _check_sidecars treats a missing entry as "stored
+        missing"; if the file appears later, the (stored missing, currently
+        present) case triggers a rebuild.
+        """
+        mtimes: dict[str, float] = {}
+        hashes: dict[str, str] = {}
+        for path in extra_paths.values():
+            try:
+                mtime = os.path.getmtime(path)
+            except OSError:
+                continue
+            try:
+                file_hash = self._hash_file(path)
+            except OSError:
+                continue
+            mtimes[path] = mtime
+            hashes[path] = file_hash
+        return mtimes, hashes
+
+    def _check_sidecars(self, filepath: str, entry: dict) -> bool:
+        """Validate this entry's stored sidecar state against on-disk truth.
+
+        Returns True if every watched sidecar is consistent with what was on
+        disk when the entry was built (or freshly populated on first read for
+        a legacy entry that lacks the metadata). Returns False to signal a
+        rebuild — sidecar added, removed, or content changed.
+
+        Mirrors the primary-source mtime→hash escalation in _validate_entry,
+        so a touch-only mtime change doesn't trigger a VAE re-encode when the
+        bytes haven't actually changed.
+        """
+        if not self.extra_watched_paths_in_names:
+            return True
+
+        expected_paths = self._extra_paths_by_filepath.get(filepath, {})
+        if not expected_paths:
+            # No sidecars resolved for this sample. Treat as "all watched
+            # sidecars currently absent" and compare against the stored state
+            # the same way (entry may still claim sidecars exist).
+            pass
+
+        stored_mtimes = entry.get('sidecar_mtimes')
+        stored_hashes = entry.get('sidecar_hashes')
+
+        # Backward-compat: legacy entries pre-date this feature. Populate the
+        # state from current disk and treat as valid this run.
+        if stored_mtimes is None or stored_hashes is None:
+            mtimes, hashes = self._compute_sidecar_state(expected_paths)
+            with self._index_lock:
+                entry['sidecar_mtimes'] = mtimes
+                entry['sidecar_hashes'] = hashes
+            return True
+
+        watched_paths = set(expected_paths.values())
+        for path in watched_paths | set(stored_mtimes.keys()):
+            current_mtime = self._source_mtimes.get(path)
+            if current_mtime is None:
+                try:
+                    current_mtime = os.path.getmtime(path)
+                except OSError:
+                    current_mtime = None
+
+            stored_mtime = stored_mtimes.get(path)
+            stored_hash = stored_hashes.get(path)
+
+            # Sidecar add/remove cases.
+            if stored_mtime is None and current_mtime is None:
+                continue
+            if stored_mtime is None and current_mtime is not None:
+                # File appeared since last cache build.
+                return False
+            if stored_mtime is not None and current_mtime is None:
+                # File deleted since last cache build.
+                return False
+
+            # Both present.
+            if current_mtime == stored_mtime:
+                continue
+
+            # mtime drift — fall back to hashing.
+            try:
+                current_hash = self._hash_file(path)
+            except OSError:
+                return False
+            if current_hash != stored_hash:
+                return False
+
+            # Same content, refresh stored mtime so the next fast-path
+            # fingerprint pass matches.
+            with self._index_lock:
+                stored_mtimes[path] = current_mtime
+
+        return True
 
     def __init_variations(self):
         if self.variations_in_name is not None:
@@ -1271,6 +1438,7 @@ class SmartDiskCache(
         self._source_path_cache = {}
         self._aggregate_cache = {}
         self._active_key_by_filepath = {}
+        self._extra_paths_by_filepath = {}
 
         # Bucket-method drift: the AspectBucketing config may have changed
         # since the cache was last validated (e.g. user edited
@@ -1324,6 +1492,7 @@ class SmartDiskCache(
         # Resolve the source filepaths this call will deliver.
         required_filepaths: set[str] = set()
         index_to_filepath: dict[int, str] = {}
+        required_sidecar_paths: set[str] = set()
         for group_key in self.group_variations:
             for in_index in self.group_indices[group_key]:
                 filepath = self._get_source_path(0, in_index)
@@ -1332,6 +1501,11 @@ class SmartDiskCache(
                 filepath = os.path.normpath(filepath)
                 index_to_filepath[in_index] = filepath
                 required_filepaths.add(filepath)
+                if self.extra_watched_paths_in_names:
+                    extras = self._get_extra_paths(in_index)
+                    if extras:
+                        self._extra_paths_by_filepath[filepath] = extras
+                        required_sidecar_paths.update(extras.values())
 
         # --- Session skip path ---
         # If every required filepath was already validated earlier in this
@@ -1405,7 +1579,9 @@ class SmartDiskCache(
         # firing one os.path.getmtime syscall per file. Skipped under trust mode
         # since we won't be calling _validate_entry at all.
         if not skip_validation:
-            self._source_mtimes = self._bulk_stat_source_files(required_filepaths)
+            self._source_mtimes = self._bulk_stat_source_files(
+                required_filepaths | required_sidecar_paths
+            )
         else:
             self._source_mtimes = {}
 

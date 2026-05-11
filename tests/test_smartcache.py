@@ -96,6 +96,7 @@ def _build_smart_pipeline(
     batch_size=1,
     seed=42,
     dummy_module_cls=DummyDataModule,
+    extra_watched_paths_in_names=None,
 ):
     """Build MGDS pipeline: DummyDataModule -> SmartDiskCache -> Output."""
     cache_dir = str(tmp_path / "cache")
@@ -113,6 +114,7 @@ def _build_smart_pipeline(
         group_enabled_in_name=group_enabled_in_name,
         modeltype=modeltype,
         source_path_in_name=source_path_in_name,
+        extra_watched_paths_in_names=extra_watched_paths_in_names,
     )
 
     all_output_names = split_names + aggregate_names
@@ -1918,6 +1920,200 @@ class TestWatchedFingerprint:
 
 
 # ---------------------------------------------------------------------------
+# Sidecar invalidation — extra_watched_paths_in_names integration tests
+# ---------------------------------------------------------------------------
+
+class TestSidecarValidation:
+    """_check_sidecars + extra_watched_paths_in_names: an entry rebuilds when
+    a watched sidecar (e.g. -masklabel.png) is added, removed, or content-
+    edited, but a touch-only mtime drift with unchanged bytes does NOT
+    rebuild."""
+
+    def _make_cache(self, tmp_path, watched=("mask_path",)):
+        cache_dir = str(tmp_path / "cache")
+        os.makedirs(cache_dir, exist_ok=True)
+        sdc = SmartDiskCache.__new__(SmartDiskCache)
+        sdc.cache_dir = cache_dir
+        sdc._real_cache_dir = os.path.realpath(cache_dir)
+        sdc.extra_watched_paths_in_names = list(watched)
+        sdc._extra_paths_by_filepath = {}
+        sdc._source_mtimes = {}
+        import threading as _t
+        sdc._index_lock = _t.Lock()
+        return sdc
+
+    def test_no_sidecars_configured_is_always_valid(self, tmp_path):
+        sdc = self._make_cache(tmp_path, watched=())
+        entry = {"sidecar_mtimes": None, "sidecar_hashes": None}
+        assert sdc._check_sidecars("anything", entry) is True
+
+    def test_legacy_entry_populates_state_and_returns_valid(self, tmp_path):
+        sdc = self._make_cache(tmp_path)
+        sidecar = _create_source_file(tmp_path, "a-masklabel.png", b"mask_v1")
+        primary = "fake.png"
+        sdc._extra_paths_by_filepath[primary] = {"mask_path": sidecar}
+        entry = {}  # legacy: missing sidecar_mtimes/sidecar_hashes
+        assert sdc._check_sidecars(primary, entry) is True
+        assert sidecar in entry["sidecar_mtimes"]
+        assert sidecar in entry["sidecar_hashes"]
+
+    def test_matching_mtime_returns_valid_without_hashing(self, tmp_path):
+        sdc = self._make_cache(tmp_path)
+        sidecar = _create_source_file(tmp_path, "a-masklabel.png", b"mask_v1")
+        primary = "fake.png"
+        sdc._extra_paths_by_filepath[primary] = {"mask_path": sidecar}
+        mtime = os.path.getmtime(sidecar)
+        entry = {
+            "sidecar_mtimes": {sidecar: mtime},
+            "sidecar_hashes": {sidecar: "dont_care_not_consulted"},
+        }
+        assert sdc._check_sidecars(primary, entry) is True
+
+    def test_mtime_drift_hash_match_refreshes_mtime_and_stays_valid(self, tmp_path):
+        sdc = self._make_cache(tmp_path)
+        sidecar = _create_source_file(tmp_path, "a-masklabel.png", b"mask_v1")
+        primary = "fake.png"
+        sdc._extra_paths_by_filepath[primary] = {"mask_path": sidecar}
+        stale_mtime = os.path.getmtime(sidecar) - 100.0  # pretend cached at older mtime
+        real_hash = sdc._hash_file(sidecar)
+        entry = {
+            "sidecar_mtimes": {sidecar: stale_mtime},
+            "sidecar_hashes": {sidecar: real_hash},
+        }
+        assert sdc._check_sidecars(primary, entry) is True
+        assert entry["sidecar_mtimes"][sidecar] != stale_mtime, \
+            "stored mtime should be refreshed to current"
+
+    def test_content_change_invalidates(self, tmp_path):
+        sdc = self._make_cache(tmp_path)
+        sidecar = _create_source_file(tmp_path, "a-masklabel.png", b"mask_v1")
+        primary = "fake.png"
+        sdc._extra_paths_by_filepath[primary] = {"mask_path": sidecar}
+        old_mtime = os.path.getmtime(sidecar)
+        old_hash = sdc._hash_file(sidecar)
+        time.sleep(0.05)
+        with open(sidecar, "wb") as f:
+            f.write(b"mask_v2_different_bytes")  # changes content + mtime
+        entry = {
+            "sidecar_mtimes": {sidecar: old_mtime},
+            "sidecar_hashes": {sidecar: old_hash},
+        }
+        assert sdc._check_sidecars(primary, entry) is False
+
+    def test_sidecar_added_invalidates(self, tmp_path):
+        sdc = self._make_cache(tmp_path)
+        sidecar = _create_source_file(tmp_path, "a-masklabel.png", b"new_mask")
+        primary = "fake.png"
+        sdc._extra_paths_by_filepath[primary] = {"mask_path": sidecar}
+        # Entry was cached without a sidecar present: stored dicts are empty.
+        entry = {"sidecar_mtimes": {}, "sidecar_hashes": {}}
+        assert sdc._check_sidecars(primary, entry) is False
+
+    def test_sidecar_removed_invalidates(self, tmp_path):
+        sdc = self._make_cache(tmp_path)
+        # Entry recorded a sidecar that no longer exists on disk.
+        primary = "fake.png"
+        missing_path = str(tmp_path / "deleted-masklabel.png")
+        sdc._extra_paths_by_filepath[primary] = {"mask_path": missing_path}
+        entry = {
+            "sidecar_mtimes": {missing_path: 100.0},
+            "sidecar_hashes": {missing_path: "deadbeef"},
+        }
+        assert sdc._check_sidecars(primary, entry) is False
+
+    def test_end_to_end_sidecar_edit_invalidates_fast_path(self, tmp_path, capsys):
+        """Touching the bytes of a watched sidecar must fail the fast-path
+        fingerprint and force re-validation."""
+        src_dir = tmp_path / "sources"
+        src_dir.mkdir()
+        paths = [_create_source_file(src_dir, f"i{i}.bin", f"src_{i}".encode()) for i in range(3)]
+        # Create sidecars next to each primary file.
+        sidecars = [_create_source_file(src_dir, f"i{i}-masklabel.png", f"mask_{i}".encode()) for i in range(3)]
+        tensors = _make_tensors(3, seed=99)
+        ds, cache_dir, _ = _build_smart_pipeline(
+            tmp_path,
+            concepts=[{"name": "A", "path": "dummy"}],
+            dummy_data={"latent": tensors, "image_path": paths, "mask_path": sidecars},
+            dummy_length=len(paths),
+            split_names=["latent"], aggregate_names=[],
+            modeltype="testmodel", source_path_in_name="image_path",
+            extra_watched_paths_in_names=["mask_path"],
+        )
+        _drain(ds)
+        capsys.readouterr()
+
+        idx = _read_cache_json(cache_dir)
+        # Find the entry for the primary path matching paths[0].
+        primary0 = os.path.normpath(paths[0])
+        entry0 = idx["entries"].get(primary0) or idx["entries"].get(paths[0])
+        assert entry0 is not None, "entry for paths[0] missing"
+        assert "sidecar_mtimes" in entry0, "first run should stamp sidecar_mtimes"
+        sidecar0 = os.path.normpath(sidecars[0])
+        assert sidecar0 in entry0["sidecar_mtimes"], \
+            f"expected {sidecar0} in {list(entry0['sidecar_mtimes'].keys())}"
+
+        time.sleep(0.05)
+        with open(sidecars[0], "wb") as f:
+            f.write(b"mask_0_edited_bytes")  # real content change
+
+        ds2, _, _ = _build_smart_pipeline(
+            tmp_path,
+            concepts=[{"name": "A", "path": "dummy"}],
+            dummy_data={"latent": tensors, "image_path": paths, "mask_path": sidecars},
+            dummy_length=len(paths),
+            split_names=["latent"], aggregate_names=[],
+            modeltype="testmodel", source_path_in_name="image_path",
+            extra_watched_paths_in_names=["mask_path"],
+        )
+        _drain(ds2)
+        out = capsys.readouterr().out
+        assert "Fast validation passed" not in out, \
+            "sidecar content change must invalidate the fast path"
+
+    def test_end_to_end_sidecar_touch_no_content_change_keeps_validity(self, tmp_path, capsys):
+        """Touch-only mtime drift on a watched sidecar must NOT rebuild the
+        entry — mirrors the primary-source mtime→hash escalation."""
+        src_dir = tmp_path / "sources"
+        src_dir.mkdir()
+        paths = [_create_source_file(src_dir, f"i{i}.bin", f"src_{i}".encode()) for i in range(3)]
+        sidecars = [_create_source_file(src_dir, f"i{i}-masklabel.png", f"mask_{i}".encode()) for i in range(3)]
+        tensors = _make_tensors(3, seed=99)
+        ds, cache_dir, _ = _build_smart_pipeline(
+            tmp_path,
+            concepts=[{"name": "A", "path": "dummy"}],
+            dummy_data={"latent": tensors, "image_path": paths, "mask_path": sidecars},
+            dummy_length=len(paths),
+            split_names=["latent"], aggregate_names=[],
+            modeltype="testmodel", source_path_in_name="image_path",
+            extra_watched_paths_in_names=["mask_path"],
+        )
+        _drain(ds)
+        idx_before = _read_cache_json(cache_dir)
+        capsys.readouterr()
+
+        time.sleep(0.05)
+        os.utime(sidecars[0], None)  # mtime bumps but bytes unchanged
+
+        ds2, _, _ = _build_smart_pipeline(
+            tmp_path,
+            concepts=[{"name": "A", "path": "dummy"}],
+            dummy_data={"latent": tensors, "image_path": paths, "mask_path": sidecars},
+            dummy_length=len(paths),
+            split_names=["latent"], aggregate_names=[],
+            modeltype="testmodel", source_path_in_name="image_path",
+            extra_watched_paths_in_names=["mask_path"],
+        )
+        _drain(ds2)
+        idx_after = _read_cache_json(cache_dir)
+
+        # Variants/cache_files must be unchanged across runs (no rebuild).
+        for fp, entry_before in idx_before["entries"].items():
+            entry_after = idx_after["entries"][fp]
+            assert entry_before["variants"] == entry_after["variants"], \
+                f"{fp}: touch-only sidecar drift must not rebuild"
+
+
+# ---------------------------------------------------------------------------
 # Validation benchmarks — record timings for the headline speedups.
 # Run with `pytest -k Benchmark -s` to see numbers.
 # ---------------------------------------------------------------------------
@@ -2327,11 +2523,16 @@ class TestValidateEntryVariantStatus:
     def _make_sdc(self):
         sdc = SmartDiskCache.__new__(SmartDiskCache)
         sdc.modeltype = "testmodel"
+        # Empty schema so _variant_schema_is_complete short-circuits to True
+        # without needing cache_dir or a real .pt to peek.
         sdc.split_names = []
         sdc.aggregate_names = []
         sdc.tolerate_missing_source = False
         sdc.resolution_from_upstream = False
         sdc._existing_pt_files = set()
+        sdc.extra_watched_paths_in_names = []
+        sdc._extra_paths_by_filepath = {}
+        sdc._source_mtimes = {}
         return sdc
 
     def test_missing_variant_when_key_not_present(self):
