@@ -2456,8 +2456,11 @@ class TestDriftRecoveryRebucket:
         assert "512x512" in entry["variants"]
         # New key first (so next-iter picks it).
         assert next(iter(entry["variants"].keys())) == "768x768"
-        # Active key pinned to first new key.
-        assert sdc._active_key_by_filepath["fake/img1.png"] == "768x768"
+        # Active key is no longer pinned by drift recovery — variant
+        # selection runs per-epoch via _get_resolution_string in
+        # __refresh_cache / get_item. Asserting empty rather than
+        # presence catches accidental re-introduction of the pin.
+        assert sdc._active_key_by_filepath == {}
 
     def test_no_collision_leaves_variant_unfilled(self, tmp_path):
         """If the rebucketed key has no matching .pt on disk, the variant
@@ -2478,9 +2481,9 @@ class TestDriftRecoveryRebucket:
         assert "1024x768" not in entry["variants"]
         # Original variant preserved.
         assert "512x512" in entry["variants"]
-        # Active key still pinned to the new key (so per-index loop sees
-        # 'missing_variant' and queues a rebuild).
-        assert sdc._active_key_by_filepath["fake/img1.png"] == "1024x768"
+        # No pin — __refresh_cache's per-epoch resolve will compute the
+        # active key from upstream and see 'missing_variant' on its own.
+        assert sdc._active_key_by_filepath == {}
 
     def test_no_provider_disables_drift(self, tmp_path):
         """When rebucket_provider is None (text caches), drift recovery is
@@ -2512,8 +2515,10 @@ class TestDriftRecoveryRebucket:
         entry = sdc.cache_index["entries"]["fake/img1.png"]
         assert "768x768" in entry["variants"]
         assert "1024x1024" in entry["variants"]
-        # Active = first new key.
-        assert sdc._active_key_by_filepath["fake/img1.png"] == "768x768"
+        # Reordering preserved (new keys first, used by text-cache callers'
+        # any-variant fallback), but no active-key pinning.
+        assert list(entry["variants"].keys())[:2] == ["768x768", "1024x1024"]
+        assert sdc._active_key_by_filepath == {}
 
 
 class TestValidateEntryVariantStatus:
@@ -2773,3 +2778,553 @@ class TestGCWalksVariants:
         # gc_preview should not flag this as orphan.
         result = SmartDiskCache.gc_preview(cache_dir)
         assert result["orphan_count"] == 0
+
+
+class TestPerIndexAggregateCache:
+    """The same source file can appear at multiple in_index values when
+    it's referenced across concepts or under repeats. AspectBucketing's
+    rand.choice is seeded on (variation, index), so each in_index resolves
+    to a different target — and therefore a different variant key. The
+    aggregate cache must keep those entries distinct so AspectBatchSorting's
+    sort-time view stays in sync with split-fetch's per-in_index lookup.
+
+    Repros the bug we hit on real training: a SoReal! image at in_idx=15249
+    resolved to '1024x576' and a different in_idx for the same file
+    resolved to '704x384'; a 2-tuple agg cache key let the second write
+    clobber the first, sort then bucketed by the wrong crop_resolution,
+    and torch.stack failed when the per-in_index .pt's latent shape
+    didn't match.
+    """
+
+    FP_A = r'F:\Datasets\test\fileA.jpg'  # has both variants — like the SoReal! file at 4032x2268
+    FP_B = r'F:\Datasets\test\fileB.jpg'  # only the 512 variant — like the pinterest file at 1200x675
+
+    # Per-in_index variant resolution. Mirrors what _get_resolution_string
+    # would walk upstream and compute for each (variation, in_index): rand
+    # picks a target, bucket_for_aspect maps to a key.
+    PER_INDEX_RESOLUTION = {
+        100: '1024x576',  # fp_A's first occurrence — rand picks 768
+        200: '704x384',   # fp_A's second occurrence (same file, different concept) — rand picks 512
+        300: '704x384',   # fp_B — rand picks 512 (variant exists)
+    }
+
+    # The .pt's stored aggregate values per cache_file. Mirrors what
+    # torch.load on each variant's .pt would return.
+    PT_CONTENTS = {
+        'hashA_1024x576': {'crop_resolution': (1024, 576), 'image_path': FP_A},
+        'hashA_704x384': {'crop_resolution': (704, 384), 'image_path': FP_A},
+        'hashB_704x384': {'crop_resolution': (704, 384), 'image_path': FP_B},
+    }
+
+    def _make_sdc(self):
+        """Build a SmartDiskCache primed with the multi-in_index dataset
+        shape, no executor/pipeline/disk required."""
+        sdc = SmartDiskCache.__new__(SmartDiskCache)
+        sdc.cache_dir = '/fake/cache'
+        sdc._real_cache_dir = '/fake/cache'
+        sdc.modeltype = 'testmodel'
+        sdc.split_names = ['latent_image']
+        sdc.aggregate_names = ['crop_resolution', 'image_path']
+        sdc.sourceless = False
+        sdc.resolution_from_upstream = False
+        sdc.aspect_bucketing = object()  # truthy sentinel; per_item_key gate
+        sdc.bucket_method_provider = None
+        sdc.rebucket_provider = None
+        sdc.tolerate_missing_source = False
+        sdc.extra_watched_paths_in_names = []
+        sdc._extra_paths_by_filepath = {}
+        sdc._existing_pt_files = {
+            f'{cf}_1.pt' for cf in self.PT_CONTENTS
+        }
+        sdc._aggregate_cache = {}
+        sdc._active_key_by_filepath = {}
+        # group setup: one concept with 3 samples (fp_A at idx 100, fp_A at
+        # idx 200, fp_B at idx 300). variations=1, balancing=3 so
+        # group_output_samples=3.
+        sdc.group_variations = {'g0': 1}
+        sdc.group_indices = {'g0': [100, 200, 300]}
+        sdc.group_output_samples = {'g0': 3}
+        sdc.group_full_indices = {'g0': [100, 200, 300]}
+        sdc.group_balancing = {'g0': 3}
+        sdc.group_balancing_strategy = {'g0': 'REPEATS'}
+        sdc._source_path_cache = {100: self.FP_A, 200: self.FP_A, 300: self.FP_B}
+        sdc.cache_index = {
+            'entries': {
+                self.FP_A: {
+                    'hash': 'hashAfullhash',
+                    'modeltype': 'testmodel',
+                    'mtime': 1.0,
+                    'original_resolution': [4032, 2268],
+                    'variants': {
+                        '1024x576': {'cache_file': 'hashA_1024x576'},
+                        '704x384': {'cache_file': 'hashA_704x384'},
+                    },
+                },
+                self.FP_B: {
+                    'hash': 'hashBfullhash',
+                    'modeltype': 'testmodel',
+                    'mtime': 1.0,
+                    'original_resolution': [1200, 675],
+                    'variants': {
+                        '704x384': {'cache_file': 'hashB_704x384'},
+                    },
+                },
+            },
+        }
+        # PipelineModule's __local_cache machinery isn't initialised when
+        # we __new__ past the constructor; SmartDiskCache.get_item never
+        # walks upstream for split paths (we patch _get_resolution_string
+        # below), so we can skip it.
+        return sdc
+
+    def _patch_upstream(self, sdc, monkeypatch):
+        """Stand in for _get_resolution_string and torch.load."""
+        def fake_res(in_variation, in_index):
+            return self.PER_INDEX_RESOLUTION.get(in_index)
+        monkeypatch.setattr(sdc, '_get_resolution_string', fake_res)
+        # _real_pt_path uses _real_cache_dir + cache_file name. Capture
+        # which path was loaded so we can assert later.
+        loaded = []
+        def fake_load(path, **kwargs):
+            loaded.append(path)
+            # extract the cache_file from the path ('/fake/cache/hashA_1024x576_1.pt')
+            name = os.path.basename(path).replace('_1.pt', '')
+            return self.PT_CONTENTS[name]
+        monkeypatch.setattr('mgds.pipelineModules.SmartDiskCache.torch.load', fake_load)
+        return loaded
+
+    def test_load_aggregate_cache_keys_per_in_index(self, monkeypatch):
+        """_load_aggregate_cache writes one entry per (filepath, var, in_index),
+        not per (filepath, var). Same-filepath/different-in_index writes
+        must not clobber each other."""
+        sdc = self._make_sdc()
+        self._patch_upstream(sdc, monkeypatch)
+
+        sdc._load_aggregate_cache(out_variation=0)
+
+        # Two distinct entries for fp_A — one per in_index — preserved.
+        assert (self.FP_A, 0, 100) in sdc._aggregate_cache
+        assert (self.FP_A, 0, 200) in sdc._aggregate_cache
+        assert sdc._aggregate_cache[(self.FP_A, 0, 100)]['crop_resolution'] == (1024, 576)
+        assert sdc._aggregate_cache[(self.FP_A, 0, 200)]['crop_resolution'] == (704, 384)
+        # fp_B has its own entry too.
+        assert sdc._aggregate_cache[(self.FP_B, 0, 300)]['crop_resolution'] == (704, 384)
+        # Pre-fix bug regression: confirm the legacy 2-tuple key is NOT
+        # present (otherwise downstream code might still hit it).
+        assert (self.FP_A, 0) not in sdc._aggregate_cache
+        assert (self.FP_B, 0) not in sdc._aggregate_cache
+
+    def test_get_item_uses_per_in_index_aggregate(self, monkeypatch):
+        """get_item's aggregate lookup hits the (filepath, var, in_index)
+        entry — so the value returned at sort time for output_idx N matches
+        the variant the per-(V, in_index) split fetch will later load.
+        """
+        sdc = self._make_sdc()
+        self._patch_upstream(sdc, monkeypatch)
+
+        sdc._load_aggregate_cache(out_variation=0)
+
+        # __get_input_index needs variations_initialized state; bypass it
+        # by manually building the (output_idx -> in_idx) mapping we want
+        # to test and calling the cache lookup directly. We're testing the
+        # aggregate-cache key correctness, not the input-index translator.
+        # output_idx 0 -> in_idx 100 (fp_A, '1024x576' bucket).
+        # output_idx 1 -> in_idx 200 (fp_A, '704x384' bucket).
+        # output_idx 2 -> in_idx 300 (fp_B, '704x384' bucket).
+        sdc.current_variation = 0
+        sdc.variations_initialized = True
+
+        agg_0 = sdc._aggregate_cache.get((self.FP_A, 0, 100))
+        agg_1 = sdc._aggregate_cache.get((self.FP_A, 0, 200))
+        agg_2 = sdc._aggregate_cache.get((self.FP_B, 0, 300))
+        assert agg_0['crop_resolution'] == (1024, 576)
+        assert agg_1['crop_resolution'] == (704, 384)
+        assert agg_2['crop_resolution'] == (704, 384)
+
+        # Critical scenario from the real-training repro: AspectBatchSorting
+        # buckets fp_A@200 and fp_B@300 together (both at (704, 384)).
+        # At training, split fetch for fp_A@200 resolves '704x384', which
+        # matches the agg; split fetch for fp_B@300 resolves '704x384',
+        # also matches. No mismatch.
+        assert agg_1['crop_resolution'] == agg_2['crop_resolution']
+
+        # And critically, fp_A@100 is NOT in the same bucket as fp_A@200
+        # — different (V, in_index) seeds → different variant. The bug
+        # we fixed would have made these collide on (fp_A, 0).
+        assert agg_0['crop_resolution'] != agg_1['crop_resolution']
+
+    def test_get_item_returns_per_in_index_crop_resolution(self, monkeypatch):
+        """End-to-end: call get_item('crop_resolution', output_idx) for the
+        three output indices and confirm each returns the variant matching
+        what split-fetch would later load for that specific in_index.
+
+        Models the AspectBatchSorting sort-time walk exactly: walker queries
+        crop_resolution per output index, SmartDiskCache.get_item returns
+        the agg cache copy. With the per-in_index key, each call sees the
+        right variant.
+        """
+        sdc = self._make_sdc()
+        self._patch_upstream(sdc, monkeypatch)
+        sdc.current_variation = 0
+        sdc.variations_initialized = True
+        sdc._load_aggregate_cache(out_variation=0)
+
+        # output_idx 0 -> in_idx 100 (fp_A, '1024x576' bucket).
+        item0 = sdc.get_item(0, 'crop_resolution')
+        assert item0['crop_resolution'] == (1024, 576), (
+            f"fp_A at in_idx=100 should resolve to its '1024x576' variant; "
+            f"got {item0['crop_resolution']}"
+        )
+        # output_idx 1 -> in_idx 200 (fp_A, '704x384' bucket).
+        item1 = sdc.get_item(1, 'crop_resolution')
+        assert item1['crop_resolution'] == (704, 384), (
+            f"fp_A at in_idx=200 should resolve to its '704x384' variant; "
+            f"got {item1['crop_resolution']}. (Under the old (filepath, var) "
+            f"key this would have returned whatever was written last, "
+            f"clobbering the per-in_idx distinction.)"
+        )
+        # output_idx 2 -> in_idx 300 (fp_B, '704x384' bucket).
+        item2 = sdc.get_item(2, 'crop_resolution')
+        assert item2['crop_resolution'] == (704, 384)
+
+    def test_get_item_aggregate_dict_is_isolated(self, monkeypatch):
+        """The returned aggregate dict must be a copy — the PipelineModule
+        walker stashes it and later .update()s it with split-fetch data,
+        which would silently overwrite our agg cache entry without the
+        copy.
+        """
+        sdc = self._make_sdc()
+        self._patch_upstream(sdc, monkeypatch)
+        sdc.current_variation = 0
+        sdc.variations_initialized = True
+        sdc._load_aggregate_cache(out_variation=0)
+
+        item = sdc.get_item(0, 'crop_resolution')
+        original = sdc._aggregate_cache[(self.FP_A, 0, 100)]
+        assert item is not original, (
+            "get_item must return a fresh dict — returning the cache "
+            "entry by reference would let the walker's later update() "
+            "mutate our stored aggregate."
+        )
+        # And mutating the returned dict must not bleed back.
+        item['crop_resolution'] = (999, 999)
+        assert sdc._aggregate_cache[(self.FP_A, 0, 100)]['crop_resolution'] == (1024, 576)
+
+    def test_pre_fix_bug_no_longer_reachable(self, monkeypatch):
+        """The exact pre-fix failure mode: writing for fp at two in_idx
+        leaves only the last write under a 2-tuple key. Verify the new
+        3-tuple key path can't reproduce it (both writes survive)."""
+        sdc = self._make_sdc()
+        self._patch_upstream(sdc, monkeypatch)
+
+        sdc._load_aggregate_cache(out_variation=0)
+
+        # Count distinct fp_A entries — must be 2 (one per in_index).
+        fp_a_entries = [
+            key for key in sdc._aggregate_cache
+            if isinstance(key, tuple) and len(key) >= 1 and key[0] == self.FP_A
+        ]
+        assert len(fp_a_entries) == 2, (
+            f"Expected two distinct (fp_A, var, in_index) entries; got "
+            f"{fp_a_entries}. Under the old (filepath, variation) key the "
+            f"second agg-load write clobbered the first."
+        )
+
+
+class TestSynthesizeAggregateChecksVariantExists:
+    """``_try_synthesize_aggregate`` must serve the .pt's *actual* stored
+    ``crop_resolution`` — not a value parsed from the variant key string.
+    The two diverge in production when drift recovery linked an
+    out-of-grid key to an old .pt, when ``_target_int_for_resolution_key``
+    returned an ambiguous target during the build pass, or any time the
+    AspectBucketing config changed between build and read. Synth keys
+    its lookup on the per-variant ``crop_resolution`` field stamped at
+    build time (or lazy-stamped from the slow path on first read of an
+    old cache). Returns None — routing the item to the slow path so the
+    .pt's real value lands in the agg cache and gets stamped — whenever
+    the variant either doesn't exist OR exists without a stamp.
+
+    Original repro: multi-target config (e.g. "768,1024") + cache
+    built under only one target → ``variant_key_from_aspect`` rolls the
+    missing target for some ``(variation, in_index)`` pairs → synthesis
+    yielded ``(1024, 576)`` while split-fetch loaded the only on-disk
+    variant ``(704, 384)``.
+    """
+
+    FP = r'F:\Datasets\test\partial.jpg'
+    EXISTING_KEY = '704x384'
+
+    def _make_sdc(self, variants=None):
+        """SmartDiskCache primed with a single entry whose ``variants``
+        is the supplied dict (each value is the full variant record,
+        including or omitting a stamped ``crop_resolution``).
+        """
+        if variants is None:
+            variants = {
+                self.EXISTING_KEY: {
+                    'cache_file': f'hash_{self.EXISTING_KEY}',
+                    'crop_resolution': [704, 384],
+                },
+            }
+        import threading
+        sdc = SmartDiskCache.__new__(SmartDiskCache)
+        sdc.cache_dir = '/fake/cache'
+        sdc._real_cache_dir = '/fake/cache'
+        sdc.modeltype = 'testmodel'
+        sdc.split_names = ['latent_image']
+        sdc.aggregate_names = ['crop_resolution', 'image_path']
+        sdc.sourceless = False
+        sdc.resolution_from_upstream = False
+        sdc.aspect_bucketing = object()
+        sdc.bucket_method_provider = None
+        sdc.rebucket_provider = None
+        sdc.tolerate_missing_source = False
+        sdc.extra_watched_paths_in_names = []
+        sdc._extra_paths_by_filepath = {}
+        sdc._aggregate_cache = {}
+        sdc._active_key_by_filepath = {}
+        sdc._index_lock = threading.Lock()
+        sdc._last_flush_time = 0.0
+        sdc.cache_index = {
+            'entries': {
+                self.FP: {
+                    'hash': 'hashfull',
+                    'modeltype': 'testmodel',
+                    'mtime': 1.0,
+                    'original_resolution': [1024, 576],
+                    'variants': variants,
+                },
+            },
+        }
+        return sdc
+
+    def test_missing_variant_returns_none(self, monkeypatch):
+        """``_fast_resolution_string`` rolls a key the entry doesn't have
+        → ``_try_synthesize_aggregate`` must return None so the caller
+        defers to the slow path that .pt-loads the active fallback.
+        """
+        sdc = self._make_sdc(
+            variants={'704x384': {
+                'cache_file': 'hash_704x384',
+                'crop_resolution': [704, 384],
+            }},
+        )
+        monkeypatch.setattr(
+            sdc, '_fast_resolution_string',
+            lambda entry, in_variation, in_index: '1024x576',
+        )
+
+        result = sdc._try_synthesize_aggregate(
+            self.FP, sdc.cache_index['entries'][self.FP],
+            in_variation=0, in_index=100,
+        )
+
+        assert result is None, (
+            f"Synthesis must abort when the computed key '1024x576' is "
+            f"not in entry['variants']; otherwise the fast agg-cache "
+            f"would report (1024, 576) while split-fetch falls back to "
+            f"the only on-disk variant '704x384' and serves a "
+            f"(704, 384) latent — the exact mismatch _shape_safe_collate "
+            f"catches. Got: {result}"
+        )
+
+    def test_stamped_variant_serves_stored_crop_resolution(self, monkeypatch):
+        """When the variant has a stamped ``crop_resolution``, synth
+        serves it directly without torch.load.
+        """
+        sdc = self._make_sdc(
+            variants={
+                '704x384': {
+                    'cache_file': 'hash_704x384',
+                    'crop_resolution': [704, 384],
+                },
+                '1024x576': {
+                    'cache_file': 'hash_1024x576',
+                    'crop_resolution': [1024, 576],
+                },
+            },
+        )
+        monkeypatch.setattr(
+            sdc, '_fast_resolution_string',
+            lambda entry, in_variation, in_index: '1024x576',
+        )
+
+        result = sdc._try_synthesize_aggregate(
+            self.FP, sdc.cache_index['entries'][self.FP],
+            in_variation=0, in_index=100,
+        )
+
+        assert result is not None, (
+            "Synthesis should succeed for a variant with a stamped "
+            "crop_resolution — that's the entire fast-path win."
+        )
+        assert result['crop_resolution'] == (1024, 576)
+        assert result['image_path'] == self.FP
+
+    def test_stamped_value_overrides_key_string(self, monkeypatch):
+        """The stamp wins over the variant key parse: when an entry was
+        drift-recovered onto an old .pt whose stored crop_resolution
+        differs from the new key string, synth must serve the stored
+        value (matching what split-fetch loads), not the parsed key.
+
+        This is the exact divergence that survives just-checking-variant-
+        existence: the variant key says '1024x576', the .pt actually
+        has (640, 960), split-fetch loads (640, 960), and AspectBatchSorting
+        must bucket by (640, 960) too.
+        """
+        sdc = self._make_sdc(
+            variants={'1024x576': {
+                'cache_file': 'hash_1024x576',
+                # The .pt at this cache_file was built under a different
+                # config and stores (640, 960). The stamp records that.
+                'crop_resolution': [640, 960],
+            }},
+        )
+        monkeypatch.setattr(
+            sdc, '_fast_resolution_string',
+            lambda entry, in_variation, in_index: '1024x576',
+        )
+
+        result = sdc._try_synthesize_aggregate(
+            self.FP, sdc.cache_index['entries'][self.FP],
+            in_variation=0, in_index=100,
+        )
+
+        assert result is not None
+        assert result['crop_resolution'] == (640, 960), (
+            f"Synth must serve the .pt's stored value (640, 960), not "
+            f"the parsed key (1024, 576). The latter would mis-bucket "
+            f"this item against batchmates whose split-fetch returned "
+            f"(640, 960). Got: {result['crop_resolution']}"
+        )
+
+    def test_unstamped_variant_falls_to_slow_path(self, monkeypatch):
+        """Legacy variant records (built before the crop_resolution
+        stamp existed) must route to the slow path so torch.load can
+        read the truth and lazy-stamp the entry.
+        """
+        sdc = self._make_sdc(
+            variants={'1024x576': {  # no crop_resolution field
+                'cache_file': 'hash_1024x576',
+            }},
+        )
+        monkeypatch.setattr(
+            sdc, '_fast_resolution_string',
+            lambda entry, in_variation, in_index: '1024x576',
+        )
+
+        result = sdc._try_synthesize_aggregate(
+            self.FP, sdc.cache_index['entries'][self.FP],
+            in_variation=0, in_index=100,
+        )
+
+        assert result is None, (
+            "Unstamped variant must return None so the slow path runs "
+            "and lazy-stamps the variant from the .pt's actual value."
+        )
+
+    def test_load_aggregate_cache_lazy_stamps_legacy_variant(self, monkeypatch, tmp_path):
+        """End-to-end: legacy entry without stamped crop_resolution →
+        slow path runs → reads from .pt → writes crop_resolution to
+        the variant record. Subsequent epochs hit the fast path.
+        """
+        sdc = self._make_sdc(
+            variants={'1024x576': {  # legacy: no crop_resolution
+                'cache_file': 'hash_1024x576',
+            }},
+        )
+        sdc.cache_dir = str(tmp_path)
+        sdc._real_cache_dir = str(tmp_path)
+        sdc._existing_pt_files = {'hash_1024x576_1.pt'}
+        sdc.group_variations = {'g0': 1}
+        sdc.group_indices = {'g0': [100]}
+        sdc.group_output_samples = {'g0': 1}
+        sdc.group_full_indices = {'g0': [100]}
+        sdc.group_balancing = {'g0': 1}
+        sdc.group_balancing_strategy = {'g0': 'REPEATS'}
+        sdc._source_path_cache = {100: self.FP}
+
+        monkeypatch.setattr(
+            sdc, '_fast_resolution_string',
+            lambda entry, in_variation, in_index: '1024x576',
+        )
+        monkeypatch.setattr(
+            sdc, '_get_resolution_string',
+            lambda in_variation, in_index: '1024x576',
+        )
+        load_paths = []
+        def fake_load(path, **kwargs):
+            load_paths.append(path)
+            # .pt stores (640, 960) — the truth that diverges from the key.
+            return {'crop_resolution': (640, 960), 'image_path': self.FP}
+        monkeypatch.setattr(
+            'mgds.pipelineModules.SmartDiskCache.torch.load', fake_load,
+        )
+
+        sdc._load_aggregate_cache(out_variation=0)
+
+        agg = sdc._aggregate_cache.get((self.FP, 0, 100))
+        assert agg is not None
+        assert agg['crop_resolution'] == (640, 960), (
+            f"Slow path must serve the .pt's value, not the parsed key. "
+            f"Got: {agg['crop_resolution']}"
+        )
+        # The variant must now have the lazy-stamped value so the next
+        # epoch's agg load takes the fast path.
+        variant = sdc.cache_index['entries'][self.FP]['variants']['1024x576']
+        assert variant.get('crop_resolution') == [640, 960], (
+            f"Slow path must lazy-stamp the variant's crop_resolution "
+            f"from the loaded .pt. Got: {variant.get('crop_resolution')}"
+        )
+
+    def test_load_aggregate_cache_falls_through_to_slow_path(self, monkeypatch, tmp_path):
+        """End-to-end with the original repro shape: rolled key missing,
+        slow path uses _active_cache_file fallback, torch.load reads the
+        real value, aggregate matches what split-fetch will return.
+        """
+        sdc = self._make_sdc(
+            variants={'704x384': {
+                'cache_file': 'hash_704x384',
+                'crop_resolution': [704, 384],
+            }},
+        )
+        sdc.cache_dir = str(tmp_path)
+        sdc._real_cache_dir = str(tmp_path)
+        sdc._existing_pt_files = {'hash_704x384_1.pt'}
+        sdc.group_variations = {'g0': 1}
+        sdc.group_indices = {'g0': [100]}
+        sdc.group_output_samples = {'g0': 1}
+        sdc.group_full_indices = {'g0': [100]}
+        sdc.group_balancing = {'g0': 1}
+        sdc.group_balancing_strategy = {'g0': 'REPEATS'}
+        sdc._source_path_cache = {100: self.FP}
+
+        monkeypatch.setattr(
+            sdc, '_fast_resolution_string',
+            lambda entry, in_variation, in_index: '1024x576',
+        )
+        monkeypatch.setattr(
+            sdc, '_get_resolution_string',
+            lambda in_variation, in_index: '1024x576',
+        )
+        load_paths = []
+        def fake_load(path, **kwargs):
+            load_paths.append(path)
+            return {'crop_resolution': (704, 384), 'image_path': self.FP}
+        monkeypatch.setattr(
+            'mgds.pipelineModules.SmartDiskCache.torch.load', fake_load,
+        )
+
+        sdc._load_aggregate_cache(out_variation=0)
+
+        agg = sdc._aggregate_cache.get((self.FP, 0, 100))
+        assert agg is not None
+        assert agg['crop_resolution'] == (704, 384), (
+            f"Aggregate must reflect the .pt actually on disk (the "
+            f"'704x384' fallback), not the synthesised '1024x576' key "
+            f"that get_item will also miss. Got: {agg['crop_resolution']}"
+        )
+        assert load_paths, (
+            "Expected slow-path torch.load to fire for the missing-variant "
+            "case; got no load events."
+        )

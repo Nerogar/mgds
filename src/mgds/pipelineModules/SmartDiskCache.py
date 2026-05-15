@@ -1086,10 +1086,17 @@ class SmartDiskCache(
                         'sidecar_hashes': sidecar_hashes,
                     }
                     self.cache_index['entries'][filepath] = target_entry
-                target_entry['variants'][key] = {
+                dedup_variant = {
                     'cache_file': cache_file,
                     'schema_keys': variant.get('schema_keys'),
                 }
+                # Propagate the stamped crop_resolution so the dedup'd
+                # entry's agg fast path matches what split-fetch loads
+                # from the shared .pt (same file → same value).
+                existing_cr = variant.get('crop_resolution')
+                if existing_cr is not None:
+                    dedup_variant['crop_resolution'] = existing_cr
+                target_entry['variants'][key] = dedup_variant
                 self._add_to_hash_index(file_hash, filepath)
                 return True
 
@@ -1107,6 +1114,18 @@ class SmartDiskCache(
     ):
         cache_file = self._make_cache_file(file_hash, resolution)
         required_schema = set(self.split_names) | set(self.aggregate_names)
+
+        # Capture the actual stored crop_resolution (from either the
+        # newly-written cache_data or the reused-existing .pt) so we can
+        # stamp it on the variant index entry below. Lets
+        # _try_synthesize_aggregate serve the .pt's true value without
+        # torch.load AND without parsing the variant key string —
+        # parsed-key synthesis breaks whenever the .pt's stored
+        # crop_resolution diverges from the key (bucket-overlap
+        # ambiguity in _target_int_for_resolution_key, drift recovery
+        # linking an out-of-grid key to an old .pt, or AspectBucketing
+        # config changes between build and read).
+        stored_crop_resolution = None
 
         for v in range(variations):
             pt_name = f"{cache_file}_{v + 1}.pt"
@@ -1126,6 +1145,8 @@ class SmartDiskCache(
                 if isinstance(existing, dict):
                     existing_keys = {k for k in existing if not k.startswith('__')}
                     if required_schema.issubset(existing_keys):
+                        if stored_crop_resolution is None:
+                            stored_crop_resolution = existing.get('crop_resolution')
                         continue
                 # else: fall through to rewrite below.
 
@@ -1153,6 +1174,9 @@ class SmartDiskCache(
             real_tmp_path = real_pt_path + f'.{os.getpid()}.{threading.get_ident()}.tmp'
             torch.save(cache_data, real_tmp_path)
             os.replace(real_tmp_path, real_pt_path)
+
+            if stored_crop_resolution is None:
+                stored_crop_resolution = cache_data.get('crop_resolution')
 
             with self._index_lock:
                 self._existing_pt_files.add(pt_name)
@@ -1208,10 +1232,22 @@ class SmartDiskCache(
                     entry['original_resolution'] = original_resolution
                 if 'variants' not in entry:
                     entry['variants'] = {}
-            entry['variants'][key] = {
+            variant_record = {
                 'cache_file': cache_file,
                 'schema_keys': sorted(set(self.split_names) | set(self.aggregate_names)),
             }
+            # Stamp the .pt's actual stored crop_resolution so the agg
+            # fast path can serve it without torch.load and — critically —
+            # without round-tripping the variant key string through bucket
+            # math that may not agree with what's on disk.
+            if stored_crop_resolution is not None:
+                try:
+                    cr_list = [int(x) for x in stored_crop_resolution]
+                    if len(cr_list) >= 2:
+                        variant_record['crop_resolution'] = cr_list
+                except (TypeError, ValueError):
+                    pass
+            entry['variants'][key] = variant_record
             self._add_to_hash_index(file_hash, filepath)
 
     def _get_source_path(self, in_variation: int, in_index: int) -> str | None:
@@ -2032,13 +2068,40 @@ class SmartDiskCache(
             resolution = self._get_resolution_string(in_variation, in_index)
         if resolution is None or resolution == NO_RESOLUTION_KEY:
             return None
-        parts = resolution.split('x')
-        if len(parts) != 2:
+
+        # Synthesis is only safe when the computed variant key actually
+        # exists on the entry. Otherwise split-fetch's get_item falls back
+        # to _active_cache_file at a different key, and AspectBatchSorting
+        # would bucket by a crop_resolution that no on-disk .pt for this
+        # (filepath, variation, in_index) produces — torch.stack then
+        # blows up in collate on the mismatched latent shapes. Falling
+        # through to None routes the item to the slow path, where the
+        # same _active_cache_file fallback reads the real crop_resolution
+        # off the .pt that split-fetch will load.
+        variants = entry.get('variants') or {}
+        variant = variants.get(self._resolution_key(resolution))
+        if variant is None:
+            return None
+
+        # Prefer the stamped crop_resolution from the variant entry —
+        # that's the value torch.load would return for the .pt this
+        # variant points to. Parsing (h, w) out of the variant key
+        # string is *almost* the same answer, but the two diverge when
+        # drift recovery linked an out-of-grid key to an old .pt or
+        # when _target_int_for_resolution_key returned an ambiguous
+        # target during the build pass — in either case the .pt's
+        # stored crop_resolution is the truth, and AspectBatchSorting
+        # has to bucket by exactly that or the per-item .pt that
+        # split-fetch later loads won't stack with its batchmates.
+        # Legacy variant records (pre-stamping) fall through to None
+        # → slow path → torch.load → lazy-stamp the field below.
+        stored_cr = variant.get('crop_resolution')
+        if not isinstance(stored_cr, (list, tuple)) or len(stored_cr) < 2:
             return None
         try:
-            h = int(parts[0])
-            w = int(parts[1])
-        except ValueError:
+            h = int(stored_cr[-2])
+            w = int(stored_cr[-1])
+        except (TypeError, ValueError):
             return None
 
         agg_data: dict = {}
@@ -2144,9 +2207,11 @@ class SmartDiskCache(
                 return
             load_items = slow_items
 
+        stamped_any = False
         with tqdm(total=len(load_items), smoothing=0.1, desc='loading aggregate cache') as bar:
             for filepath, cache_entry, variation, in_variation, in_index in load_items:
                 cache_file = None
+                variant_for_stamp = None
                 if per_item_key:
                     # Fast resolve via the stamped original_resolution.
                     # Falls back to the upstream image-decode walk only
@@ -2160,8 +2225,18 @@ class SmartDiskCache(
                         variant = variants.get(self._resolution_key(resolution))
                         if variant is not None:
                             cache_file = variant.get('cache_file')
+                            variant_for_stamp = variant
                 if cache_file is None:
                     cache_file = self._active_cache_file(filepath, cache_entry)
+                    if variant_for_stamp is None and cache_file is not None:
+                        # Locate the active-fallback variant so we can
+                        # stamp its crop_resolution too. Iterating the
+                        # variants dict is O(num_variants_per_file),
+                        # typically ≤ a handful.
+                        for v in (cache_entry.get('variants') or {}).values():
+                            if v.get('cache_file') == cache_file:
+                                variant_for_stamp = v
+                                break
                 if cache_file is None:
                     bar.update(1)
                     continue
@@ -2180,9 +2255,34 @@ class SmartDiskCache(
                         # matching get_item lookup for the rationale.
                         self._aggregate_cache[
                             (filepath, variation, in_index)] = agg_data
+                        # Lazy-stamp the variant entry's crop_resolution
+                        # from what we just read off disk. Subsequent
+                        # epochs (and other agg loads on the same entry)
+                        # then hit the fast path in
+                        # _try_synthesize_aggregate without paying for
+                        # another torch.load. Old caches built before
+                        # this field was stamped migrate themselves on
+                        # first read.
+                        if (variant_for_stamp is not None
+                                and variant_for_stamp.get('crop_resolution') is None):
+                            stored = agg_data.get('crop_resolution')
+                            if isinstance(stored, (list, tuple)) and len(stored) >= 2:
+                                try:
+                                    cr_list = [int(x) for x in stored]
+                                    with self._index_lock:
+                                        variant_for_stamp['crop_resolution'] = cr_list
+                                    stamped_any = True
+                                except (TypeError, ValueError):
+                                    pass
                 except Exception:
                     pass
                 bar.update(1)
+
+        if stamped_any:
+            # Persist the lazy-stamped crop_resolution fields so the next
+            # process / next epoch hits the fast path without re-running
+            # torch.load on every entry.
+            self._save_cache_index()
 
     def start(self, out_variation: int):
         if self.sourceless:
