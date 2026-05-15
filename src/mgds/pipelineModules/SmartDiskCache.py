@@ -30,6 +30,16 @@ SCHEMA_METHOD = 'shape_v1'
 # variant key, but the cache filename collapses to bare ``hash12``.
 NO_RESOLUTION_KEY = '_'
 
+# Aggregate names whose value at load time can be reconstructed from cache
+# metadata (variant key + entry filepath) without reading the .pt. When every
+# configured aggregate is in this set, _load_aggregate_cache skips torch.load
+# entirely — the .pt is dominated by split tensors that aggregate-load doesn't
+# need, so deriving these instead saves multi-GB of I/O per epoch on large
+# datasets. Falls back to torch.load per item when the variant key won't parse
+# (NO_RESOLUTION_KEY, malformed) or frame-dim-enabled video where 'HxW' can't
+# encode the frame dim.
+_DERIVABLE_AGGREGATES = frozenset({'crop_resolution', 'image_path'})
+
 
 class CachingStoppedException(Exception):
     pass
@@ -58,6 +68,7 @@ class SmartDiskCache(
             resolution_from_upstream: bool = False,
             bucket_method_provider: Callable[[], str] | None = None,
             rebucket_provider: Callable[[float], list[str]] | None = None,
+            aspect_bucketing=None,
             extra_watched_paths_in_names: list[str] | None = None,
     ):
         super().__init__()
@@ -106,6 +117,12 @@ class SmartDiskCache(
         # at all).
         self.bucket_method_provider = bucket_method_provider
         self.rebucket_provider = rebucket_provider
+        # Handle to the upstream AspectBucketing module. When set, the cache
+        # builder uses ``aspect_bucketing._target_override`` to drive get_item
+        # to a specific target_resolution per build pass, enabling lazy
+        # multi-variant builds without re-decoding images. None for text
+        # caches and any pipeline without aspect bucketing.
+        self.aspect_bucketing = aspect_bucketing
 
         # Additional per-sample sidecar in-name fields whose resolved paths
         # should be watched alongside ``source_path_in_name``. Touching one of
@@ -317,6 +334,34 @@ class SmartDiskCache(
     def _resolution_key(resolution: str | None) -> str:
         return resolution if resolution else NO_RESOLUTION_KEY
 
+    def _target_int_for_resolution_key(self, resolution: str | None) -> int | None:
+        """Recover the AspectBucketing target_resolution int from a bucket key.
+
+        Used by the cache build pass to drive ``aspect_bucketing._target_override``
+        for a queued (filepath, resolution) item. Looks up the exact (h, w) in
+        ``bucket_resolutions`` (an authoritative reverse map populated by
+        ``AspectBucketing.start``). Returns None for text caches, sourceless
+        flows, or any key shape we can't parse — callers treat None as "no
+        override needed".
+        """
+        if self.aspect_bucketing is None or not resolution:
+            return None
+        if resolution == NO_RESOLUTION_KEY:
+            return None
+        parts = resolution.split('x')
+        if len(parts) != 2:
+            return None
+        try:
+            h = int(parts[0])
+            w = int(parts[1])
+        except ValueError:
+            return None
+        bucket_resolutions = getattr(self.aspect_bucketing, 'bucket_resolutions', None) or {}
+        for target, buckets in bucket_resolutions.items():
+            if (h, w) in buckets:
+                return target
+        return None
+
     def _compute_bucket_method(self) -> str | None:
         """Hash of the upstream bucket config, or None when no provider is wired.
 
@@ -386,7 +431,7 @@ class SmartDiskCache(
         derived = 0
         reused = 0
         with self._index_lock:
-            for filepath, entry in entries.items():
+            for entry in entries.values():
                 if entry.get('modeltype') != self.modeltype:
                     continue
                 variants = entry.get('variants') or {}
@@ -421,10 +466,12 @@ class SmartDiskCache(
                     (k, v) for k, v in variants.items() if k not in new_keys_set
                 )
                 entry['variants'] = reordered
-                # Pin this run's active key to the first derived key —
-                # even if its .pt doesn't exist yet (per-index loop will
-                # rebuild on 'missing_variant' status).
-                self._active_key_by_filepath[filepath] = new_keys[0]
+                # Active key is now resolved per-epoch from upstream in
+                # ``__refresh_cache`` and ``get_item``. Don't pin to the
+                # first derived key — that biased every image to the
+                # smallest target on the next run. The reordering above
+                # still helps text-cache callers via the
+                # ``_any_variant_cache_file`` first-key fallback.
         if derived:
             print(
                 f"SmartDiskCache: bucket method drift — re-derived {derived} variant keys "
@@ -1113,6 +1160,24 @@ class SmartDiskCache(
         sidecar_mtimes, sidecar_hashes = self._compute_sidecar_state(
             self._extra_paths_by_filepath.get(filepath, {})
         )
+        # Stamp the source image's exact resolution onto the entry.
+        # Used by _fast_resolution_string to compute the per-epoch
+        # variant key with the *real* aspect, not the quantized aspect
+        # recovered from a bucket key — buckets at different targets use
+        # different aspect grids, so the recovered approximation can
+        # land on a different bucket than the actual image would,
+        # mismatching validation's predicted variant against get_item's
+        # actual variant lookup and crashing AspectBatchSorting later.
+        # Pulled from the walker cache (CalcAspect already ran during
+        # the split-fetch loop above), so this is free.
+        original_resolution = None
+        try:
+            res = self._get_previous_item(0, 'original_resolution', in_index)
+            if (res is not None
+                    and len(res) >= 2):
+                original_resolution = [int(res[-2]), int(res[-1])]
+        except Exception:
+            original_resolution = None
         key = self._resolution_key(resolution)
         with self._index_lock:
             entry = self.cache_index['entries'].get(filepath)
@@ -1127,6 +1192,8 @@ class SmartDiskCache(
                     'sidecar_mtimes': sidecar_mtimes,
                     'sidecar_hashes': sidecar_hashes,
                 }
+                if original_resolution is not None:
+                    entry['original_resolution'] = original_resolution
                 self.cache_index['entries'][filepath] = entry
             else:
                 # Refresh metadata; the source content may have changed and
@@ -1137,6 +1204,8 @@ class SmartDiskCache(
                 entry['cache_version'] = CACHE_VERSION
                 entry['sidecar_mtimes'] = sidecar_mtimes
                 entry['sidecar_hashes'] = sidecar_hashes
+                if original_resolution is not None:
+                    entry['original_resolution'] = original_resolution
                 if 'variants' not in entry:
                     entry['variants'] = {}
             entry['variants'][key] = {
@@ -1512,8 +1581,15 @@ class SmartDiskCache(
         # process and is still present in the on-disk index, skip validation
         # entirely. This avoids per-epoch revalidation on static datasets.
         # Bypassed on bucket drift: drift recovery needs to run once before we
-        # can trust session-skip again.
+        # can trust session-skip again. Also bypassed when multi-resolution
+        # variants are configured — each epoch picks a different target per
+        # item, so we have to validate (and lazy-build) for the new keys.
+        multi_target = (
+            self.aspect_bucketing is not None
+            and len(getattr(self.aspect_bucketing, 'bucket_resolutions', {})) > 1
+        )
         if (not bucket_drift
+                and not multi_target
                 and required_filepaths
                 and self.cache_index.get('entries')
                 and required_filepaths.issubset(self._session_validated_filepaths)
@@ -1553,9 +1629,14 @@ class SmartDiskCache(
 
         # --- Fast validation path ---
         # Bypassed on bucket drift: the recovery pass may have queued new
-        # variants that need rebuild, so we have to fall through.
+        # variants that need rebuild, so we have to fall through. Also
+        # bypassed under multi-target aspect bucketing: the per-epoch
+        # required variant rotates, and fast-validate only spot-checks
+        # whichever variant is currently registered — it would skip the
+        # lazy-build pass for this epoch's missing key.
         if (not skip_validation
                 and not bucket_drift
+                and not multi_target
                 and self.cache_index.get('entries')
                 and self._fast_validate()):
             all_in_index = all(
@@ -1630,16 +1711,22 @@ class SmartDiskCache(
                             files_skipped += 1
                             bar.update(1)
                             continue
-                        # Active key for this session: drift recovery may
-                        # have pre-set it to a re-derived key. Otherwise
-                        # pick the first registered variant — for
-                        # bucket_method-matching runs that's the previous
-                        # run's key, which is still valid. Trusting the
-                        # cached key lets us skip the AspectBucketing
-                        # ->LoadImage chain that _get_resolution_string
-                        # would otherwise trigger per cache hit.
-                        if self.resolution_from_upstream:
-                            resolution = self._get_resolution_string(0, in_index)
+                        # Active key for this epoch: resolve from upstream
+                        # when this cache has resolution variants (aspect
+                        # bucketing or explicit upstream-resolution mode).
+                        # Fast path: when the entry already has variants
+                        # we recover aspect from any variant key and ask
+                        # AspectBucketing for the would-be bucket without
+                        # decoding the image (saved ~250ms/file on disk).
+                        # Slow path (``_get_resolution_string``) only runs
+                        # when there's no aspect to recover, i.e. fresh
+                        # entries the very first time we see them.
+                        if self.resolution_from_upstream or self.aspect_bucketing is not None:
+                            resolution = self._fast_resolution_string(
+                                entry, out_variation, in_index)
+                            if resolution is None:
+                                resolution = self._get_resolution_string(
+                                    out_variation, in_index)
                             active_key = self._resolution_key(resolution)
                             self._active_key_by_filepath[filepath] = active_key
                         else:
@@ -1658,12 +1745,18 @@ class SmartDiskCache(
                             continue
                         if status == 'missing_variant':
                             # Entry is fine but doesn't have a variant for
-                            # this session's expected key. Rebuild that
+                            # this epoch's expected key. Rebuild that
                             # variant only — leave the entry and other
-                            # variants in place.
-                            resolution = self._get_resolution_string(0, in_index)
+                            # variants in place. Reuse the fast key we
+                            # computed above; falls back to the upstream
+                            # walk if the fast path returned None.
+                            resolution = self._fast_resolution_string(
+                                entry, out_variation, in_index)
+                            if resolution is None:
+                                resolution = self._get_resolution_string(
+                                    out_variation, in_index)
                             self._active_key_by_filepath[filepath] = self._resolution_key(resolution)
-                            items_to_build_by_index[in_index] = (filepath, group_key, 0, in_index, group_index, variations, resolution)
+                            items_to_build_by_index[in_index] = (filepath, group_key, out_variation, in_index, group_index, variations, resolution)
                             bar.update(1)
                             continue
                         # Otherwise: rebuild. Drop the stale entry.
@@ -1678,9 +1771,9 @@ class SmartDiskCache(
                     # Rebuild path: now we DO need the current resolution.
                     # This opens the image (via CalcAspect) but only for files
                     # that are missing or stale, not for the whole dataset.
-                    resolution = self._get_resolution_string(0, in_index)
+                    resolution = self._get_resolution_string(out_variation, in_index)
                     self._active_key_by_filepath[filepath] = self._resolution_key(resolution)
-                    items_to_build_by_index[in_index] = (filepath, group_key, 0, in_index, group_index, variations, resolution)
+                    items_to_build_by_index[in_index] = (filepath, group_key, out_variation, in_index, group_index, variations, resolution)
                     bar.update(1)
 
             items_to_build = list(items_to_build_by_index.values())
@@ -1751,30 +1844,55 @@ class SmartDiskCache(
 
                 current_device = torch.cuda.current_device() if torch.cuda.is_available() else None
 
-                fs = [self._state.executor.submit(
-                    fn, filepath, group_key, in_variation, in_index, group_index, variations, resolution, current_device)
-                      for (filepath, group_key, in_variation, in_index, group_index, variations, resolution)
-                      in unique_items]
-                for build_count, f in enumerate(concurrent.futures.as_completed(fs), 1):
+                # Group queued items by AspectBucketing target_resolution.
+                # Each upstream walk reads ``aspect_bucketing._target_override``
+                # to pin the bucket choice — that attribute is shared state,
+                # so concurrent workers MUST share the same target. We run
+                # one parallel batch per target with the override held for
+                # that batch, then clear and move on. For text caches and
+                # configs without aspect bucketing, every item lands in a
+                # single ``None`` group and the behaviour is identical to
+                # before.
+                target_groups: dict[int | None, list[tuple]] = {}
+                for item in unique_items:
+                    resolution_str = item[6]
+                    target = self._target_int_for_resolution_key(resolution_str)
+                    target_groups.setdefault(target, []).append(item)
+
+                for target, group_items in target_groups.items():
+                    prev_override = None
+                    ab = self.aspect_bucketing
+                    if ab is not None and target is not None:
+                        prev_override = getattr(ab, '_target_override', None)
+                        ab._target_override = target
                     try:
-                        filepath, status = f.result()
-                    except Exception:
-                        self._state.executor.shutdown(wait=True, cancel_futures=True)
-                        raise
-                    if status == 'built' or status == 'dedup':
-                        files_built += 1
-                    elif status.startswith('build_failed') or status == 'missing' or status == 'hash_failed':
-                        files_failed.append((filepath, status))
-                        print(f"Warning: failed to cache '{filepath}': {status}")
-                    if build_count % 250 == 0:
-                        self._torch_gc()
-                    self._flush_cache_index()
-                    bar.update(1)
-                    if self.stop_check_fun():
-                        self._state.executor.shutdown(wait=True, cancel_futures=True)
-                        self._save_cache_index()
-                        print(f"SmartDiskCache: Stopped early. Cached {files_built} files this session, {files_skipped} reused from cache.")
-                        raise CachingStoppedException
+                        fs = [self._state.executor.submit(
+                            fn, filepath, group_key, in_variation, in_index, group_index, variations, resolution, current_device)
+                              for (filepath, group_key, in_variation, in_index, group_index, variations, resolution)
+                              in group_items]
+                        for build_count, f in enumerate(concurrent.futures.as_completed(fs), 1):
+                            try:
+                                filepath, status = f.result()
+                            except Exception:
+                                self._state.executor.shutdown(wait=True, cancel_futures=True)
+                                raise
+                            if status == 'built' or status == 'dedup':
+                                files_built += 1
+                            elif status.startswith('build_failed') or status == 'missing' or status == 'hash_failed':
+                                files_failed.append((filepath, status))
+                                print(f"Warning: failed to cache '{filepath}': {status}")
+                            if build_count % 250 == 0:
+                                self._torch_gc()
+                            self._flush_cache_index()
+                            bar.update(1)
+                            if self.stop_check_fun():
+                                self._state.executor.shutdown(wait=True, cancel_futures=True)
+                                self._save_cache_index()
+                                print(f"SmartDiskCache: Stopped early. Cached {files_built} files this session, {files_skipped} reused from cache.")
+                                raise CachingStoppedException
+                    finally:
+                        if ab is not None and target is not None:
+                            ab._target_override = prev_override
 
         if not skip_validation:
             self.cache_index['last_validated'] = time.time()
@@ -1808,9 +1926,175 @@ class SmartDiskCache(
 
         self._load_aggregate_cache(out_variation)
 
+    def _fast_resolution_string(
+        self, entry: dict, in_variation: int, in_index: int,
+    ) -> str | None:
+        """Compute the per-epoch variant key for an entry without
+        decoding its source image.
+
+        Recovers aspect from any cached variant key in ``entry`` (the
+        same trick ``_drift_recovery_pass`` uses), then asks
+        ``AspectBucketing.variant_key_from_aspect`` to reproduce the
+        rand.choice + bucket math that ``get_item`` would run. Skips
+        the ``CalcAspect → LoadImage`` chain that ``_get_resolution_string``
+        otherwise triggers per cache hit — which was costing ~250 ms
+        per file across the whole validation pass on every epoch under
+        multi-target bucketing.
+
+        Returns None when no aspect can be recovered (fresh entry,
+        text-cache shape) or AspectBucketing can't produce a key
+        (fixed WxH config, missing target). Caller falls back to the
+        slow upstream walk in those cases.
+        """
+        if self.aspect_bucketing is None:
+            return None
+        # Prefer the stamped original_resolution (exact aspect) over the
+        # variant-key approximation. Bucket aspect grids differ across
+        # targets; recovering aspect from a 768-target variant key and
+        # asking for the 512-target bucket can land on a different
+        # bucket than the image's actual aspect would — that mismatch
+        # is exactly what causes AspectBatchSorting to bucket items at
+        # sort time differently from what get_item loads at fetch time.
+        orig = entry.get('original_resolution')
+        aspect: float | None = None
+        if (isinstance(orig, (list, tuple))
+                and len(orig) >= 2):
+            try:
+                h = float(orig[-2])
+                w = float(orig[-1])
+                if w > 0:
+                    aspect = h / w
+            except (TypeError, ValueError):
+                aspect = None
+        if aspect is None:
+            # Legacy entries (pre-stamping) — walk for original_resolution
+            # upstream and lazy-stamp on the entry so subsequent epochs
+            # hit the fast path. This costs one image decode per legacy
+            # file the FIRST time it's seen; after that the stamp keeps
+            # validation cheap forever. We avoid the variant-key
+            # approximation entirely here because its rounding error
+            # near bucket boundaries was the original source of the
+            # cross-entry shape mismatches.
+            walk_variation = self.current_variation if self.current_variation >= 0 else in_variation
+            try:
+                upstream = self._get_previous_item(
+                    walk_variation, 'original_resolution', in_index)
+            except Exception:
+                upstream = None
+            if (isinstance(upstream, (list, tuple))
+                    and len(upstream) >= 2):
+                try:
+                    h = float(upstream[-2])
+                    w = float(upstream[-1])
+                    if w > 0:
+                        aspect = h / w
+                        entry['original_resolution'] = [int(h), int(w)]
+                except (TypeError, ValueError):
+                    aspect = None
+        if aspect is None:
+            # Last resort: approximate aspect from any variant key. Used
+            # only when both the stamp is missing AND upstream is
+            # unavailable (e.g. text caches that have no resolution at all).
+            variants = entry.get('variants') or {}
+            aspect = self._aspect_from_variant_keys(variants)
+        if aspect is None:
+            return None
+        try:
+            return self.aspect_bucketing.variant_key_from_aspect(
+                in_variation, in_index, aspect)
+        except Exception:
+            return None
+
+    def _try_synthesize_aggregate(
+        self,
+        filepath: str,
+        entry: dict,
+        in_variation: int,
+        in_index: int,
+    ) -> dict | None:
+        """Reconstruct agg_data from cache metadata, no .pt I/O.
+
+        Resolves the per-epoch variant key via ``_fast_resolution_string``
+        (aspect from cached variant keys, rand.choice over targets — no
+        image decode). Falls back to ``_get_resolution_string`` only
+        when the entry has no aspect to recover yet; that path *does*
+        decode but is rare after the build pass has run.
+
+        Returns the synthesized dict, or None when synthesis fails
+        (variant key won't parse, or the resolved key is
+        ``NO_RESOLUTION_KEY``). The caller is expected to have already
+        gated entry: every configured aggregate name must be in
+        ``_DERIVABLE_AGGREGATES`` and ``frame_dim_enabled`` must be
+        False (else the 2D ``HxW`` key can't represent the cached value).
+        """
+        resolution = self._fast_resolution_string(entry, in_variation, in_index)
+        if resolution is None:
+            resolution = self._get_resolution_string(in_variation, in_index)
+        if resolution is None or resolution == NO_RESOLUTION_KEY:
+            return None
+        parts = resolution.split('x')
+        if len(parts) != 2:
+            return None
+        try:
+            h = int(parts[0])
+            w = int(parts[1])
+        except ValueError:
+            return None
+
+        agg_data: dict = {}
+        for name in self.aggregate_names:
+            if name == 'crop_resolution':
+                agg_data[name] = (h, w)
+            elif name == 'image_path':
+                agg_data[name] = filepath
+            else:
+                # _DERIVABLE_AGGREGATES gate should have prevented this,
+                # but a defensive None forces the caller to .pt-load this
+                # item if we ever extend the set without updating here.
+                return None
+        return agg_data
+
     def _load_aggregate_cache(self, out_variation: int):
         if not self.aggregate_names:
             return
+
+        # Aggregates that vary per resolution variant (most importantly
+        # ``crop_resolution`` — consumed by AspectBatchSorting to form
+        # batches) must be loaded from the SAME variant that ``get_item``
+        # will return latents from. With multi-target bucketing the
+        # variant rotates per (variation, index), so we need the
+        # per-item key to pick the right .pt — not the session-pinned
+        # active key.
+        per_item_key = (
+            self.resolution_from_upstream or self.aspect_bucketing is not None
+        )
+
+        # Fast path: when every aggregate name is derivable from cache
+        # metadata (variant key parses to crop_resolution; entry key is
+        # image_path), skip torch.load entirely. The .pt is dominated by
+        # split latent tensors that aggregate-load doesn't need — reading
+        # the whole file just to extract a 2-tuple + string costs multi-GB
+        # of disk I/O per epoch on large datasets.
+        #
+        # Correctness relies on synth producing the SAME crop_resolution
+        # that ``get_item``'s split fetch will load for the same
+        # (variation, in_index). That now holds: synth's
+        # ``_fast_resolution_string`` uses the entry's stamped
+        # ``original_resolution`` (exact aspect) and the same
+        # ``AspectBucketing.variant_key_from_aspect`` that get_item walks
+        # to, and the per-in_index agg cache key keeps writes for the
+        # same filepath at different in_index distinct.
+        #
+        # Video pipelines (frame_dim_enabled=True) stay on the slow path:
+        # the 2D HxW variant key can't represent the 3D
+        # (frames, h, w) crop_resolution they cache.
+        ab = self.aspect_bucketing
+        frame_dim = bool(getattr(ab, 'frame_dim_enabled', False)) if ab is not None else False
+        fast_path = (
+            not frame_dim
+            and bool(self.aggregate_names)
+            and set(self.aggregate_names).issubset(_DERIVABLE_AGGREGATES)
+        )
 
         load_items = []
         for group_key in self.group_variations:
@@ -1832,11 +2116,52 @@ class SmartDiskCache(
                     if cache_entry is None:
                         continue
                     variation = in_variation % variations
-                    load_items.append((filepath, cache_entry, variation))
+                    load_items.append((filepath, cache_entry, variation, in_variation, in_index))
+
+        if fast_path:
+            slow_items = []
+            # Progress bar even on the fast path: this loop is O(N) dict
+            # ops plus per-item RNG/bucket math via AspectBucketing, but
+            # on a 22k-sample dataset it's still a few seconds of work
+            # and worth showing so it doesn't look like a freeze after
+            # the 'Cached X/Y files' line.
+            with tqdm(total=len(load_items), smoothing=0.1, desc='loading aggregate cache') as bar:
+                for filepath, cache_entry, variation, in_variation, in_index in load_items:
+                    agg_data = self._try_synthesize_aggregate(
+                        filepath, cache_entry, in_variation, in_index)
+                    if agg_data is None:
+                        slow_items.append(
+                            (filepath, cache_entry, variation, in_variation, in_index)
+                        )
+                        bar.update(1)
+                        continue
+                    # Key by (filepath, variation, in_index) — see the
+                    # slow-path write below for the rationale.
+                    self._aggregate_cache[
+                        (filepath, variation, in_index)] = agg_data
+                    bar.update(1)
+            if not slow_items:
+                return
+            load_items = slow_items
 
         with tqdm(total=len(load_items), smoothing=0.1, desc='loading aggregate cache') as bar:
-            for filepath, cache_entry, variation in load_items:
-                cache_file = self._active_cache_file(filepath, cache_entry)
+            for filepath, cache_entry, variation, in_variation, in_index in load_items:
+                cache_file = None
+                if per_item_key:
+                    # Fast resolve via the stamped original_resolution.
+                    # Falls back to the upstream image-decode walk only
+                    # when no aspect can be recovered.
+                    resolution = self._fast_resolution_string(
+                        cache_entry, in_variation, in_index)
+                    if resolution is None:
+                        resolution = self._get_resolution_string(in_variation, in_index)
+                    if resolution is not None:
+                        variants = cache_entry.get('variants', {})
+                        variant = variants.get(self._resolution_key(resolution))
+                        if variant is not None:
+                            cache_file = variant.get('cache_file')
+                if cache_file is None:
+                    cache_file = self._active_cache_file(filepath, cache_entry)
                 if cache_file is None:
                     bar.update(1)
                     continue
@@ -1848,7 +2173,13 @@ class SmartDiskCache(
                         if name in cached:
                             agg_data[name] = cached[name]
                     if agg_data:
-                        self._aggregate_cache[(filepath, variation)] = agg_data
+                        # Key by (filepath, variation, in_index): the same
+                        # filepath can appear at multiple in_index values
+                        # (across concepts or repeats) and each in_index
+                        # has its own rand.choice'd variant — see the
+                        # matching get_item lookup for the rationale.
+                        self._aggregate_cache[
+                            (filepath, variation, in_index)] = agg_data
                 except Exception:
                     pass
                 bar.update(1)
@@ -1954,15 +2285,71 @@ class SmartDiskCache(
                 variation = in_variation % self.group_variations[group_key]
 
                 if requested_name in self.aggregate_names:
-                    agg_data = self._aggregate_cache.get((filepath, variation))
+                    # Key the lookup on (filepath, variation, in_index) — not
+                    # just (filepath, variation). When the same source file
+                    # appears across multiple concepts (or under repeats), it
+                    # is queried at distinct in_index values, and each one
+                    # picks a different rand.choice target (the seed is per
+                    # (variation, index)). The variant's stored crop_resolution
+                    # therefore differs per in_index. Keying only by filepath
+                    # meant the last agg-load write clobbered earlier ones,
+                    # leaving the sort-time agg out of sync with what split-
+                    # fetch's _get_resolution_string would resolve for this
+                    # specific in_index — AspectBatchSorting bucketed by the
+                    # stale crop_resolution and torch.stack later blew up on
+                    # the mismatched latent shapes.
+                    agg_data = self._aggregate_cache.get(
+                        (filepath, variation, in_index))
                     if agg_data is not None:
-                        return agg_data
+                        # Return a shallow copy. The walker stashes the
+                        # returned dict in its per-module item_cache and
+                        # then update()s it when a split name is queried at
+                        # the same (variation, index). Without the copy that
+                        # update would mutate our entry in _aggregate_cache.
+                        return dict(agg_data)
 
-                if self.resolution_from_upstream and filepath not in self._active_key_by_filepath:
-                    resolution = self._get_resolution_string(in_variation, in_index)
-                    self._active_key_by_filepath[filepath] = self._resolution_key(resolution)
-
-                cache_file = self._active_cache_file(filepath, cache_entry)
+                # Per-epoch variant resolve: ask upstream what bucket this
+                # (variation, index) wants right now. AspectBucketing's
+                # rand.choice is seeded on (variation, index), so each epoch
+                # rolls a fresh per-item target — matching the old DiskCache
+                # behaviour the new persistent cache otherwise froze. Skipped
+                # for caches without resolution variants (text caches), which
+                # fall through to ``_active_cache_file``'s any-variant fallback.
+                #
+                # Fallback path: use ``_active_cache_file`` for missing
+                # variants. ``_load_aggregate_cache`` uses the same fallback,
+                # so split-fetch's ``.pt`` matches whatever ``crop_resolution``
+                # ended up in the aggregate cache for this (filepath, var).
+                # Previously this branch went straight to
+                # ``_any_variant_cache_file`` — that returns the first
+                # variant in dict order, which differs from the aggregate
+                # load's active-key fallback whenever the entry has
+                # multiple variants. Symptom: AspectBatchSorting buckets
+                # by aggregate's crop_resolution; collate gets split-fetch's
+                # different-variant latent; torch.stack blows up.
+                cache_file: str | None
+                if self.resolution_from_upstream or self.aspect_bucketing is not None:
+                    # Fast resolve via the stamped original_resolution
+                    # before falling back to the upstream image-decode walk.
+                    # Per-batch this saves the ~250 ms decode that
+                    # ``_get_resolution_string`` would trigger for every
+                    # item via CalcAspect → LoadImage.
+                    resolution = self._fast_resolution_string(
+                        cache_entry, in_variation, in_index)
+                    if resolution is None:
+                        resolution = self._get_resolution_string(in_variation, in_index)
+                    if resolution is not None:
+                        key = self._resolution_key(resolution)
+                        variants = cache_entry.get('variants', {})
+                        variant = variants.get(key)
+                        if variant is not None:
+                            cache_file = variant['cache_file']
+                        else:
+                            cache_file = self._active_cache_file(filepath, cache_entry)
+                    else:
+                        cache_file = self._active_cache_file(filepath, cache_entry)
+                else:
+                    cache_file = self._active_cache_file(filepath, cache_entry)
                 if cache_file is None:
                     # Entry has no variants — fall through to sentinel.
                     sentinel = self._load_blank_sentinel()
