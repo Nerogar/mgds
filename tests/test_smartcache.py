@@ -26,6 +26,7 @@ import xxhash
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 class DummyDataModule(PipelineModule, RandomAccessPipelineModule):
     """Provides configurable dummy data for pipeline testing.
 
@@ -176,6 +177,7 @@ def _entry_variant(entry: dict, key: str) -> dict:
 # Hashing tests
 # ---------------------------------------------------------------------------
 
+
 class TestHashing:
     def test_hash_consistency(self, tmp_path):
         """Same file content must always produce the same hash."""
@@ -207,6 +209,7 @@ class TestHashing:
 # ---------------------------------------------------------------------------
 # Cache validation flow
 # ---------------------------------------------------------------------------
+
 
 class TestCacheValidation:
     """Tests that exercise _validate_entry logic via full pipeline runs."""
@@ -252,8 +255,9 @@ class TestCacheValidation:
         _drain(ds)  # reuse cache -- source files untouched
 
         for f in pt_files:
-            assert os.path.getmtime(os.path.join(cache_dir, f)) == pt_mtimes[f], \
+            assert os.path.getmtime(os.path.join(cache_dir, f)) == pt_mtimes[f], (
                 f"{f} was rewritten even though source was unchanged"
+            )
 
     def test_touched_file(self, tmp_path):
         """mtime changed but content same -> cache accepted, mtime updated in index.
@@ -307,8 +311,9 @@ class TestCacheValidation:
 
         # .pt files should NOT have been rewritten
         for f in pt_files:
-            assert os.path.getmtime(os.path.join(cache_dir, f)) == pt_mtimes[f], \
+            assert os.path.getmtime(os.path.join(cache_dir, f)) == pt_mtimes[f], (
                 f"{f} was rewritten on touch with same content"
+            )
 
         # But mtime in cache.json should be updated
         index_after = _read_cache_json(cache_dir)
@@ -481,6 +486,7 @@ class TestCacheValidation:
 # Deduplication
 # ---------------------------------------------------------------------------
 
+
 class TestDeduplication:
     def test_dedup_same_content(self, tmp_path):
         """Two source paths with identical content -> cached once, hash_index has both."""
@@ -580,6 +586,7 @@ class TestDeduplication:
 # Atomic writes / crash recovery
 # ---------------------------------------------------------------------------
 
+
 class TestAtomicWrites:
     def test_cache_json_tmp_recovery(self, tmp_path):
         """If only cache.json.tmp exists (no cache.json), SmartDiskCache recovers it."""
@@ -588,14 +595,16 @@ class TestAtomicWrites:
 
         good_data = {
             "version": CACHE_VERSION,
-            "entries": {"fake/path.bin": {
-                "filename": "path.bin",
-                "hash": "abcdef012345abcd",
-                "mtime": 1234567890.0,
-                "modeltype": "test",
-                "variants": {"_": {"cache_file": "abcdef012345"}},
-                "cache_version": CACHE_VERSION,
-            }},
+            "entries": {
+                "fake/path.bin": {
+                    "filename": "path.bin",
+                    "hash": "abcdef012345abcd",
+                    "mtime": 1234567890.0,
+                    "modeltype": "test",
+                    "variants": {"_": {"cache_file": "abcdef012345"}},
+                    "cache_version": CACHE_VERSION,
+                }
+            },
             "hash_index": {"abcdef012345abcd": ["fake/path.bin"]},
         }
         tmp_file = os.path.join(cache_dir, "cache.json.tmp")
@@ -647,6 +656,7 @@ class TestAtomicWrites:
 # ---------------------------------------------------------------------------
 # Garbage collection
 # ---------------------------------------------------------------------------
+
 
 class TestGarbageCollection:
     def _build_gc_scenario(self, tmp_path):
@@ -747,6 +757,7 @@ class TestGarbageCollection:
 # Cache file format
 # ---------------------------------------------------------------------------
 
+
 class TestCacheFileFormat:
     def test_pt_contains_metadata(self, tmp_path):
         """Verify .pt file has __cache_version and __modeltype keys."""
@@ -822,6 +833,7 @@ class TestCacheFileFormat:
 # Sample selection (SAMPLES balancing strategy)
 # ---------------------------------------------------------------------------
 
+
 class TestSampleSelection:
     def test_samples_different_per_epoch(self, tmp_path):
         """With SAMPLES strategy, different items should be selected across epochs.
@@ -887,28 +899,26 @@ class TestSampleSelection:
 
         # Each epoch should produce exactly sample_count items
         for count in per_epoch_counts:
-            assert count == sample_count, \
-                f"Expected {sample_count} items per epoch, got {count}"
+            assert count == sample_count, f"Expected {sample_count} items per epoch, got {count}"
 
         # Over 8 epochs with 10 items and 3 chosen each time, we expect
         # the union to be larger than 3 (almost certainly).
-        assert len(all_selected) > sample_count, \
+        assert len(all_selected) > sample_count, (
             f"Expected more than {sample_count} distinct items across {num_epochs} epochs, got {len(all_selected)}"
+        )
 
 
 # ---------------------------------------------------------------------------
 # Integration: full pipeline round-trip
 # ---------------------------------------------------------------------------
 
+
 class TestIntegration:
     def test_cache_reuse_across_epochs(self, tmp_path):
         """Cache built in epoch 1 is reused in epoch 2 (no .pt rewrite)."""
         src_dir = tmp_path / "sources"
         src_dir.mkdir()
-        paths = [
-            _create_source_file(src_dir, f"img_{i}.bin", f"reuse content {i}".encode())
-            for i in range(3)
-        ]
+        paths = [_create_source_file(src_dir, f"img_{i}.bin", f"reuse content {i}".encode()) for i in range(3)]
         tensors = _make_tensors(3, seed=600)
 
         ds, cache_dir, _ = _build_smart_pipeline(
@@ -934,8 +944,7 @@ class TestIntegration:
         _drain(ds)  # epoch 2
 
         for f in pt_files:
-            assert os.path.getmtime(os.path.join(cache_dir, f)) == pt_mtimes[f], \
-                f"{f} was rewritten on epoch 2"
+            assert os.path.getmtime(os.path.join(cache_dir, f)) == pt_mtimes[f], f"{f} was rewritten on epoch 2"
 
     def test_cache_index_structure(self, tmp_path):
         """cache.json must have version, entries, and hash_index."""
@@ -969,10 +978,7 @@ class TestIntegration:
         """Verify data read from cache matches data from dummy module."""
         src_dir = tmp_path / "sources"
         src_dir.mkdir()
-        paths = [
-            _create_source_file(src_dir, f"img_{i}.bin", f"round trip {i}".encode())
-            for i in range(3)
-        ]
+        paths = [_create_source_file(src_dir, f"img_{i}.bin", f"round trip {i}".encode()) for i in range(3)]
         tensors = _make_tensors(3, seed=800)
 
         ds, cache_dir, _ = _build_smart_pipeline(
@@ -999,8 +1005,7 @@ class TestIntegration:
         assert len(batches2) == 3
 
         for b1, b2 in zip(batches1, batches2, strict=True):
-            assert torch.equal(b1["latent"], b2["latent"]), \
-                "Cached latent differs from original"
+            assert torch.equal(b1["latent"], b2["latent"]), "Cached latent differs from original"
             assert b1["crop_resolution"] == b2["crop_resolution"]
 
     def test_variations_create_multiple_pt(self, tmp_path):
@@ -1010,8 +1015,7 @@ class TestIntegration:
         num_items = 3
         num_variations = 2
         paths = [
-            _create_source_file(src_dir, f"img_{i}.bin", f"variation content {i}".encode())
-            for i in range(num_items)
+            _create_source_file(src_dir, f"img_{i}.bin", f"variation content {i}".encode()) for i in range(num_items)
         ]
         tensors = _make_tensors(num_items, seed=900)
 
@@ -1084,8 +1088,9 @@ class TestIntegration:
         index = _read_cache_json(cache_dir)
         norm = os.path.normpath(path)
         cache_file = _entry_cache_file(index["entries"][norm])
-        assert cache_file.startswith(expected_prefix), \
+        assert cache_file.startswith(expected_prefix), (
             f"Cache file '{cache_file}' should start with hash prefix '{expected_prefix}'"
+        )
 
     def test_balancing_repeats(self, tmp_path):
         """With REPEATS balancing=0.5, floor(N*0.5) items should be emitted."""
@@ -1093,8 +1098,7 @@ class TestIntegration:
         src_dir = tmp_path / "sources"
         src_dir.mkdir()
         paths = [
-            _create_source_file(src_dir, f"img_{i}.bin", f"repeats content {i}".encode())
-            for i in range(num_items)
+            _create_source_file(src_dir, f"img_{i}.bin", f"repeats content {i}".encode()) for i in range(num_items)
         ]
         tensors = _make_tensors(num_items, seed=1100)
 
@@ -1127,8 +1131,9 @@ class TestIntegration:
         )
 
         batches = _drain(ds)
-        assert len(batches) == expected_output, \
+        assert len(batches) == expected_output, (
             f"Expected {expected_output} items with REPEATS balancing=0.5, got {len(batches)}"
+        )
 
     def test_no_source_path_fallback(self, tmp_path):
         """Without source_path_in_name, SmartDiskCache should not cache but still return data."""
@@ -1159,6 +1164,7 @@ class TestIntegration:
 # Rebuild hash_index cleanup regression test
 # ---------------------------------------------------------------------------
 
+
 class TestRebuildHashIndexCleanup:
     def test_rebuild_cleans_hash_index(self, tmp_path):
         """When validation drops a stale entry (content changed, missing pt,
@@ -1173,9 +1179,14 @@ class TestRebuildHashIndexCleanup:
         tensors = _make_tensors(1)
         dummy_data = {"latent": tensors, "image_path": paths}
         ds, cache_dir, _ = _build_smart_pipeline(
-            tmp_path, [{}], dummy_data, 1,
-            split_names=["latent"], aggregate_names=[],
-            modeltype="testmodel", source_path_in_name="image_path",
+            tmp_path,
+            [{}],
+            dummy_data,
+            1,
+            split_names=["latent"],
+            aggregate_names=[],
+            modeltype="testmodel",
+            source_path_in_name="image_path",
         )
         _drain(ds)
 
@@ -1193,9 +1204,14 @@ class TestRebuildHashIndexCleanup:
 
         # Fresh pipeline = new run; full validation runs at start.
         ds2, _, _ = _build_smart_pipeline(
-            tmp_path, [{}], dummy_data, 1,
-            split_names=["latent"], aggregate_names=[],
-            modeltype="testmodel", source_path_in_name="image_path",
+            tmp_path,
+            [{}],
+            dummy_data,
+            1,
+            split_names=["latent"],
+            aggregate_names=[],
+            modeltype="testmodel",
+            source_path_in_name="image_path",
         )
         _drain(ds2)
 
@@ -1209,6 +1225,7 @@ class TestRebuildHashIndexCleanup:
 # ---------------------------------------------------------------------------
 # Fast validation tests
 # ---------------------------------------------------------------------------
+
 
 class TestFastValidation:
     """Tests for the fast validation path (directory mtime + spot check)."""
@@ -1350,6 +1367,7 @@ class TestFastValidation:
 # Session-level skip (no per-epoch revalidation within one process)
 # ---------------------------------------------------------------------------
 
+
 class TestSessionSkip:
     """Tests that the in-process session cache skips re-validation entirely
     on subsequent epochs when the set of required filepaths is unchanged."""
@@ -1357,10 +1375,7 @@ class TestSessionSkip:
     def _setup_files(self, tmp_path, n=4):
         src_dir = tmp_path / "sources"
         src_dir.mkdir()
-        paths = [
-            _create_source_file(src_dir, f"img_{i}.bin", f"content_{i}".encode())
-            for i in range(n)
-        ]
+        paths = [_create_source_file(src_dir, f"img_{i}.bin", f"content_{i}".encode()) for i in range(n)]
         tensors = _make_tensors(n, seed=99)
         return paths, tensors
 
@@ -1493,6 +1508,7 @@ class TestSessionSkip:
 # Bulk scandir of cache dir (Change 1)
 # ---------------------------------------------------------------------------
 
+
 class TestBulkScanCorrectness:
     """Verify that the bulk cache-dir scan replaces per-file os.path.isfile
     while producing identical existence-check results."""
@@ -1500,18 +1516,17 @@ class TestBulkScanCorrectness:
     def _build_cache(self, tmp_path, n=10):
         src_dir = tmp_path / "sources"
         src_dir.mkdir()
-        paths = [
-            _create_source_file(src_dir, f"img_{i}.bin", f"content_{i}".encode())
-            for i in range(n)
-        ]
+        paths = [_create_source_file(src_dir, f"img_{i}.bin", f"content_{i}".encode()) for i in range(n)]
         tensors = _make_tensors(n, seed=11)
         ds, cache_dir, _ = _build_smart_pipeline(
             tmp_path,
             concepts=[{"name": "A", "path": "dummy"}],
             dummy_data={"latent": tensors, "image_path": paths},
             dummy_length=n,
-            split_names=["latent"], aggregate_names=[],
-            modeltype="testmodel", source_path_in_name="image_path",
+            split_names=["latent"],
+            aggregate_names=[],
+            modeltype="testmodel",
+            source_path_in_name="image_path",
         )
         _drain(ds)
         return ds, cache_dir, paths
@@ -1522,7 +1537,7 @@ class TestBulkScanCorrectness:
         sdc = next(m for m in ds.loading_pipeline.modules if isinstance(m, SmartDiskCache))
 
         existing = sdc._scan_existing_pt_files()
-        for entry in sdc.cache_index['entries'].values():
+        for entry in sdc.cache_index["entries"].values():
             cf = _entry_cache_file(entry)
             for v in range(1):  # variations=1 in this fixture
                 pt_name = f"{cf}_{v + 1}.pt"
@@ -1536,9 +1551,10 @@ class TestBulkScanCorrectness:
         sdc = next(m for m in ds.loading_pipeline.modules if isinstance(m, SmartDiskCache))
 
         # All cached files should appear in the in-memory set as a side effect of build.
-        names_in_index = {f"{_entry_cache_file(e)}_1.pt" for e in sdc.cache_index['entries'].values()}
-        assert names_in_index.issubset(sdc._existing_pt_files), \
+        names_in_index = {f"{_entry_cache_file(e)}_1.pt" for e in sdc.cache_index["entries"].values()}
+        assert names_in_index.issubset(sdc._existing_pt_files), (
             f"missing from set: {names_in_index - sdc._existing_pt_files}"
+        )
 
     def test_scan_handles_missing_cache_dir(self, tmp_path):
         """Scanning a non-existent dir must return an empty set, not raise."""
@@ -1551,6 +1567,7 @@ class TestBulkScanCorrectness:
 # ---------------------------------------------------------------------------
 # Bulk source mtime scan (Change 2)
 # ---------------------------------------------------------------------------
+
 
 class TestBulkStatCorrectness:
     """Verify that _bulk_stat_source_files returns the same mtimes as
@@ -1609,8 +1626,10 @@ class TestBulkStatCorrectness:
 # Resolution short-circuit (Change 6)
 # ---------------------------------------------------------------------------
 
+
 class _ResolutionCountingCache(SmartDiskCache):
     """Test subclass that counts _get_resolution_string calls."""
+
     def __init__(self, *a, **kw):
         super().__init__(*a, **kw)
         self.resolution_call_count = 0
@@ -1632,8 +1651,10 @@ class TestResolutionShortCircuit:
         dummy = DummyDataModule(data={"latent": tensors, "image_path": paths}, length=n)
         cache_mod = _ResolutionCountingCache(
             cache_dir=cache_dir,
-            split_names=["latent"], aggregate_names=[],
-            modeltype="testmodel", source_path_in_name="image_path",
+            split_names=["latent"],
+            aggregate_names=[],
+            modeltype="testmodel",
+            source_path_in_name="image_path",
         )
         output_mod = OutputPipelineModule(names=["latent"])
         ds = MGDS(
@@ -1641,7 +1662,9 @@ class TestResolutionShortCircuit:
             concepts=[{"name": "A", "path": "dummy"}],
             settings={},
             definition=[[dummy], [cache_mod], [output_mod]],
-            batch_size=1, state=PipelineState(), seed=7,
+            batch_size=1,
+            state=PipelineState(),
+            seed=7,
         )
         return ds, cache_mod, paths
 
@@ -1668,8 +1691,10 @@ class TestResolutionShortCircuit:
 # Variation-dedup (Change 3)
 # ---------------------------------------------------------------------------
 
+
 class _ValidateCountingCache(SmartDiskCache):
     """Test subclass that counts _validate_entry calls."""
+
     def __init__(self, *a, **kw):
         super().__init__(*a, **kw)
         self.validate_call_count = 0
@@ -1692,8 +1717,10 @@ class TestVariationDedup:
         dummy = DummyDataModule(data={"latent": tensors, "image_path": paths}, length=n)
         cache_mod = _ValidateCountingCache(
             cache_dir=cache_dir,
-            split_names=["latent"], aggregate_names=[],
-            modeltype="testmodel", source_path_in_name="image_path",
+            split_names=["latent"],
+            aggregate_names=[],
+            modeltype="testmodel",
+            source_path_in_name="image_path",
         )
         output_mod = OutputPipelineModule(names=["latent"])
         ds = MGDS(
@@ -1701,7 +1728,9 @@ class TestVariationDedup:
             concepts=[{"name": "A", "path": "dummy"}],
             settings={},
             definition=[[dummy], [cache_mod], [output_mod]],
-            batch_size=1, state=PipelineState(), seed=7,
+            batch_size=1,
+            state=PipelineState(),
+            seed=7,
         )
         return ds, cache_mod, paths
 
@@ -1723,11 +1752,14 @@ class TestVariationDedup:
         paths = sorted(str(p) for p in src_dir.iterdir())
         tensors = _make_tensors(10, seed=99)
         from mgds.pipelineModules.SmartDiskCache import SmartDiskCache as _SDC  # noqa: F401
+
         dummy2 = DummyDataModule(data={"latent": tensors, "image_path": paths}, length=10)
         cache_mod2 = _ValidateCountingCache(
             cache_dir=cache_dir,
-            split_names=["latent"], aggregate_names=[],
-            modeltype="testmodel", source_path_in_name="image_path",
+            split_names=["latent"],
+            aggregate_names=[],
+            modeltype="testmodel",
+            source_path_in_name="image_path",
         )
         output_mod2 = OutputPipelineModule(names=["latent"])
         ds2 = MGDS(
@@ -1735,19 +1767,23 @@ class TestVariationDedup:
             concepts=[{"name": "A", "path": "dummy"}],
             settings={},
             definition=[[dummy2], [cache_mod2], [output_mod2]],
-            batch_size=1, state=PipelineState(), seed=7,
+            batch_size=1,
+            state=PipelineState(),
+            seed=7,
         )
         _drain(ds2)  # warm — entries exist
         # Cap is N (one call per index), not N×variations. Even better is
         # zero (fast path passes), but we just guard against the regression
         # where validate runs N×V times.
-        assert cache_mod2.validate_call_count <= 10, \
+        assert cache_mod2.validate_call_count <= 10, (
             f"validate called {cache_mod2.validate_call_count} times for 10 indices"
+        )
 
 
 # ---------------------------------------------------------------------------
 # Watched-file fingerprint (Change 4)
 # ---------------------------------------------------------------------------
+
 
 class TestWatchedFingerprint:
     """Verify the fingerprint-based fast-validate behaviour."""
@@ -1766,8 +1802,10 @@ class TestWatchedFingerprint:
             concepts=[{"name": "A", "path": "dummy"}],
             dummy_data={"latent": tensors, "image_path": paths},
             dummy_length=len(paths),
-            split_names=["latent"], aggregate_names=[],
-            modeltype="testmodel", source_path_in_name="image_path",
+            split_names=["latent"],
+            aggregate_names=[],
+            modeltype="testmodel",
+            source_path_in_name="image_path",
         )
         _drain(ds)
         idx = _read_cache_json(cache_dir)
@@ -1788,8 +1826,10 @@ class TestWatchedFingerprint:
             concepts=[{"name": "A", "path": "dummy"}],
             dummy_data={"latent": tensors, "image_path": paths},
             dummy_length=len(paths),
-            split_names=["latent"], aggregate_names=[],
-            modeltype="testmodel", source_path_in_name="image_path",
+            split_names=["latent"],
+            aggregate_names=[],
+            modeltype="testmodel",
+            source_path_in_name="image_path",
         )
         _drain(ds)
         capsys.readouterr()  # clear captured output
@@ -1805,13 +1845,14 @@ class TestWatchedFingerprint:
             concepts=[{"name": "A", "path": "dummy"}],
             dummy_data={"latent": tensors, "image_path": paths},
             dummy_length=len(paths),
-            split_names=["latent"], aggregate_names=[],
-            modeltype="testmodel", source_path_in_name="image_path",
+            split_names=["latent"],
+            aggregate_names=[],
+            modeltype="testmodel",
+            source_path_in_name="image_path",
         )
         _drain(ds2)
         out = capsys.readouterr().out
-        assert "Fast validation passed" in out, \
-            "sidecar touch must NOT invalidate fast validation"
+        assert "Fast validation passed" in out, "sidecar touch must NOT invalidate fast validation"
 
     def test_fingerprint_fails_on_watched_file_touched(self, tmp_path, capsys):
         paths, tensors = self._setup(tmp_path, n=3)
@@ -1820,8 +1861,10 @@ class TestWatchedFingerprint:
             concepts=[{"name": "A", "path": "dummy"}],
             dummy_data={"latent": tensors, "image_path": paths},
             dummy_length=len(paths),
-            split_names=["latent"], aggregate_names=[],
-            modeltype="testmodel", source_path_in_name="image_path",
+            split_names=["latent"],
+            aggregate_names=[],
+            modeltype="testmodel",
+            source_path_in_name="image_path",
         )
         _drain(ds)
         capsys.readouterr()
@@ -1834,13 +1877,14 @@ class TestWatchedFingerprint:
             concepts=[{"name": "A", "path": "dummy"}],
             dummy_data={"latent": tensors, "image_path": paths},
             dummy_length=len(paths),
-            split_names=["latent"], aggregate_names=[],
-            modeltype="testmodel", source_path_in_name="image_path",
+            split_names=["latent"],
+            aggregate_names=[],
+            modeltype="testmodel",
+            source_path_in_name="image_path",
         )
         _drain(ds2)
         out = capsys.readouterr().out
-        assert "Fast validation passed" not in out, \
-            "watched-file mtime change must invalidate fast validation"
+        assert "Fast validation passed" not in out, "watched-file mtime change must invalidate fast validation"
 
     def test_fingerprint_fails_when_watched_file_deleted(self, tmp_path, capsys):
         paths, tensors = self._setup(tmp_path, n=3)
@@ -1849,8 +1893,10 @@ class TestWatchedFingerprint:
             concepts=[{"name": "A", "path": "dummy"}],
             dummy_data={"latent": tensors, "image_path": paths},
             dummy_length=len(paths),
-            split_names=["latent"], aggregate_names=[],
-            modeltype="testmodel", source_path_in_name="image_path",
+            split_names=["latent"],
+            aggregate_names=[],
+            modeltype="testmodel",
+            source_path_in_name="image_path",
         )
         _drain(ds)
         capsys.readouterr()
@@ -1863,8 +1909,10 @@ class TestWatchedFingerprint:
             concepts=[{"name": "A", "path": "dummy"}],
             dummy_data={"latent": tensors, "image_path": paths[1:]},  # mirror the deletion
             dummy_length=len(paths) - 1,
-            split_names=["latent"], aggregate_names=[],
-            modeltype="testmodel", source_path_in_name="image_path",
+            split_names=["latent"],
+            aggregate_names=[],
+            modeltype="testmodel",
+            source_path_in_name="image_path",
         )
         _drain(ds2)
         out = capsys.readouterr().out
@@ -1880,8 +1928,10 @@ class TestWatchedFingerprint:
             concepts=[{"name": "A", "path": "dummy"}],
             dummy_data={"latent": tensors, "image_path": paths},
             dummy_length=len(paths),
-            split_names=["latent"], aggregate_names=[],
-            modeltype="testmodel", source_path_in_name="image_path",
+            split_names=["latent"],
+            aggregate_names=[],
+            modeltype="testmodel",
+            source_path_in_name="image_path",
         )
         _drain(ds)
         capsys.readouterr()
@@ -1897,13 +1947,14 @@ class TestWatchedFingerprint:
             concepts=[{"name": "A", "path": "dummy"}],
             dummy_data={"latent": tensors, "image_path": paths},
             dummy_length=len(paths),
-            split_names=["latent"], aggregate_names=[],
-            modeltype="testmodel", source_path_in_name="image_path",
+            split_names=["latent"],
+            aggregate_names=[],
+            modeltype="testmodel",
+            source_path_in_name="image_path",
         )
         _drain(ds2)
         out_first = capsys.readouterr().out
-        assert "Fast validation passed" not in out_first, \
-            "legacy cache must skip the fast path"
+        assert "Fast validation passed" not in out_first, "legacy cache must skip the fast path"
 
         # Third run should hit the fast path now that the fingerprint is written.
         ds3, _, _ = _build_smart_pipeline(
@@ -1911,8 +1962,10 @@ class TestWatchedFingerprint:
             concepts=[{"name": "A", "path": "dummy"}],
             dummy_data={"latent": tensors, "image_path": paths},
             dummy_length=len(paths),
-            split_names=["latent"], aggregate_names=[],
-            modeltype="testmodel", source_path_in_name="image_path",
+            split_names=["latent"],
+            aggregate_names=[],
+            modeltype="testmodel",
+            source_path_in_name="image_path",
         )
         _drain(ds3)
         out_second = capsys.readouterr().out
@@ -1922,6 +1975,7 @@ class TestWatchedFingerprint:
 # ---------------------------------------------------------------------------
 # Sidecar invalidation — extra_watched_paths_in_names integration tests
 # ---------------------------------------------------------------------------
+
 
 class TestSidecarValidation:
     """_check_sidecars + extra_watched_paths_in_names: an entry rebuilds when
@@ -1939,6 +1993,7 @@ class TestSidecarValidation:
         sdc._extra_paths_by_filepath = {}
         sdc._source_mtimes = {}
         import threading as _t
+
         sdc._index_lock = _t.Lock()
         return sdc
 
@@ -1981,8 +2036,7 @@ class TestSidecarValidation:
             "sidecar_hashes": {sidecar: real_hash},
         }
         assert sdc._check_sidecars(primary, entry) is True
-        assert entry["sidecar_mtimes"][sidecar] != stale_mtime, \
-            "stored mtime should be refreshed to current"
+        assert entry["sidecar_mtimes"][sidecar] != stale_mtime, "stored mtime should be refreshed to current"
 
     def test_content_change_invalidates(self, tmp_path):
         sdc = self._make_cache(tmp_path)
@@ -2035,8 +2089,10 @@ class TestSidecarValidation:
             concepts=[{"name": "A", "path": "dummy"}],
             dummy_data={"latent": tensors, "image_path": paths, "mask_path": sidecars},
             dummy_length=len(paths),
-            split_names=["latent"], aggregate_names=[],
-            modeltype="testmodel", source_path_in_name="image_path",
+            split_names=["latent"],
+            aggregate_names=[],
+            modeltype="testmodel",
+            source_path_in_name="image_path",
             extra_watched_paths_in_names=["mask_path"],
         )
         _drain(ds)
@@ -2049,8 +2105,7 @@ class TestSidecarValidation:
         assert entry0 is not None, "entry for paths[0] missing"
         assert "sidecar_mtimes" in entry0, "first run should stamp sidecar_mtimes"
         sidecar0 = os.path.normpath(sidecars[0])
-        assert sidecar0 in entry0["sidecar_mtimes"], \
-            f"expected {sidecar0} in {list(entry0['sidecar_mtimes'].keys())}"
+        assert sidecar0 in entry0["sidecar_mtimes"], f"expected {sidecar0} in {list(entry0['sidecar_mtimes'].keys())}"
 
         time.sleep(0.05)
         with open(sidecars[0], "wb") as f:
@@ -2061,14 +2116,15 @@ class TestSidecarValidation:
             concepts=[{"name": "A", "path": "dummy"}],
             dummy_data={"latent": tensors, "image_path": paths, "mask_path": sidecars},
             dummy_length=len(paths),
-            split_names=["latent"], aggregate_names=[],
-            modeltype="testmodel", source_path_in_name="image_path",
+            split_names=["latent"],
+            aggregate_names=[],
+            modeltype="testmodel",
+            source_path_in_name="image_path",
             extra_watched_paths_in_names=["mask_path"],
         )
         _drain(ds2)
         out = capsys.readouterr().out
-        assert "Fast validation passed" not in out, \
-            "sidecar content change must invalidate the fast path"
+        assert "Fast validation passed" not in out, "sidecar content change must invalidate the fast path"
 
     def test_end_to_end_sidecar_touch_no_content_change_keeps_validity(self, tmp_path, capsys):
         """Touch-only mtime drift on a watched sidecar must NOT rebuild the
@@ -2083,8 +2139,10 @@ class TestSidecarValidation:
             concepts=[{"name": "A", "path": "dummy"}],
             dummy_data={"latent": tensors, "image_path": paths, "mask_path": sidecars},
             dummy_length=len(paths),
-            split_names=["latent"], aggregate_names=[],
-            modeltype="testmodel", source_path_in_name="image_path",
+            split_names=["latent"],
+            aggregate_names=[],
+            modeltype="testmodel",
+            source_path_in_name="image_path",
             extra_watched_paths_in_names=["mask_path"],
         )
         _drain(ds)
@@ -2099,8 +2157,10 @@ class TestSidecarValidation:
             concepts=[{"name": "A", "path": "dummy"}],
             dummy_data={"latent": tensors, "image_path": paths, "mask_path": sidecars},
             dummy_length=len(paths),
-            split_names=["latent"], aggregate_names=[],
-            modeltype="testmodel", source_path_in_name="image_path",
+            split_names=["latent"],
+            aggregate_names=[],
+            modeltype="testmodel",
+            source_path_in_name="image_path",
             extra_watched_paths_in_names=["mask_path"],
         )
         _drain(ds2)
@@ -2109,14 +2169,16 @@ class TestSidecarValidation:
         # Variants/cache_files must be unchanged across runs (no rebuild).
         for fp, entry_before in idx_before["entries"].items():
             entry_after = idx_after["entries"][fp]
-            assert entry_before["variants"] == entry_after["variants"], \
+            assert entry_before["variants"] == entry_after["variants"], (
                 f"{fp}: touch-only sidecar drift must not rebuild"
+            )
 
 
 # ---------------------------------------------------------------------------
 # Validation benchmarks — record timings for the headline speedups.
 # Run with `pytest -k Benchmark -s` to see numbers.
 # ---------------------------------------------------------------------------
+
 
 class TestValidationBenchmarks:
     """Side-by-side timings: naive per-file syscalls vs the new bulk methods.
@@ -2156,7 +2218,7 @@ class TestValidationBenchmarks:
                     _ = f"{cf}_{v + 1}.pt" in existing
         bulk = time.perf_counter() - t0
 
-        print(f"\n[bench pt-existence] naive={naive*1000:.1f}ms bulk={bulk*1000:.1f}ms speedup={naive/bulk:.1f}×")
+        print(f"\n[bench pt-existence] naive={naive * 1000:.1f}ms bulk={bulk * 1000:.1f}ms speedup={naive / bulk:.1f}×")
         assert bulk < naive, f"bulk {bulk:.4f}s should beat naive {naive:.4f}s"
 
     def test_bench_bulk_vs_serial_getmtime(self, tmp_path, capsys):
@@ -2188,7 +2250,7 @@ class TestValidationBenchmarks:
         # Sanity: same data
         assert naive_mtimes == bulk_mtimes
 
-        print(f"\n[bench source-mtime] naive={naive*1000:.1f}ms bulk={bulk*1000:.1f}ms speedup={naive/bulk:.1f}×")
+        print(f"\n[bench source-mtime] naive={naive * 1000:.1f}ms bulk={bulk * 1000:.1f}ms speedup={naive / bulk:.1f}×")
         # Conservative threshold: bulk should at least not be worse than naive.
         # On Defender-laden systems the speedup is much larger (5-50x).
         assert bulk < naive * 2.0, f"bulk {bulk:.4f}s vs naive {naive:.4f}s"
@@ -2208,8 +2270,10 @@ class TestValidationBenchmarks:
                 concepts=[{"name": "B", "path": "dummy"}],
                 dummy_data={"latent": tensors, "image_path": paths},
                 dummy_length=n,
-                split_names=["latent"], aggregate_names=[],
-                modeltype="testmodel", source_path_in_name="image_path",
+                split_names=["latent"],
+                aggregate_names=[],
+                modeltype="testmodel",
+                source_path_in_name="image_path",
             )
 
         # Cold start
@@ -2233,16 +2297,15 @@ class TestValidationBenchmarks:
         t_full = time.perf_counter() - t0
 
         print(
-            f"\n[bench e2e] cold={t_cold*1000:.0f}ms "
-            f"warm_fast={t_warm*1000:.0f}ms "
-            f"warm_full={t_full*1000:.0f}ms"
+            f"\n[bench e2e] cold={t_cold * 1000:.0f}ms warm_fast={t_warm * 1000:.0f}ms warm_full={t_full * 1000:.0f}ms"
         )
         # Fast validation should be MUCH cheaper than the cold build.
         assert t_warm < t_cold, "fast-validate should beat cold build"
         # Forced full validation, after the bulk-scan changes, should still be
         # fast — no more than 3× the fast-validate path on a clean bench.
-        assert t_full < max(t_cold, t_warm * 50.0), \
+        assert t_full < max(t_cold, t_warm * 50.0), (
             f"full-validate after touch should not regress: t_full={t_full:.3f}s"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -2270,17 +2333,20 @@ class TestLegacyV2Migration:
 
     def test_v2_with_resolution_lifts_to_keyed_variant(self, tmp_path):
         cache_dir = str(tmp_path / "cache")
-        self._write_v2_index(cache_dir, {
-            "fake/img.png": {
-                "filename": "img.png",
-                "hash": "deadbeefcafe1234",
-                "mtime": 1234.0,
-                "modeltype": "test",
-                "resolution": "896x640",
-                "cache_file": "deadbeefcafe_896x640",
-                "cache_version": 2,
-            }
-        })
+        self._write_v2_index(
+            cache_dir,
+            {
+                "fake/img.png": {
+                    "filename": "img.png",
+                    "hash": "deadbeefcafe1234",
+                    "mtime": 1234.0,
+                    "modeltype": "test",
+                    "resolution": "896x640",
+                    "cache_file": "deadbeefcafe_896x640",
+                    "cache_version": 2,
+                }
+            },
+        )
 
         sdc = SmartDiskCache.__new__(SmartDiskCache)
         sdc.cache_dir = cache_dir
@@ -2295,17 +2361,20 @@ class TestLegacyV2Migration:
 
     def test_v2_without_resolution_uses_underscore_key(self, tmp_path):
         cache_dir = str(tmp_path / "cache")
-        self._write_v2_index(cache_dir, {
-            "fake/text.txt": {
-                "filename": "text.txt",
-                "hash": "deadbeefcafe5678",
-                "mtime": 5678.0,
-                "modeltype": "test",
-                "resolution": None,
-                "cache_file": "deadbeefcafe",
-                "cache_version": 2,
-            }
-        })
+        self._write_v2_index(
+            cache_dir,
+            {
+                "fake/text.txt": {
+                    "filename": "text.txt",
+                    "hash": "deadbeefcafe5678",
+                    "mtime": 5678.0,
+                    "modeltype": "test",
+                    "resolution": None,
+                    "cache_file": "deadbeefcafe",
+                    "cache_version": 2,
+                }
+            },
+        )
 
         sdc = SmartDiskCache.__new__(SmartDiskCache)
         sdc.cache_dir = cache_dir
@@ -2316,13 +2385,20 @@ class TestLegacyV2Migration:
 
     def test_migration_is_idempotent(self, tmp_path):
         cache_dir = str(tmp_path / "cache")
-        self._write_v2_index(cache_dir, {
-            "fake/a.bin": {
-                "filename": "a.bin", "hash": "h1", "mtime": 1.0,
-                "modeltype": "test", "resolution": None, "cache_file": "h1",
-                "cache_version": 2,
-            }
-        })
+        self._write_v2_index(
+            cache_dir,
+            {
+                "fake/a.bin": {
+                    "filename": "a.bin",
+                    "hash": "h1",
+                    "mtime": 1.0,
+                    "modeltype": "test",
+                    "resolution": None,
+                    "cache_file": "h1",
+                    "cache_version": 2,
+                }
+            },
+        )
         sdc = SmartDiskCache.__new__(SmartDiskCache)
         sdc.cache_dir = cache_dir
         first = sdc._load_cache_index()
@@ -2410,7 +2486,7 @@ class TestDriftRecoveryRebucket:
         sdc.cache_dir = cache_dir
         sdc._real_cache_dir = os.path.realpath(cache_dir)
         sdc.modeltype = "testmodel"
-        sdc._index_lock = __import__('threading').Lock()
+        sdc._index_lock = __import__("threading").Lock()
         sdc.rebucket_provider = rebucket_provider
         sdc.bucket_method_provider = None
         sdc.resolution_from_upstream = False
@@ -2590,8 +2666,10 @@ class TestBucketMethodStamping:
         dummy = DummyDataModule(data={"latent": tensors, "image_path": paths}, length=3)
         cache_mod = SmartDiskCache(
             cache_dir=cache_dir,
-            split_names=["latent"], aggregate_names=[],
-            modeltype="testmodel", source_path_in_name="image_path",
+            split_names=["latent"],
+            aggregate_names=[],
+            modeltype="testmodel",
+            source_path_in_name="image_path",
             bucket_method_provider=lambda: method_hash,
             rebucket_provider=lambda aspect: [],
         )
@@ -2601,7 +2679,9 @@ class TestBucketMethodStamping:
             concepts=[{"name": "A", "path": "dummy"}],
             settings={},
             definition=[[dummy], [cache_mod], [output_mod]],
-            batch_size=1, state=PipelineState(), seed=7,
+            batch_size=1,
+            state=PipelineState(),
+            seed=7,
         )
         return ds, cache_dir
 
@@ -2621,8 +2701,10 @@ class TestBucketMethodStamping:
         dummy = DummyDataModule(data={"latent": tensors, "image_path": [path]}, length=1)
         cache_mod = SmartDiskCache(
             cache_dir=cache_dir,
-            split_names=["latent"], aggregate_names=[],
-            modeltype="testmodel", source_path_in_name="image_path",
+            split_names=["latent"],
+            aggregate_names=[],
+            modeltype="testmodel",
+            source_path_in_name="image_path",
             bucket_method_provider=None,
             rebucket_provider=None,
         )
@@ -2632,7 +2714,9 @@ class TestBucketMethodStamping:
             concepts=[{"name": "A", "path": "dummy"}],
             settings={},
             definition=[[dummy], [cache_mod], [output_mod]],
-            batch_size=1, state=PipelineState(), seed=7,
+            batch_size=1,
+            state=PipelineState(),
+            seed=7,
         )
         _drain(ds)
         index = _read_cache_json(cache_dir)
@@ -2694,7 +2778,8 @@ class TestGCWalksVariants:
             "version": CACHE_VERSION,
             "entries": {
                 norm_src: {
-                    "filename": "img.bin", "hash": "h12abcdef012",
+                    "filename": "img.bin",
+                    "hash": "h12abcdef012",
                     "mtime": os.path.getmtime(src),
                     "modeltype": "testmodel",
                     "variants": {
@@ -2727,7 +2812,8 @@ class TestGCWalksVariants:
             "version": CACHE_VERSION,
             "entries": {
                 dead_path: {
-                    "filename": "no_such_source.bin", "hash": "h12abcdef012",
+                    "filename": "no_such_source.bin",
+                    "hash": "h12abcdef012",
                     "mtime": 1.0,
                     "modeltype": "testmodel",
                     "variants": {
@@ -2762,7 +2848,8 @@ class TestGCWalksVariants:
             "version": 2,
             "entries": {
                 norm_src: {
-                    "filename": "img.bin", "hash": "h12abcdef012",
+                    "filename": "img.bin",
+                    "hash": "h12abcdef012",
                     "mtime": os.path.getmtime(src),
                     "modeltype": "testmodel",
                     "resolution": None,
@@ -2796,35 +2883,35 @@ class TestPerIndexAggregateCache:
     didn't match.
     """
 
-    FP_A = r'F:\Datasets\test\fileA.jpg'  # has both variants — like the SoReal! file at 4032x2268
-    FP_B = r'F:\Datasets\test\fileB.jpg'  # only the 512 variant — like the pinterest file at 1200x675
+    FP_A = r"F:\Datasets\test\fileA.jpg"  # has both variants — like the SoReal! file at 4032x2268
+    FP_B = r"F:\Datasets\test\fileB.jpg"  # only the 512 variant — like the pinterest file at 1200x675
 
     # Per-in_index variant resolution. Mirrors what _get_resolution_string
     # would walk upstream and compute for each (variation, in_index): rand
     # picks a target, bucket_for_aspect maps to a key.
     PER_INDEX_RESOLUTION = {
-        100: '1024x576',  # fp_A's first occurrence — rand picks 768
-        200: '704x384',   # fp_A's second occurrence (same file, different concept) — rand picks 512
-        300: '704x384',   # fp_B — rand picks 512 (variant exists)
+        100: "1024x576",  # fp_A's first occurrence — rand picks 768
+        200: "704x384",  # fp_A's second occurrence (same file, different concept) — rand picks 512
+        300: "704x384",  # fp_B — rand picks 512 (variant exists)
     }
 
     # The .pt's stored aggregate values per cache_file. Mirrors what
     # torch.load on each variant's .pt would return.
     PT_CONTENTS = {
-        'hashA_1024x576': {'crop_resolution': (1024, 576), 'image_path': FP_A},
-        'hashA_704x384': {'crop_resolution': (704, 384), 'image_path': FP_A},
-        'hashB_704x384': {'crop_resolution': (704, 384), 'image_path': FP_B},
+        "hashA_1024x576": {"crop_resolution": (1024, 576), "image_path": FP_A},
+        "hashA_704x384": {"crop_resolution": (704, 384), "image_path": FP_A},
+        "hashB_704x384": {"crop_resolution": (704, 384), "image_path": FP_B},
     }
 
     def _make_sdc(self):
         """Build a SmartDiskCache primed with the multi-in_index dataset
         shape, no executor/pipeline/disk required."""
         sdc = SmartDiskCache.__new__(SmartDiskCache)
-        sdc.cache_dir = '/fake/cache'
-        sdc._real_cache_dir = '/fake/cache'
-        sdc.modeltype = 'testmodel'
-        sdc.split_names = ['latent_image']
-        sdc.aggregate_names = ['crop_resolution', 'image_path']
+        sdc.cache_dir = "/fake/cache"
+        sdc._real_cache_dir = "/fake/cache"
+        sdc.modeltype = "testmodel"
+        sdc.split_names = ["latent_image"]
+        sdc.aggregate_names = ["crop_resolution", "image_path"]
         sdc.sourceless = False
         sdc.resolution_from_upstream = False
         sdc.aspect_bucketing = object()  # truthy sentinel; per_item_key gate
@@ -2833,40 +2920,38 @@ class TestPerIndexAggregateCache:
         sdc.tolerate_missing_source = False
         sdc.extra_watched_paths_in_names = []
         sdc._extra_paths_by_filepath = {}
-        sdc._existing_pt_files = {
-            f'{cf}_1.pt' for cf in self.PT_CONTENTS
-        }
+        sdc._existing_pt_files = {f"{cf}_1.pt" for cf in self.PT_CONTENTS}
         sdc._aggregate_cache = {}
         sdc._active_key_by_filepath = {}
         # group setup: one concept with 3 samples (fp_A at idx 100, fp_A at
         # idx 200, fp_B at idx 300). variations=1, balancing=3 so
         # group_output_samples=3.
-        sdc.group_variations = {'g0': 1}
-        sdc.group_indices = {'g0': [100, 200, 300]}
-        sdc.group_output_samples = {'g0': 3}
-        sdc.group_full_indices = {'g0': [100, 200, 300]}
-        sdc.group_balancing = {'g0': 3}
-        sdc.group_balancing_strategy = {'g0': 'REPEATS'}
+        sdc.group_variations = {"g0": 1}
+        sdc.group_indices = {"g0": [100, 200, 300]}
+        sdc.group_output_samples = {"g0": 3}
+        sdc.group_full_indices = {"g0": [100, 200, 300]}
+        sdc.group_balancing = {"g0": 3}
+        sdc.group_balancing_strategy = {"g0": "REPEATS"}
         sdc._source_path_cache = {100: self.FP_A, 200: self.FP_A, 300: self.FP_B}
         sdc.cache_index = {
-            'entries': {
+            "entries": {
                 self.FP_A: {
-                    'hash': 'hashAfullhash',
-                    'modeltype': 'testmodel',
-                    'mtime': 1.0,
-                    'original_resolution': [4032, 2268],
-                    'variants': {
-                        '1024x576': {'cache_file': 'hashA_1024x576'},
-                        '704x384': {'cache_file': 'hashA_704x384'},
+                    "hash": "hashAfullhash",
+                    "modeltype": "testmodel",
+                    "mtime": 1.0,
+                    "original_resolution": [4032, 2268],
+                    "variants": {
+                        "1024x576": {"cache_file": "hashA_1024x576"},
+                        "704x384": {"cache_file": "hashA_704x384"},
                     },
                 },
                 self.FP_B: {
-                    'hash': 'hashBfullhash',
-                    'modeltype': 'testmodel',
-                    'mtime': 1.0,
-                    'original_resolution': [1200, 675],
-                    'variants': {
-                        '704x384': {'cache_file': 'hashB_704x384'},
+                    "hash": "hashBfullhash",
+                    "modeltype": "testmodel",
+                    "mtime": 1.0,
+                    "original_resolution": [1200, 675],
+                    "variants": {
+                        "704x384": {"cache_file": "hashB_704x384"},
                     },
                 },
             },
@@ -2879,18 +2964,22 @@ class TestPerIndexAggregateCache:
 
     def _patch_upstream(self, sdc, monkeypatch):
         """Stand in for _get_resolution_string and torch.load."""
+
         def fake_res(in_variation, in_index):
             return self.PER_INDEX_RESOLUTION.get(in_index)
-        monkeypatch.setattr(sdc, '_get_resolution_string', fake_res)
+
+        monkeypatch.setattr(sdc, "_get_resolution_string", fake_res)
         # _real_pt_path uses _real_cache_dir + cache_file name. Capture
         # which path was loaded so we can assert later.
         loaded = []
+
         def fake_load(path, **kwargs):
             loaded.append(path)
             # extract the cache_file from the path ('/fake/cache/hashA_1024x576_1.pt')
-            name = os.path.basename(path).replace('_1.pt', '')
+            name = os.path.basename(path).replace("_1.pt", "")
             return self.PT_CONTENTS[name]
-        monkeypatch.setattr('mgds.pipelineModules.SmartDiskCache.torch.load', fake_load)
+
+        monkeypatch.setattr("mgds.pipelineModules.SmartDiskCache.torch.load", fake_load)
         return loaded
 
     def test_load_aggregate_cache_keys_per_in_index(self, monkeypatch):
@@ -2905,10 +2994,10 @@ class TestPerIndexAggregateCache:
         # Two distinct entries for fp_A — one per in_index — preserved.
         assert (self.FP_A, 0, 100) in sdc._aggregate_cache
         assert (self.FP_A, 0, 200) in sdc._aggregate_cache
-        assert sdc._aggregate_cache[(self.FP_A, 0, 100)]['crop_resolution'] == (1024, 576)
-        assert sdc._aggregate_cache[(self.FP_A, 0, 200)]['crop_resolution'] == (704, 384)
+        assert sdc._aggregate_cache[(self.FP_A, 0, 100)]["crop_resolution"] == (1024, 576)
+        assert sdc._aggregate_cache[(self.FP_A, 0, 200)]["crop_resolution"] == (704, 384)
         # fp_B has its own entry too.
-        assert sdc._aggregate_cache[(self.FP_B, 0, 300)]['crop_resolution'] == (704, 384)
+        assert sdc._aggregate_cache[(self.FP_B, 0, 300)]["crop_resolution"] == (704, 384)
         # Pre-fix bug regression: confirm the legacy 2-tuple key is NOT
         # present (otherwise downstream code might still hit it).
         assert (self.FP_A, 0) not in sdc._aggregate_cache
@@ -2937,21 +3026,21 @@ class TestPerIndexAggregateCache:
         agg_0 = sdc._aggregate_cache.get((self.FP_A, 0, 100))
         agg_1 = sdc._aggregate_cache.get((self.FP_A, 0, 200))
         agg_2 = sdc._aggregate_cache.get((self.FP_B, 0, 300))
-        assert agg_0['crop_resolution'] == (1024, 576)
-        assert agg_1['crop_resolution'] == (704, 384)
-        assert agg_2['crop_resolution'] == (704, 384)
+        assert agg_0["crop_resolution"] == (1024, 576)
+        assert agg_1["crop_resolution"] == (704, 384)
+        assert agg_2["crop_resolution"] == (704, 384)
 
         # Critical scenario from the real-training repro: AspectBatchSorting
         # buckets fp_A@200 and fp_B@300 together (both at (704, 384)).
         # At training, split fetch for fp_A@200 resolves '704x384', which
         # matches the agg; split fetch for fp_B@300 resolves '704x384',
         # also matches. No mismatch.
-        assert agg_1['crop_resolution'] == agg_2['crop_resolution']
+        assert agg_1["crop_resolution"] == agg_2["crop_resolution"]
 
         # And critically, fp_A@100 is NOT in the same bucket as fp_A@200
         # — different (V, in_index) seeds → different variant. The bug
         # we fixed would have made these collide on (fp_A, 0).
-        assert agg_0['crop_resolution'] != agg_1['crop_resolution']
+        assert agg_0["crop_resolution"] != agg_1["crop_resolution"]
 
     def test_get_item_returns_per_in_index_crop_resolution(self, monkeypatch):
         """End-to-end: call get_item('crop_resolution', output_idx) for the
@@ -2970,22 +3059,21 @@ class TestPerIndexAggregateCache:
         sdc._load_aggregate_cache(out_variation=0)
 
         # output_idx 0 -> in_idx 100 (fp_A, '1024x576' bucket).
-        item0 = sdc.get_item(0, 'crop_resolution')
-        assert item0['crop_resolution'] == (1024, 576), (
-            f"fp_A at in_idx=100 should resolve to its '1024x576' variant; "
-            f"got {item0['crop_resolution']}"
+        item0 = sdc.get_item(0, "crop_resolution")
+        assert item0["crop_resolution"] == (1024, 576), (
+            f"fp_A at in_idx=100 should resolve to its '1024x576' variant; got {item0['crop_resolution']}"
         )
         # output_idx 1 -> in_idx 200 (fp_A, '704x384' bucket).
-        item1 = sdc.get_item(1, 'crop_resolution')
-        assert item1['crop_resolution'] == (704, 384), (
+        item1 = sdc.get_item(1, "crop_resolution")
+        assert item1["crop_resolution"] == (704, 384), (
             f"fp_A at in_idx=200 should resolve to its '704x384' variant; "
             f"got {item1['crop_resolution']}. (Under the old (filepath, var) "
             f"key this would have returned whatever was written last, "
             f"clobbering the per-in_idx distinction.)"
         )
         # output_idx 2 -> in_idx 300 (fp_B, '704x384' bucket).
-        item2 = sdc.get_item(2, 'crop_resolution')
-        assert item2['crop_resolution'] == (704, 384)
+        item2 = sdc.get_item(2, "crop_resolution")
+        assert item2["crop_resolution"] == (704, 384)
 
     def test_get_item_aggregate_dict_is_isolated(self, monkeypatch):
         """The returned aggregate dict must be a copy — the PipelineModule
@@ -2999,7 +3087,7 @@ class TestPerIndexAggregateCache:
         sdc.variations_initialized = True
         sdc._load_aggregate_cache(out_variation=0)
 
-        item = sdc.get_item(0, 'crop_resolution')
+        item = sdc.get_item(0, "crop_resolution")
         original = sdc._aggregate_cache[(self.FP_A, 0, 100)]
         assert item is not original, (
             "get_item must return a fresh dict — returning the cache "
@@ -3007,8 +3095,8 @@ class TestPerIndexAggregateCache:
             "mutate our stored aggregate."
         )
         # And mutating the returned dict must not bleed back.
-        item['crop_resolution'] = (999, 999)
-        assert sdc._aggregate_cache[(self.FP_A, 0, 100)]['crop_resolution'] == (1024, 576)
+        item["crop_resolution"] = (999, 999)
+        assert sdc._aggregate_cache[(self.FP_A, 0, 100)]["crop_resolution"] == (1024, 576)
 
     def test_pre_fix_bug_no_longer_reachable(self, monkeypatch):
         """The exact pre-fix failure mode: writing for fp at two in_idx
@@ -3021,8 +3109,7 @@ class TestPerIndexAggregateCache:
 
         # Count distinct fp_A entries — must be 2 (one per in_index).
         fp_a_entries = [
-            key for key in sdc._aggregate_cache
-            if isinstance(key, tuple) and len(key) >= 1 and key[0] == self.FP_A
+            key for key in sdc._aggregate_cache if isinstance(key, tuple) and len(key) >= 1 and key[0] == self.FP_A
         ]
         assert len(fp_a_entries) == 2, (
             f"Expected two distinct (fp_A, var, in_index) entries; got "
@@ -3051,8 +3138,8 @@ class TestSynthesizeAggregateChecksVariantExists:
     variant ``(704, 384)``.
     """
 
-    FP = r'F:\Datasets\test\partial.jpg'
-    EXISTING_KEY = '704x384'
+    FP = r"F:\Datasets\test\partial.jpg"
+    EXISTING_KEY = "704x384"
 
     def _make_sdc(self, variants=None):
         """SmartDiskCache primed with a single entry whose ``variants``
@@ -3062,17 +3149,18 @@ class TestSynthesizeAggregateChecksVariantExists:
         if variants is None:
             variants = {
                 self.EXISTING_KEY: {
-                    'cache_file': f'hash_{self.EXISTING_KEY}',
-                    'crop_resolution': [704, 384],
+                    "cache_file": f"hash_{self.EXISTING_KEY}",
+                    "crop_resolution": [704, 384],
                 },
             }
         import threading
+
         sdc = SmartDiskCache.__new__(SmartDiskCache)
-        sdc.cache_dir = '/fake/cache'
-        sdc._real_cache_dir = '/fake/cache'
-        sdc.modeltype = 'testmodel'
-        sdc.split_names = ['latent_image']
-        sdc.aggregate_names = ['crop_resolution', 'image_path']
+        sdc.cache_dir = "/fake/cache"
+        sdc._real_cache_dir = "/fake/cache"
+        sdc.modeltype = "testmodel"
+        sdc.split_names = ["latent_image"]
+        sdc.aggregate_names = ["crop_resolution", "image_path"]
         sdc.sourceless = False
         sdc.resolution_from_upstream = False
         sdc.aspect_bucketing = object()
@@ -3086,13 +3174,13 @@ class TestSynthesizeAggregateChecksVariantExists:
         sdc._index_lock = threading.Lock()
         sdc._last_flush_time = 0.0
         sdc.cache_index = {
-            'entries': {
+            "entries": {
                 self.FP: {
-                    'hash': 'hashfull',
-                    'modeltype': 'testmodel',
-                    'mtime': 1.0,
-                    'original_resolution': [1024, 576],
-                    'variants': variants,
+                    "hash": "hashfull",
+                    "modeltype": "testmodel",
+                    "mtime": 1.0,
+                    "original_resolution": [1024, 576],
+                    "variants": variants,
                 },
             },
         }
@@ -3104,19 +3192,24 @@ class TestSynthesizeAggregateChecksVariantExists:
         defers to the slow path that .pt-loads the active fallback.
         """
         sdc = self._make_sdc(
-            variants={'704x384': {
-                'cache_file': 'hash_704x384',
-                'crop_resolution': [704, 384],
-            }},
+            variants={
+                "704x384": {
+                    "cache_file": "hash_704x384",
+                    "crop_resolution": [704, 384],
+                }
+            },
         )
         monkeypatch.setattr(
-            sdc, '_fast_resolution_string',
-            lambda entry, in_variation, in_index: '1024x576',
+            sdc,
+            "_fast_resolution_string",
+            lambda entry, in_variation, in_index: "1024x576",
         )
 
         result = sdc._try_synthesize_aggregate(
-            self.FP, sdc.cache_index['entries'][self.FP],
-            in_variation=0, in_index=100,
+            self.FP,
+            sdc.cache_index["entries"][self.FP],
+            in_variation=0,
+            in_index=100,
         )
 
         assert result is None, (
@@ -3134,32 +3227,34 @@ class TestSynthesizeAggregateChecksVariantExists:
         """
         sdc = self._make_sdc(
             variants={
-                '704x384': {
-                    'cache_file': 'hash_704x384',
-                    'crop_resolution': [704, 384],
+                "704x384": {
+                    "cache_file": "hash_704x384",
+                    "crop_resolution": [704, 384],
                 },
-                '1024x576': {
-                    'cache_file': 'hash_1024x576',
-                    'crop_resolution': [1024, 576],
+                "1024x576": {
+                    "cache_file": "hash_1024x576",
+                    "crop_resolution": [1024, 576],
                 },
             },
         )
         monkeypatch.setattr(
-            sdc, '_fast_resolution_string',
-            lambda entry, in_variation, in_index: '1024x576',
+            sdc,
+            "_fast_resolution_string",
+            lambda entry, in_variation, in_index: "1024x576",
         )
 
         result = sdc._try_synthesize_aggregate(
-            self.FP, sdc.cache_index['entries'][self.FP],
-            in_variation=0, in_index=100,
+            self.FP,
+            sdc.cache_index["entries"][self.FP],
+            in_variation=0,
+            in_index=100,
         )
 
         assert result is not None, (
-            "Synthesis should succeed for a variant with a stamped "
-            "crop_resolution — that's the entire fast-path win."
+            "Synthesis should succeed for a variant with a stamped crop_resolution — that's the entire fast-path win."
         )
-        assert result['crop_resolution'] == (1024, 576)
-        assert result['image_path'] == self.FP
+        assert result["crop_resolution"] == (1024, 576)
+        assert result["image_path"] == self.FP
 
     def test_stamped_value_overrides_key_string(self, monkeypatch):
         """The stamp wins over the variant key parse: when an entry was
@@ -3173,25 +3268,30 @@ class TestSynthesizeAggregateChecksVariantExists:
         must bucket by (640, 960) too.
         """
         sdc = self._make_sdc(
-            variants={'1024x576': {
-                'cache_file': 'hash_1024x576',
-                # The .pt at this cache_file was built under a different
-                # config and stores (640, 960). The stamp records that.
-                'crop_resolution': [640, 960],
-            }},
+            variants={
+                "1024x576": {
+                    "cache_file": "hash_1024x576",
+                    # The .pt at this cache_file was built under a different
+                    # config and stores (640, 960). The stamp records that.
+                    "crop_resolution": [640, 960],
+                }
+            },
         )
         monkeypatch.setattr(
-            sdc, '_fast_resolution_string',
-            lambda entry, in_variation, in_index: '1024x576',
+            sdc,
+            "_fast_resolution_string",
+            lambda entry, in_variation, in_index: "1024x576",
         )
 
         result = sdc._try_synthesize_aggregate(
-            self.FP, sdc.cache_index['entries'][self.FP],
-            in_variation=0, in_index=100,
+            self.FP,
+            sdc.cache_index["entries"][self.FP],
+            in_variation=0,
+            in_index=100,
         )
 
         assert result is not None
-        assert result['crop_resolution'] == (640, 960), (
+        assert result["crop_resolution"] == (640, 960), (
             f"Synth must serve the .pt's stored value (640, 960), not "
             f"the parsed key (1024, 576). The latter would mis-bucket "
             f"this item against batchmates whose split-fetch returned "
@@ -3204,18 +3304,23 @@ class TestSynthesizeAggregateChecksVariantExists:
         read the truth and lazy-stamp the entry.
         """
         sdc = self._make_sdc(
-            variants={'1024x576': {  # no crop_resolution field
-                'cache_file': 'hash_1024x576',
-            }},
+            variants={
+                "1024x576": {  # no crop_resolution field
+                    "cache_file": "hash_1024x576",
+                }
+            },
         )
         monkeypatch.setattr(
-            sdc, '_fast_resolution_string',
-            lambda entry, in_variation, in_index: '1024x576',
+            sdc,
+            "_fast_resolution_string",
+            lambda entry, in_variation, in_index: "1024x576",
         )
 
         result = sdc._try_synthesize_aggregate(
-            self.FP, sdc.cache_index['entries'][self.FP],
-            in_variation=0, in_index=100,
+            self.FP,
+            sdc.cache_index["entries"][self.FP],
+            in_variation=0,
+            in_index=100,
         )
 
         assert result is None, (
@@ -3229,50 +3334,56 @@ class TestSynthesizeAggregateChecksVariantExists:
         the variant record. Subsequent epochs hit the fast path.
         """
         sdc = self._make_sdc(
-            variants={'1024x576': {  # legacy: no crop_resolution
-                'cache_file': 'hash_1024x576',
-            }},
+            variants={
+                "1024x576": {  # legacy: no crop_resolution
+                    "cache_file": "hash_1024x576",
+                }
+            },
         )
         sdc.cache_dir = str(tmp_path)
         sdc._real_cache_dir = str(tmp_path)
-        sdc._existing_pt_files = {'hash_1024x576_1.pt'}
-        sdc.group_variations = {'g0': 1}
-        sdc.group_indices = {'g0': [100]}
-        sdc.group_output_samples = {'g0': 1}
-        sdc.group_full_indices = {'g0': [100]}
-        sdc.group_balancing = {'g0': 1}
-        sdc.group_balancing_strategy = {'g0': 'REPEATS'}
+        sdc._existing_pt_files = {"hash_1024x576_1.pt"}
+        sdc.group_variations = {"g0": 1}
+        sdc.group_indices = {"g0": [100]}
+        sdc.group_output_samples = {"g0": 1}
+        sdc.group_full_indices = {"g0": [100]}
+        sdc.group_balancing = {"g0": 1}
+        sdc.group_balancing_strategy = {"g0": "REPEATS"}
         sdc._source_path_cache = {100: self.FP}
 
         monkeypatch.setattr(
-            sdc, '_fast_resolution_string',
-            lambda entry, in_variation, in_index: '1024x576',
+            sdc,
+            "_fast_resolution_string",
+            lambda entry, in_variation, in_index: "1024x576",
         )
         monkeypatch.setattr(
-            sdc, '_get_resolution_string',
-            lambda in_variation, in_index: '1024x576',
+            sdc,
+            "_get_resolution_string",
+            lambda in_variation, in_index: "1024x576",
         )
         load_paths = []
+
         def fake_load(path, **kwargs):
             load_paths.append(path)
             # .pt stores (640, 960) — the truth that diverges from the key.
-            return {'crop_resolution': (640, 960), 'image_path': self.FP}
+            return {"crop_resolution": (640, 960), "image_path": self.FP}
+
         monkeypatch.setattr(
-            'mgds.pipelineModules.SmartDiskCache.torch.load', fake_load,
+            "mgds.pipelineModules.SmartDiskCache.torch.load",
+            fake_load,
         )
 
         sdc._load_aggregate_cache(out_variation=0)
 
         agg = sdc._aggregate_cache.get((self.FP, 0, 100))
         assert agg is not None
-        assert agg['crop_resolution'] == (640, 960), (
-            f"Slow path must serve the .pt's value, not the parsed key. "
-            f"Got: {agg['crop_resolution']}"
+        assert agg["crop_resolution"] == (640, 960), (
+            f"Slow path must serve the .pt's value, not the parsed key. Got: {agg['crop_resolution']}"
         )
         # The variant must now have the lazy-stamped value so the next
         # epoch's agg load takes the fast path.
-        variant = sdc.cache_index['entries'][self.FP]['variants']['1024x576']
-        assert variant.get('crop_resolution') == [640, 960], (
+        variant = sdc.cache_index["entries"][self.FP]["variants"]["1024x576"]
+        assert variant.get("crop_resolution") == [640, 960], (
             f"Slow path must lazy-stamp the variant's crop_resolution "
             f"from the loaded .pt. Got: {variant.get('crop_resolution')}"
         )
@@ -3283,48 +3394,52 @@ class TestSynthesizeAggregateChecksVariantExists:
         real value, aggregate matches what split-fetch will return.
         """
         sdc = self._make_sdc(
-            variants={'704x384': {
-                'cache_file': 'hash_704x384',
-                'crop_resolution': [704, 384],
-            }},
+            variants={
+                "704x384": {
+                    "cache_file": "hash_704x384",
+                    "crop_resolution": [704, 384],
+                }
+            },
         )
         sdc.cache_dir = str(tmp_path)
         sdc._real_cache_dir = str(tmp_path)
-        sdc._existing_pt_files = {'hash_704x384_1.pt'}
-        sdc.group_variations = {'g0': 1}
-        sdc.group_indices = {'g0': [100]}
-        sdc.group_output_samples = {'g0': 1}
-        sdc.group_full_indices = {'g0': [100]}
-        sdc.group_balancing = {'g0': 1}
-        sdc.group_balancing_strategy = {'g0': 'REPEATS'}
+        sdc._existing_pt_files = {"hash_704x384_1.pt"}
+        sdc.group_variations = {"g0": 1}
+        sdc.group_indices = {"g0": [100]}
+        sdc.group_output_samples = {"g0": 1}
+        sdc.group_full_indices = {"g0": [100]}
+        sdc.group_balancing = {"g0": 1}
+        sdc.group_balancing_strategy = {"g0": "REPEATS"}
         sdc._source_path_cache = {100: self.FP}
 
         monkeypatch.setattr(
-            sdc, '_fast_resolution_string',
-            lambda entry, in_variation, in_index: '1024x576',
+            sdc,
+            "_fast_resolution_string",
+            lambda entry, in_variation, in_index: "1024x576",
         )
         monkeypatch.setattr(
-            sdc, '_get_resolution_string',
-            lambda in_variation, in_index: '1024x576',
+            sdc,
+            "_get_resolution_string",
+            lambda in_variation, in_index: "1024x576",
         )
         load_paths = []
+
         def fake_load(path, **kwargs):
             load_paths.append(path)
-            return {'crop_resolution': (704, 384), 'image_path': self.FP}
+            return {"crop_resolution": (704, 384), "image_path": self.FP}
+
         monkeypatch.setattr(
-            'mgds.pipelineModules.SmartDiskCache.torch.load', fake_load,
+            "mgds.pipelineModules.SmartDiskCache.torch.load",
+            fake_load,
         )
 
         sdc._load_aggregate_cache(out_variation=0)
 
         agg = sdc._aggregate_cache.get((self.FP, 0, 100))
         assert agg is not None
-        assert agg['crop_resolution'] == (704, 384), (
+        assert agg["crop_resolution"] == (704, 384), (
             f"Aggregate must reflect the .pt actually on disk (the "
             f"'704x384' fallback), not the synthesised '1024x576' key "
             f"that get_item will also miss. Got: {agg['crop_resolution']}"
         )
-        assert load_paths, (
-            "Expected slow-path torch.load to fire for the missing-variant "
-            "case; got no load events."
-        )
+        assert load_paths, "Expected slow-path torch.load to fire for the missing-variant case; got no load events."
