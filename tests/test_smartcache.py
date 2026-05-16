@@ -16,7 +16,7 @@ import time
 from mgds.MGDS import MGDS
 from mgds.OutputPipelineModule import OutputPipelineModule
 from mgds.PipelineModule import PipelineModule, PipelineState
-from mgds.pipelineModules.SmartDiskCache import CACHE_VERSION, SmartDiskCache
+from mgds.pipelineModules.SmartDiskCache import CACHE_VERSION, NO_RESOLUTION_KEY, SmartDiskCache
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import (
     RandomAccessPipelineModule,
 )
@@ -2337,8 +2337,6 @@ class TestValidationBenchmarks:
 # ---------------------------------------------------------------------------
 # Multi-resolution variant cache: drift recovery, GC
 # ---------------------------------------------------------------------------
-
-from mgds.pipelineModules.SmartDiskCache import NO_RESOLUTION_KEY
 
 
 class TestVariantHelpers:
