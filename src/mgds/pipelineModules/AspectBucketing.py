@@ -1,12 +1,14 @@
+import hashlib
 import itertools
+import json
 import math
 from random import Random
 from typing import Any
 
-import numpy as np
-
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
+
+import numpy as np
 
 
 class AspectBucketing(
@@ -58,6 +60,13 @@ class AspectBucketing(
         self.bucket_resolutions = {}
         self.bucket_aspects = {}
         self.flattened_possible_resolutions = []
+
+        # Per-call target_resolution override. SmartDiskCache sets this around
+        # multi-variant cache build passes to drive get_item to a specific
+        # target instead of rand.choice. Single-threaded by contract — the
+        # cache builder groups items by target and runs one parallel pass per
+        # target with the override held for that pass.
+        self._target_override: int | None = None
 
     def length(self) -> int:
         return self._get_previous_length(self.resolution_in_name)
@@ -112,9 +121,37 @@ class AspectBucketing(
         return possible_resolutions, possible_aspects
 
     def __get_bucket(self, rand: Random, h: int, w: int, target_resolution: int) -> tuple[int, int]:
-        aspect = h / w
+        return self.bucket_for_aspect(h / w, target_resolution)
+
+    def bucket_for_aspect(self, aspect: float, target_resolution: int) -> tuple[int, int]:
+        """Pure aspect-to-bucket assignment. No image read, no RNG.
+
+        Used by SmartDiskCache to re-derive bucket assignments from a cached
+        resolution string when the user changes target_resolutions, without
+        opening any source images.
+        """
         bucket_index = np.argmin(abs(self.bucket_aspects[target_resolution] - aspect))
         return self.bucket_resolutions[target_resolution][bucket_index]
+
+    def compute_bucket_method_hash(self) -> str:
+        """Hash of the post-start() bucketing config.
+
+        Stamped into ``cache_index['bucket_method']`` so a config change
+        (different target_resolutions, quantization, etc.) drives drift
+        recovery instead of silently serving stale .pt files. Must be called
+        after ``start()`` populates ``bucket_resolutions``.
+        """
+        payload = {
+            'method': 'aspect_v2',
+            'quantization': self.quantization,
+            'frame_dim_enabled': self.frame_dim_enabled,
+            'targets': sorted(self.bucket_resolutions.keys()),
+            'flattened': sorted(
+                [list(r) for r in self.flattened_possible_resolutions]
+            ),
+        }
+        encoded = json.dumps(payload, sort_keys=True, separators=(',', ':')).encode('utf-8')
+        return hashlib.sha256(encoded).hexdigest()[:16]
 
     def get_meta(self, variation: int, name: str) -> Any:
         if name == self.possible_resolutions_out_name:
@@ -168,6 +205,60 @@ class AspectBucketing(
 
         self.bucket_aspects = {k: np.array(v) for (k, v) in self.bucket_aspects.items()}
 
+    def variant_key_from_aspect(self, variation: int, index: int, aspect: float) -> str | None:
+        """Compute the 'HxW' variant key for (variation, index) without
+        triggering the upstream image decode.
+
+        Replicates the get_item RNG path exactly — same _get_rand seed,
+        same target_resolutions parse, same rand.choice — but accepts the
+        aspect ratio as an argument instead of pulling it through
+        CalcAspect → LoadImage. SmartDiskCache recovers aspect from an
+        existing variant key (deterministic since buckets quantize from
+        aspect) and uses this to fast-validate per-epoch variant
+        rotation without re-decoding every image on disk.
+
+        Returns None when target_resolutions is the fixed-WxH form
+        (no aspect bucketing applies) or any upstream walk fails.
+        """
+        rand = self._get_rand(variation, index)
+        try:
+            target_resolutions = self._get_previous_item(
+                variation, self.target_resolutions_in_name, index)
+        except Exception:
+            return None
+
+        if self.enable_target_resolutions_override_in_name is not None:
+            try:
+                enable_resolution_override = self._get_previous_item(
+                    variation, self.enable_target_resolutions_override_in_name, index)
+            except Exception:
+                enable_resolution_override = False
+            if enable_resolution_override:
+                try:
+                    target_resolutions = self._get_previous_item(
+                        variation, self.target_resolutions_override_in_name, index)
+                except Exception:
+                    return None
+
+        if 'x' in target_resolutions and ',' not in target_resolutions:
+            # Fixed WxH: the variant key is the configured dims directly,
+            # no aspect math involved. Fall back to the slow path.
+            return None
+
+        target_resolutions_list = [int(res.strip()) for res in target_resolutions.split(',')]
+        if not target_resolutions_list:
+            return None
+
+        if self._target_override is not None and self._target_override in target_resolutions_list:
+            target_resolution = self._target_override
+        else:
+            target_resolution = rand.choice(target_resolutions_list)
+
+        if target_resolution not in self.bucket_aspects:
+            return None
+        h, w = self.bucket_for_aspect(aspect, target_resolution)
+        return f"{h}x{w}"
+
     def get_item(self, variation: int, index: int, requested_name: str = None) -> dict:
         rand = self._get_rand(variation, index)
         resolution = self._get_previous_item(variation, self.resolution_in_name, index)
@@ -187,7 +278,10 @@ class AspectBucketing(
         else:
             target_resolutions = [int(res.strip()) for res in target_resolutions.split(',')]
 
-            target_resolution = rand.choice(target_resolutions)
+            if self._target_override is not None and self._target_override in target_resolutions:
+                target_resolution = self._target_override
+            else:
+                target_resolution = rand.choice(target_resolutions)
             target_resolution = self.__get_bucket(rand, resolution[-2], resolution[-1], target_resolution)
 
         aspect = resolution[-2] / resolution[-1]
