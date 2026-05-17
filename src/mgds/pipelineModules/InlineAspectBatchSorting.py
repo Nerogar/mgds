@@ -27,6 +27,8 @@ class InlineAspectBatchSorting(
         return len(self.in_index_list)
 
     def has_next(self) -> bool:
+        if self.current_resolution is None and self.next_in_cache_index < len(self.in_index_list):
+            self.__fill_cache()
         return self.__has_next
 
     def get_inputs(self) -> list[str]:
@@ -82,7 +84,11 @@ class InlineAspectBatchSorting(
         self.in_index_list = self.__shuffle(variation)
         self.next_in_cache_index = start_index
         self.current_resolution = None
-        self.__fill_cache()
+        self.__has_next = False
+        # __fill_cache is deferred to has_next() so the first bucket is
+        # materialized on first batch request rather than during
+        # start_next_epoch, where upstream caching modules (DiskCache)
+        # may have moved encoder weights off the train device.
 
     def get_next_item(self) -> dict:
         bucket = self.bucket_dict[self.current_resolution]
