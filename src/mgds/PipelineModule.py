@@ -4,12 +4,16 @@ from abc import ABCMeta, abstractmethod
 from concurrent import futures
 from contextlib import ExitStack
 from random import Random
+from typing import TYPE_CHECKING
 
 import torch
 
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
 from mgds.pipelineModuleTypes.SerialPipelineModule import SerialPipelineModule
 from mgds.pipelineModuleTypes.SingleVariationRandomAccessPipelineModule import SingleVariationRandomAccessPipelineModule
+
+if TYPE_CHECKING:
+    from mgds.LoadingPipeline import LoadingPipeline
 
 
 class PipelineState:
