@@ -123,7 +123,7 @@ class LoadVideo(
 
             except FileNotFoundError:
                 video_tensor = None
-            except Exception as e:
+            except Exception:
                 print("could not load video, it might be corrupted: " + path)
                 raise
         else:

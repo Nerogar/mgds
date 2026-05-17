@@ -144,7 +144,7 @@ class DropTags(
                 for s in dropout_tags:
                     if special_tag_mode == "WHITELIST" and s in special_tags_list:
                         pruned_tags.append(s)
-                    elif special_tag_mode == "BLACKLIST" and not(s in special_tags_list):
+                    elif special_tag_mode == "BLACKLIST" and s not in special_tags_list:
                         pruned_tags.append(s)
             elif dropout_mode.startswith("RANDOM"):     
                 #iterate through dropout_tags and add to pruned_tags if random > probability
@@ -156,7 +156,7 @@ class DropTags(
                 elif special_tag_mode == "BLACKLIST":
                     for i, s in enumerate(dropout_tags):
                         if rand.random() > self.probability_weighted(probability, dropout_mode, i, len(dropout_tags)) \
-                        or not(s in special_tags_list):
+                        or s not in special_tags_list:
                             pruned_tags.append(s)
                 else:   #NONE or any other unexpected values
                     for i, s in enumerate(dropout_tags):
