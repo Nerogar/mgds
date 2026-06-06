@@ -21,6 +21,7 @@ class Tokenize(
             additional_format_text_tokens: int | None = None,
             apply_chat_template: Callable | None = None,
             apply_chat_template_kwargs = {},
+            apply_chat_template_post_process: Callable[[str], str] | None = None,
             expand_mask: int = 0,
     ):
         super(Tokenize, self).__init__()
@@ -32,6 +33,7 @@ class Tokenize(
         self.format_text = format_text
         self.apply_chat_template = apply_chat_template
         self.apply_chat_template_kwargs = apply_chat_template_kwargs
+        self.apply_chat_template_post_process = apply_chat_template_post_process
         self.additional_format_text_tokens = additional_format_text_tokens
         self.expand_mask = expand_mask
 
@@ -60,6 +62,8 @@ class Tokenize(
                 tokenize=False,
                 **self.apply_chat_template_kwargs,
             )
+            if self.apply_chat_template_post_process is not None:
+                text = self.apply_chat_template_post_process(text)
 
         tokenizer_output = self.tokenizer(
             text,

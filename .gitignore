@@ -2,5 +2,8 @@
 
 /venv/
 /run/
+/build/
 
 __pycache__/
+*.egg-info/
+CLAUDE.md
