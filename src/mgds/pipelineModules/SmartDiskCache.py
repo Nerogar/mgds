@@ -156,6 +156,18 @@ class SmartDiskCache(
         self._content_index_loaded = False
         self._content_index_dirty = False
 
+        # Verified donor payloads (content hash -> loaded cache dict) for the
+        # current build pass. The headline reuse scenario copies one donor to
+        # thousands of recipients; without this memo each copy re-deserializes
+        # the same bytes from disk. Cleared at the start and end of every
+        # refresh so donor tensors don't outlive the build pass.
+        self._content_reuse_memo: dict[str, dict] = {}
+
+        # Memoized blank sentinel dict; _load_blank_sentinel fires on every
+        # cache-miss get_item, which is per sample per epoch in the worst
+        # case. Invalidated whenever the sentinel is rewritten or refreshed.
+        self._blank_sentinel_memo: dict | None = None
+
         # before_cache_fun is deferred to the first variation that actually
         # needs an upstream encode (see _ensure_before_cache_called). A build
         # pass served entirely by dedup or content-addressed copies never
@@ -195,6 +207,14 @@ class SmartDiskCache(
 
         self.cache_index = None
         self._index_lock = threading.Lock()
+        # Serializes index-file writes (open/copy/replace) without holding
+        # _index_lock across disk I/O — builder threads only contend on the
+        # in-memory dict, not on the periodic flush's multi-MB write.
+        self._index_io_lock = threading.Lock()
+        # (size, mtime_ns) of cache.json as of our last load/save. The module
+        # is the only writer within a run, so a matching stat means the
+        # in-memory index is current and the per-epoch reload can be skipped.
+        self._index_disk_stat = None
         self._last_flush_time = 0.0
         self._source_path_cache = {}
         self._aggregate_cache = {}
@@ -335,21 +355,41 @@ class SmartDiskCache(
             entry["cache_version"] = CACHE_VERSION
         idx["version"] = CACHE_VERSION
 
+    def _snapshot_index_stat(self) -> tuple[int, int] | None:
+        try:
+            st = os.stat(self._get_cache_json_path())
+        except OSError:
+            return None
+        return (st.st_size, st.st_mtime_ns)
+
+    def _cache_index_is_stale(self) -> bool:
+        """True when cache.json on disk differs from what this process last
+        loaded or saved (external writer, e.g. gc_clean from another run)."""
+        return self._snapshot_index_stat() != self._index_disk_stat
+
     def _save_cache_index(self, compact: bool = False):
         os.makedirs(self.cache_dir, exist_ok=True)
         cache_path = self._get_cache_json_path()
         tmp_path = cache_path + ".tmp"
         bak_path = cache_path + ".bak"
 
+        # Serialize under the index lock, but write outside it: holding
+        # _index_lock across the file write + backup copy stalled every
+        # builder thread that needed to register an entry while the periodic
+        # flush was writing a multi-MB index to disk.
         with self._index_lock:
+            payload = json.dumps(self.cache_index, indent=None if compact else 2)
+
+        with self._index_io_lock:
             with open(tmp_path, "w") as f:
-                json.dump(self.cache_index, f, indent=None if compact else 2)
+                f.write(payload)
 
             if os.path.exists(cache_path):
                 with contextlib.suppress(OSError):
                     shutil.copy2(cache_path, bak_path)
 
             os.replace(tmp_path, cache_path)
+            self._index_disk_stat = self._snapshot_index_stat()
 
     def _flush_cache_index(self):
         now = time.monotonic()
@@ -466,16 +506,31 @@ class SmartDiskCache(
         if not donor_name or donor_name == pt_name or donor_name not in self._existing_pt_files:
             return False
         donor_path = os.path.join(self._real_cache_dir, donor_name)
-        try:
-            cache_data = torch.load(donor_path, weights_only=False, map_location="cpu")
-        except Exception:
-            return False
-        if not isinstance(cache_data, dict):
-            return False
-        required = set(self.split_names) | set(self.aggregate_names)
-        present = {k for k in cache_data if not k.startswith("__")}
-        if not required.issubset(present):
-            return False
+        cache_data = self._content_reuse_memo.get(content_hash)
+        if cache_data is None:
+            try:
+                loaded = torch.load(donor_path, weights_only=False, map_location="cpu")
+            except Exception:
+                return False
+            if not isinstance(loaded, dict):
+                return False
+            # The content index can go stale while the donor file still
+            # exists (the .pt rewritten in place under a different draw, with
+            # the old hash mapping never removed). The write-time stamp is
+            # the only proof the donor still holds the payload this hash
+            # describes — without this check a stale mapping silently copies
+            # another caption's embeddings.
+            if loaded.get("__content_hash") != content_hash:
+                return False
+            required = set(self.split_names) | set(self.aggregate_names)
+            present = {k for k in loaded if not k.startswith("__")}
+            if not required.issubset(present):
+                return False
+            self._content_reuse_memo[content_hash] = loaded
+            cache_data = loaded
+        # Shallow copy per recipient: metadata refresh below must not leak
+        # between recipients sharing the memoized donor payload.
+        cache_data = dict(cache_data)
 
         cache_data["__cache_version"] = CACHE_VERSION
         cache_data["__modeltype"] = self.modeltype
@@ -1744,7 +1799,7 @@ class SmartDiskCache(
         self._aggregate_cache = {}
         if self.aggregate_names:
             with tqdm(total=len(self._sourceless_filepaths), smoothing=0.1, desc="loading aggregate cache") as bar:
-                for _group_index, fp in enumerate(self._sourceless_filepaths):
+                for group_index, fp in enumerate(self._sourceless_filepaths):
                     entry = self.cache_index["entries"].get(fp)
                     if entry is None:
                         bar.update(1)
@@ -1761,7 +1816,11 @@ class SmartDiskCache(
                             if name in cached:
                                 agg_data[name] = cached[name]
                         if agg_data:
-                            self._aggregate_cache[(fp, 0)] = agg_data
+                            # Keyed exactly like get_item's lookup
+                            # ((filepath, variation, in_index)): sourceless
+                            # mode has variations=1 and in_index ==
+                            # group_index, so this is (fp, 0, group_index).
+                            self._aggregate_cache[(fp, 0, group_index)] = agg_data
                     except Exception:
                         pass
                     bar.update(1)
@@ -1775,13 +1834,21 @@ class SmartDiskCache(
             self.__init_variations()
         self.__reshuffle_samples(out_variation)
 
-        self.cache_index = self._load_cache_index()
+        # Reload the index from disk only when we don't hold one yet or the
+        # file changed under us (external writer, e.g. gc from another run).
+        # This process is otherwise the only writer, so re-parsing a
+        # potentially huge cache.json on every epoch start was pure waste.
+        if self.cache_index is None or self._cache_index_is_stale():
+            self.cache_index = self._load_cache_index()
+            self._index_disk_stat = self._snapshot_index_stat()
         os.makedirs(self.cache_dir, exist_ok=True)
         self._source_path_cache = {}
         self._aggregate_cache = {}
         self._active_key_by_filepath = {}
         self._extra_paths_by_filepath = {}
         self._content_index_loaded = False
+        self._content_reuse_memo = {}
+        self._blank_sentinel_memo = None
         self._before_cache_called = False
 
         # Bucket-method drift: the AspectBucketing config may have changed
@@ -2046,7 +2113,30 @@ class SmartDiskCache(
                             )
                             bar.update(1)
                             continue
-                        # Otherwise: rebuild. Drop the stale entry.
+                        if status in ("missing_pt", "incomplete_schema"):
+                            # Only this variant is broken (_validate_entry's
+                            # contract): drop and rebuild just the variant.
+                            # The entry, its hash link, and its other
+                            # variants are still valid — deleting the whole
+                            # entry would orphan their .pt files and hand
+                            # them to the next gc sweep.
+                            with self._index_lock:
+                                (entry.get("variants") or {}).pop(active_key, None)
+                            resolution = None if active_key == NO_RESOLUTION_KEY else active_key
+                            items_to_build_by_index[in_index] = (
+                                filepath,
+                                group_key,
+                                out_variation,
+                                in_index,
+                                group_index,
+                                variations,
+                                resolution,
+                            )
+                            bar.update(1)
+                            continue
+                        # Otherwise (content_changed / rebuild): the source
+                        # itself changed, every variant is stale. Drop the
+                        # entry.
                         with self._index_lock:
                             old_hash = entry.get("hash")
                             if old_hash:
@@ -2260,6 +2350,10 @@ class SmartDiskCache(
                 print(f"  {fp}: {reason}")
             if len(files_failed) > 10:
                 print(f"  ... and {len(files_failed) - 10} more")
+
+        # Free memoized donor payloads — they're only useful within one
+        # build pass and would otherwise hold tensors for the whole epoch.
+        self._content_reuse_memo = {}
 
         self._load_aggregate_cache(out_variation)
 
@@ -2486,7 +2580,10 @@ class SmartDiskCache(
             # the 'Cached X/Y files' line.
             with tqdm(total=len(load_items), smoothing=0.1, desc="loading aggregate cache") as bar:
                 for filepath, cache_entry, variation, in_variation, in_index in load_items:
-                    agg_data = self._try_synthesize_aggregate(filepath, cache_entry, in_variation, in_index)
+                    # Rotation resolved with the epoch variation so the
+                    # synthesized crop_resolution matches the variant
+                    # get_item's split fetch loads this epoch.
+                    agg_data = self._try_synthesize_aggregate(filepath, cache_entry, out_variation, in_index)
                     if agg_data is None:
                         slow_items.append((filepath, cache_entry, variation, in_variation, in_index))
                         bar.update(1)
@@ -2507,10 +2604,11 @@ class SmartDiskCache(
                 if per_item_key:
                     # Fast resolve via the stamped original_resolution.
                     # Falls back to the upstream image-decode walk only
-                    # when no aspect can be recovered.
-                    resolution = self._fast_resolution_string(cache_entry, in_variation, in_index)
+                    # when no aspect can be recovered. Rotation is seeded
+                    # on the epoch variation, matching validation/get_item.
+                    resolution = self._fast_resolution_string(cache_entry, out_variation, in_index)
                     if resolution is None:
-                        resolution = self._get_resolution_string(in_variation, in_index)
+                        resolution = self._get_resolution_string(out_variation, in_index)
                     if resolution is not None:
                         variants = cache_entry.get("variants", {})
                         variant = variants.get(self._resolution_key(resolution))
@@ -2641,9 +2739,15 @@ class SmartDiskCache(
 
         with self._index_lock:
             self.cache_index["blank_sentinel"] = out_name
+        self._blank_sentinel_memo = None
         self._save_cache_index()
 
     def _load_blank_sentinel(self) -> dict | None:
+        # Memoized: this fires per cache-miss get_item, i.e. per sample per
+        # epoch for every failed-to-cache file. Invalidated on refresh and
+        # whenever the sentinel is rewritten.
+        if self._blank_sentinel_memo is not None:
+            return self._blank_sentinel_memo
         if not self.cache_index:
             return None
         sentinel_name = self.cache_index.get("blank_sentinel")
@@ -2653,9 +2757,11 @@ class SmartDiskCache(
         if not os.path.isfile(sentinel_path):
             return None
         try:
-            return torch.load(sentinel_path, weights_only=False, map_location=self.pipeline.device)
+            sentinel = torch.load(sentinel_path, weights_only=False, map_location=self.pipeline.device)
         except Exception:
             return None
+        self._blank_sentinel_memo = sentinel
+        return sentinel
 
     def get_item(self, index: int, requested_name: str = None) -> dict:
         result = self.__get_input_index(self.current_variation, index)
@@ -2721,9 +2827,17 @@ class SmartDiskCache(
                     # Per-batch this saves the ~250 ms decode that
                     # ``_get_resolution_string`` would trigger for every
                     # item via CalcAspect → LoadImage.
-                    resolution = self._fast_resolution_string(cache_entry, in_variation, in_index)
+                    #
+                    # The rotation is seeded on the *epoch* variation — the
+                    # same variation ``__refresh_cache`` used to validate and
+                    # lazy-build this epoch's variants. Using ``in_variation``
+                    # here (always 0 when variations=1) froze serving to the
+                    # epoch-0 bucket forever while validation kept building
+                    # per-epoch variants that were never loaded.
+                    rotation_variation = self.current_variation if self.current_variation >= 0 else in_variation
+                    resolution = self._fast_resolution_string(cache_entry, rotation_variation, in_index)
                     if resolution is None:
-                        resolution = self._get_resolution_string(in_variation, in_index)
+                        resolution = self._get_resolution_string(rotation_variation, in_index)
                     if resolution is not None:
                         key = self._resolution_key(resolution)
                         variants = cache_entry.get("variants", {})
@@ -2846,32 +2960,37 @@ class SmartDiskCache(
 
         dead_filepaths = [fp for fp in entries if not os.path.isfile(fp)]
 
-        referenced_cache_files = set()
+        # One scandir, then pure set lookups. The walk must not stop at the
+        # first missing variation suffix — a gap (e.g. _1.pt lost out-of-band
+        # while _2.pt/_3.pt survive) would otherwise turn the still-indexed
+        # higher variations into "orphans".
+        existing_pt_sizes = {
+            e.name: e.stat().st_size for e in os.scandir(cache_dir) if e.name.endswith(".pt") and e.is_file()
+        }
+
+        referenced_names = set()
         for fp, entry in entries.items():
             if fp in dead_filepaths:
                 continue
             for cf in SmartDiskCache._iter_variant_cache_files(entry):
                 for v in range(1, 100):
-                    pt = os.path.join(cache_dir, f"{cf}_{v}.pt")
-                    if os.path.isfile(pt):
-                        referenced_cache_files.add(os.path.normpath(pt))
-                    else:
-                        break
+                    name = f"{cf}_{v}.pt"
+                    if name in existing_pt_sizes:
+                        referenced_names.add(name)
 
         # Top-level non-entry .pt files (currently just blank_sentinel.pt)
         # are intentional artifacts, not orphans.
         sentinel_name = index.get("blank_sentinel")
         if sentinel_name:
-            referenced_cache_files.add(os.path.normpath(os.path.join(cache_dir, sentinel_name)))
+            referenced_names.add(sentinel_name)
 
         orphan_count = 0
         orphan_bytes = 0
 
-        for entry in os.scandir(cache_dir):
-            if entry.name.endswith(".pt") and entry.is_file():
-                if os.path.normpath(entry.path) not in referenced_cache_files:
-                    orphan_count += 1
-                    orphan_bytes += entry.stat().st_size
+        for name, size in existing_pt_sizes.items():
+            if name not in referenced_names:
+                orphan_count += 1
+                orphan_bytes += size
 
         return {"orphan_count": orphan_count, "orphan_bytes": orphan_bytes}
 
@@ -2902,6 +3021,12 @@ class SmartDiskCache(
 
         dead_filepaths = [fp for fp in entries if not os.path.isfile(fp)]
 
+        # One scandir, then pure set lookups. None of the variation walks may
+        # stop at the first missing suffix — a gap (e.g. _1.pt lost
+        # out-of-band while _2.pt/_3.pt survive) would otherwise leave the
+        # higher variations out of the referenced set and delete them.
+        existing_pt_names = {e.name for e in os.scandir(cache_dir) if e.name.endswith(".pt") and e.is_file()}
+
         for fp in dead_filepaths:
             entry = entries.pop(fp)
             file_hash = entry.get("hash", "")
@@ -2913,30 +3038,26 @@ class SmartDiskCache(
                     del hash_index[file_hash]
                     for cf in SmartDiskCache._iter_variant_cache_files(entry):
                         for v in range(1, 100):
-                            pt = os.path.join(cache_dir, f"{cf}_{v}.pt")
-                            if os.path.isfile(pt):
-                                os.remove(pt)
-                            else:
-                                break
+                            name = f"{cf}_{v}.pt"
+                            if name in existing_pt_names:
+                                os.remove(os.path.join(cache_dir, name))
+                                existing_pt_names.discard(name)
 
-        referenced_cache_files = set()
+        referenced_names = set()
         for entry in entries.values():
             for cf in SmartDiskCache._iter_variant_cache_files(entry):
                 for v in range(1, 100):
-                    pt = os.path.join(cache_dir, f"{cf}_{v}.pt")
-                    if os.path.isfile(pt):
-                        referenced_cache_files.add(os.path.normpath(pt))
-                    else:
-                        break
+                    name = f"{cf}_{v}.pt"
+                    if name in existing_pt_names:
+                        referenced_names.add(name)
 
         sentinel_name = index.get("blank_sentinel")
         if sentinel_name:
-            referenced_cache_files.add(os.path.normpath(os.path.join(cache_dir, sentinel_name)))
+            referenced_names.add(sentinel_name)
 
-        for entry in os.scandir(cache_dir):
-            if entry.name.endswith(".pt") and entry.is_file():
-                if os.path.normpath(entry.path) not in referenced_cache_files:
-                    os.remove(entry.path)
+        for name in existing_pt_names:
+            if name not in referenced_names:
+                os.remove(os.path.join(cache_dir, name))
 
         tmp_path = cache_path + ".tmp"
         bak_path = cache_path + ".bak"

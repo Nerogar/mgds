@@ -92,10 +92,25 @@ class _BatchCollector:
             for request in batch:
                 request.done = True
         except BaseException as e:
-            for request in batch:
-                if not request.done:
-                    request.error = e
+            if len(batch) > 1 and isinstance(e, Exception):
+                # One bad request (or a batch-level failure like OOM on the
+                # stacked forward) must not poison its batchmates: retry each
+                # request individually so only the truly-failing items error.
+                # Healthy items would otherwise be recorded as build_failed
+                # and silently train on blank-sentinel zeros for the session.
+                for request in batch:
+                    if request.done:
+                        continue
+                    try:
+                        self._run_batch_fun([request])
+                    except BaseException as single_error:
+                        request.error = single_error
                     request.done = True
+            else:
+                for request in batch:
+                    if not request.done:
+                        request.error = e
+                        request.done = True
 
 
 class EncodeQwenText(
@@ -217,13 +232,20 @@ class EncodeQwenText(
 
         for i, request in enumerate(batch):
             seq_len = request.tokens.shape[0]
-            if max_len < seq_len:
+            n = lengths[i]
+            if n < seq_len:
+                # Zero everything past this request's OWN effective length —
+                # not just past the batch max. Positions [n, max_len) hold
+                # the encoder's outputs for this row's pad tokens; keeping
+                # them would make the result (and any cache built from it)
+                # depend on which longer requests shared the batch, where
+                # _encode_single deterministically writes zeros.
                 full = torch.zeros(
                     (seq_len, hidden.shape[-1]),
                     dtype=hidden.dtype,
                     device=hidden.device,
                 )
-                full[:max_len] = hidden[i]
+                full[:n] = hidden[i][:n]
                 request.result = full
             else:
                 request.result = hidden[i]

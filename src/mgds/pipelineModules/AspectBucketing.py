@@ -232,7 +232,12 @@ class AspectBucketing(
                 enable_resolution_override = self._get_previous_item(
                     variation, self.enable_target_resolutions_override_in_name, index)
             except Exception:
-                enable_resolution_override = False
+                # Can't replicate get_item's read — signal "fall back to the
+                # slow path" like the sibling reads above/below do. Silently
+                # assuming the override is disabled would compute a key from
+                # the wrong resolution set and let fast-validation serve a
+                # wrong-bucket variant where get_item would have raised.
+                return None
             if enable_resolution_override:
                 try:
                     target_resolutions = self._get_previous_item(
