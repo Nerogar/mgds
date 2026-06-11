@@ -36,6 +36,17 @@ class PadMaskedTokens(
         hidden_state = self._get_previous_item(variation, self.hidden_state_name, index)
 
         pad_length = self.max_length - tokens.shape[0]
+        if pad_length < 0:
+            # F.pad with a negative pad silently TRUNCATES — after
+            # PruneMaskedTokens every incoming token is a real prompt token,
+            # so a max_length below the tokenizer's effective cap would drop
+            # real tokens (and their hidden states) without any warning.
+            raise ValueError(
+                f"PadMaskedTokens: sequence length {tokens.shape[0]} exceeds "
+                f"max_length {self.max_length}; refusing to silently truncate "
+                f"real tokens. Align max_length with the tokenizer's effective "
+                f"maximum (including any additional format tokens)."
+            )
 
         tokens = F.pad(tokens, (0, pad_length), value=0)
         tokens_mask = F.pad(tokens_mask, (0, pad_length), value=0)
