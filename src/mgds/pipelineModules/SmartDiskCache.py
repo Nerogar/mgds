@@ -70,6 +70,7 @@ class SmartDiskCache(
         rebucket_provider: Callable[[float], list[str]] | None = None,
         aspect_bucketing=None,
         extra_watched_paths_in_names: list[str] | None = None,
+        trust_cache: bool = False,
     ):
         super().__init__()
         self.cache_dir = cache_dir
@@ -93,6 +94,11 @@ class SmartDiskCache(
         self.modeltype = modeltype
         self.source_path_in_name = source_path_in_name
         self.sourceless = sourceless
+        # Per-instance trust mode: skip per-file mtime/hash/.pt-existence
+        # validation for entries already in the index (same semantics as the
+        # OT_SKIP_CACHE_VALIDATION=1 env var, but config-driven so it follows
+        # each run's TrainConfig instead of lingering process state).
+        self.trust_cache = trust_cache
         # When True, a missing source file is treated as "trust the cache
         # entry as-is" instead of forcing a rebuild. Used by sidecar caches
         # whose source path may legitimately not exist on disk (e.g. mask
@@ -1629,12 +1635,19 @@ class SmartDiskCache(
             self._load_aggregate_cache(out_variation)
             return
 
-        # --- Trust mode (OT_SKIP_CACHE_VALIDATION=1) ---
+        # --- Trust mode (trust_cache ctor flag or OT_SKIP_CACHE_VALIDATION=1) ---
         # Skip per-file mtime/hash/.pt-existence validation. Any filepath
         # already in the on-disk index is trusted; only missing filepaths are
         # cached. Modeltype is still verified up-front to fail loud on
         # accidentally reusing another model's cache.
-        skip_validation = os.environ.get("OT_SKIP_CACHE_VALIDATION") == "1"
+        skip_validation = self.trust_cache or os.environ.get("OT_SKIP_CACHE_VALIDATION") == "1"
+        if skip_validation:
+            missing = sum(1 for fp in required_filepaths if fp not in self.cache_index.get("entries", {}))
+            print(
+                f"SmartDiskCache: trust mode active ({self.cache_dir}) — "
+                f"{len(required_filepaths) - missing} entries trusted without validation, "
+                f"{missing} missing from index (will be cached)"
+            )
         if skip_validation and self.cache_index.get("entries"):
             entries = self.cache_index["entries"]
             for fp in required_filepaths:
@@ -1693,8 +1706,13 @@ class SmartDiskCache(
         else:
             self._source_mtimes = {}
 
-        # Clear fast-validation token during full validation
-        self.cache_index.pop("last_validated", None)
+        # Clear fast-validation token during full validation. Preserved under
+        # trust mode: a trust run neither verifies nor invalidates source
+        # state, so whatever guarantee the token carried still holds — popping
+        # it here would permanently knock later non-trust runs off the fast
+        # path (the re-stamp at the end is also gated on full validation).
+        if not skip_validation:
+            self.cache_index.pop("last_validated", None)
 
         before_cache_fun_called = False
         files_built = 0
