@@ -71,6 +71,8 @@ class SmartDiskCache(
         aspect_bucketing=None,
         extra_watched_paths_in_names: list[str] | None = None,
         trust_cache: bool = False,
+        content_key_in_name: str | None = None,
+        build_max_workers: int | None = None,
     ):
         super().__init__()
         self.cache_dir = cache_dir
@@ -131,6 +133,45 @@ class SmartDiskCache(
         # caches and any pipeline without aspect bucketing.
         self.aspect_bucketing = aspect_bucketing
 
+        # Content-addressed reuse: name of an upstream item (e.g. the final
+        # post-augmentation ``prompt`` string) whose value uniquely determines
+        # this cache's split payload for a given (variation, index). When set,
+        # ``_build_cache_entry`` consults a persistent content_index.json
+        # (content hash -> .pt filename) before walking upstream: a hit is
+        # served by copying the existing .pt (refreshing per-entry __concept
+        # metadata) instead of re-running the encoder. This makes caption
+        # edits cost one encode per *changed line* instead of one per
+        # (file, variation): editing 1 of 6 lines reuses the other 5, a bulk
+        # "append trigger word line to every file" encodes the new line once
+        # for the whole dataset, and re-ordering lines costs zero encodes.
+        # Only meaningful for caches whose entries have no resolution
+        # dimension (text caches) — reuse is gated on ``resolution is None``.
+        self.content_key_in_name = content_key_in_name
+
+        # content hash -> .pt filename, persisted as content_index.json in
+        # the cache dir. Loaded lazily on the first build pass that could use
+        # it; entries whose .pt vanished (GC, manual deletion) are pruned at
+        # load time. Guarded by _index_lock.
+        self._content_index: dict[str, str] = {}
+        self._content_index_loaded = False
+        self._content_index_dirty = False
+
+        # before_cache_fun is deferred to the first variation that actually
+        # needs an upstream encode (see _ensure_before_cache_called). A build
+        # pass served entirely by dedup or content-addressed copies never
+        # moves the encoder onto the GPU at all.
+        self._before_cache_called = False
+        self._before_cache_lock = threading.Lock()
+
+        # When set (> 1), the build pass fans out over a dedicated
+        # ThreadPoolExecutor with this many workers instead of the shared
+        # pipeline executor (sized by dataloader_threads, default 2). Used by
+        # text caches so enough encode requests are in flight to fill the
+        # encoder's batch collector. The pipeline walker is thread-safe
+        # (thread-local per-module item caches), and the encoder modules
+        # serialize their forwards internally, so extra walkers are safe.
+        self.build_max_workers = build_max_workers
+
         # Additional per-sample sidecar in-name fields whose resolved paths
         # should be watched alongside ``source_path_in_name``. Touching one of
         # these files (e.g. a -masklabel.png sidecar that controls the
@@ -190,6 +231,8 @@ class SmartDiskCache(
         inputs = self.split_names + self.aggregate_names
         if self.source_path_in_name:
             inputs = inputs + [self.source_path_in_name]
+        if self.content_key_in_name:
+            inputs = inputs + [self.content_key_in_name]
         if self.variations_in_name:
             inputs = (
                 inputs
@@ -312,7 +355,170 @@ class SmartDiskCache(
         now = time.monotonic()
         if now - self._last_flush_time >= 30.0:
             self._save_cache_index(compact=True)
+            self._save_content_index()
             self._last_flush_time = now
+
+    # ------------------------------------------------------------------
+    # Content-addressed reuse (content_key_in_name)
+    # ------------------------------------------------------------------
+
+    def _get_content_index_path(self) -> str:
+        return os.path.join(self.cache_dir, "content_index.json")
+
+    def _ensure_content_index_loaded(self):
+        """Load content_index.json once per refresh, pruning entries whose
+        .pt no longer exists on disk. Must run after _scan_existing_pt_files
+        so the existence check is a set lookup, not a syscall per entry.
+        Only called when a build pass has items to build, so refreshes with
+        a fully-valid cache never pay the JSON load.
+        """
+        if self._content_index_loaded or not self.content_key_in_name:
+            return
+        self._content_index_loaded = True
+        self._content_index = {}
+        self._content_index_dirty = False
+        try:
+            with open(self._get_content_index_path(), "r") as f:
+                raw = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return
+        entries = raw.get("entries", {}) if isinstance(raw, dict) else {}
+        pruned = {h: pt for h, pt in entries.items() if isinstance(pt, str) and pt in self._existing_pt_files}
+        self._content_index = pruned
+        if len(pruned) != len(entries):
+            self._content_index_dirty = True
+
+    def _save_content_index(self):
+        if not self.content_key_in_name or not self._content_index_dirty:
+            return
+        path = self._get_content_index_path()
+        tmp_path = path + ".tmp"
+        with self._index_lock:
+            payload = {"version": 1, "entries": dict(self._content_index)}
+            self._content_index_dirty = False
+        try:
+            with open(tmp_path, "w") as f:
+                json.dump(payload, f, indent=None, separators=(",", ":"))
+            os.replace(tmp_path, path)
+        except OSError:
+            with contextlib.suppress(OSError):
+                os.remove(tmp_path)
+
+    def _content_hash(self, text: str) -> str:
+        """Hash of everything that determines a cached variation's payload:
+        the exact upstream text plus the cache schema and modeltype. Two
+        different models (or schema configurations) sharing a cache dir can
+        therefore never alias each other's entries.
+        """
+        required = sorted(set(self.split_names) | set(self.aggregate_names))
+        payload = json.dumps(
+            [CACHE_VERSION, self.modeltype, required, text],
+            ensure_ascii=True,
+            separators=(",", ":"),
+        )
+        return xxhash.xxh64(payload.encode("utf-8")).hexdigest()
+
+    def _get_content_key_text(self, in_variation: int, in_index: int) -> str | None:
+        """Resolve the content key (post-augmentation prompt) for one
+        variation. Walks only the cheap string-processing chain — the
+        encoder modules consume this name, they don't produce it, so the
+        walk never triggers a forward pass.
+        """
+        if not self.content_key_in_name:
+            return None
+        try:
+            value = self._get_previous_item(in_variation, self.content_key_in_name, in_index)
+        except Exception:
+            return None
+        return value if isinstance(value, str) else None
+
+    def _register_content_pt(self, content_hash: str | None, pt_name: str):
+        if content_hash is None:
+            return
+        with self._index_lock:
+            existing = self._content_index.get(content_hash)
+            if existing is None or existing not in self._existing_pt_files:
+                self._content_index[content_hash] = pt_name
+                self._content_index_dirty = True
+
+    def _try_content_reuse(
+        self,
+        content_hash: str | None,
+        pt_name: str,
+        in_variation: int,
+        in_index: int,
+    ) -> bool:
+        """Serve one variation by copying a content-identical .pt.
+
+        The donor was produced by the same upstream pipeline for the exact
+        same text (hash covers modeltype + schema + text), so its split
+        tensors are byte-identical to what a fresh encode would store. Only
+        the per-entry ``__concept_*`` metadata can differ — the donor may
+        belong to another concept — so those fields are refreshed from the
+        current upstream walk before saving under this entry's name.
+        Returns False on any inconsistency; the caller falls through to a
+        normal encode.
+        """
+        if content_hash is None:
+            return False
+        with self._index_lock:
+            donor_name = self._content_index.get(content_hash)
+        if not donor_name or donor_name == pt_name or donor_name not in self._existing_pt_files:
+            return False
+        donor_path = os.path.join(self._real_cache_dir, donor_name)
+        try:
+            cache_data = torch.load(donor_path, weights_only=False, map_location="cpu")
+        except Exception:
+            return False
+        if not isinstance(cache_data, dict):
+            return False
+        required = set(self.split_names) | set(self.aggregate_names)
+        present = {k for k in cache_data if not k.startswith("__")}
+        if not required.issubset(present):
+            return False
+
+        cache_data["__cache_version"] = CACHE_VERSION
+        cache_data["__modeltype"] = self.modeltype
+        if self.source_path_in_name:
+            for key in [k for k in cache_data if k.startswith("__concept_")]:
+                del cache_data[key]
+            try:
+                concept = self._get_previous_item(in_variation, "concept", in_index)
+                if concept is not None and isinstance(concept, dict):
+                    cache_data["__concept_loss_weight"] = concept.get("loss_weight", 1.0)
+                    cache_data["__concept_type"] = concept.get("type", "STANDARD")
+                    cache_data["__concept_name"] = concept.get("name", "")
+                    cache_data["__concept_path"] = concept.get("path", "")
+                    cache_data["__concept_seed"] = concept.get("seed", 0)
+            except Exception:
+                pass
+
+        real_pt_path = os.path.join(self._real_cache_dir, pt_name)
+        tmp_path = real_pt_path + f".{os.getpid()}.{threading.get_ident()}.tmp"
+        try:
+            torch.save(cache_data, tmp_path)
+            os.replace(tmp_path, real_pt_path)
+        except OSError:
+            with contextlib.suppress(OSError):
+                os.remove(tmp_path)
+            return False
+        return True
+
+    def _ensure_before_cache_called(self):
+        """Run before_cache_fun exactly once per refresh, on the first
+        variation that actually needs an upstream encode. Build passes
+        served entirely from dedup or content-addressed copies skip the
+        model device shuffle entirely. Thread-safe: concurrent builders
+        block until the first caller's prepare finishes.
+        """
+        if self._before_cache_called:
+            return
+        with self._before_cache_lock:
+            if self._before_cache_called:
+                return
+            if self.before_cache_fun is not None:
+                self.before_cache_fun()
+            self._before_cache_called = True
 
     def _get_resolution_string(self, in_variation: int, in_index: int) -> str | None:
         if "crop_resolution" not in self.aggregate_names and not self.resolution_from_upstream:
@@ -1138,8 +1344,18 @@ class SmartDiskCache(
         # config changes between build and read).
         stored_crop_resolution = None
 
+        # Content-addressed reuse only applies to caches without a resolution
+        # dimension (text caches): a donor .pt built for one resolution must
+        # never be copied into a variant slot for another.
+        use_content_key = self.content_key_in_name is not None and resolution is None
+
         for v in range(variations):
             pt_name = f"{cache_file}_{v + 1}.pt"
+            content_hash = None
+            if use_content_key:
+                text = self._get_content_key_text(v, in_index)
+                if text is not None:
+                    content_hash = self._content_hash(text)
             if pt_name in self._existing_pt_files:
                 # Reuse the existing .pt only if it actually contains every
                 # required schema name. An incomplete .pt (e.g. cached
@@ -1158,9 +1374,25 @@ class SmartDiskCache(
                     if required_schema.issubset(existing_keys):
                         if stored_crop_resolution is None:
                             stored_crop_resolution = existing.get("crop_resolution")
+                        # Register only the hash stamped at write time — the
+                        # freshly computed hash may not describe this .pt if
+                        # the seed or pipeline layout changed since it was
+                        # built (different SelectRandomText draws). A wrong
+                        # registration would poison reuse for *other* files.
+                        if use_content_key:
+                            stamped = existing.get("__content_hash")
+                            if isinstance(stamped, str):
+                                self._register_content_pt(stamped, pt_name)
                         continue
                 # else: fall through to rewrite below.
 
+            if content_hash is not None and self._try_content_reuse(content_hash, pt_name, v, in_index):
+                with self._index_lock:
+                    self._existing_pt_files.add(pt_name)
+                self._register_content_pt(content_hash, pt_name)
+                continue
+
+            self._ensure_before_cache_called()
             cache_data = {}
             with torch.no_grad():
                 for name in self.split_names:
@@ -1169,6 +1401,10 @@ class SmartDiskCache(
                     cache_data[name] = self.__clone_for_cache(self._get_previous_item(v, name, in_index))
             cache_data["__cache_version"] = CACHE_VERSION
             cache_data["__modeltype"] = self.modeltype
+            if content_hash is not None:
+                # Write-time stamp: the only trustworthy source for content
+                # index registration on later runs (see the reuse branch).
+                cache_data["__content_hash"] = content_hash
             if self.source_path_in_name:
                 try:
                     concept = self._get_previous_item(v, "concept", in_index)
@@ -1191,6 +1427,7 @@ class SmartDiskCache(
 
             with self._index_lock:
                 self._existing_pt_files.add(pt_name)
+            self._register_content_pt(content_hash, pt_name)
 
         sidecar_mtimes, sidecar_hashes = self._compute_sidecar_state(self._extra_paths_by_filepath.get(filepath, {}))
         # Stamp the source image's exact resolution onto the entry.
@@ -1544,6 +1781,8 @@ class SmartDiskCache(
         self._aggregate_cache = {}
         self._active_key_by_filepath = {}
         self._extra_paths_by_filepath = {}
+        self._content_index_loaded = False
+        self._before_cache_called = False
 
         # Bucket-method drift: the AspectBucketing config may have changed
         # since the cache was last validated (e.g. user edited
@@ -1714,7 +1953,6 @@ class SmartDiskCache(
         if not skip_validation:
             self.cache_index.pop("last_validated", None)
 
-        before_cache_fun_called = False
         files_built = 0
         files_skipped = 0
         files_failed = []
@@ -1838,9 +2076,11 @@ class SmartDiskCache(
             if not items_to_build:
                 continue
 
-            if not before_cache_fun_called and self.before_cache_fun is not None:
-                before_cache_fun_called = True
-                self.before_cache_fun()
+            # before_cache_fun is NOT called here anymore — it's deferred to
+            # the first variation that needs an actual upstream encode (see
+            # _ensure_before_cache_called). The content index, however, must
+            # be ready before any builder can consult it.
+            self._ensure_content_index_loaded()
 
             seen_paths = set()
             unique_items = []
@@ -1851,7 +2091,20 @@ class SmartDiskCache(
                     unique_items.append(item)
 
             self._last_flush_time = time.monotonic()
-            with tqdm(total=len(unique_items), smoothing=0.1, desc="caching") as bar:
+
+            # Dedicated build pool when configured: the shared pipeline
+            # executor is sized for training-time loading (dataloader_threads,
+            # default 2), far too narrow to keep an encoder batch collector
+            # fed during a cache build.
+            if self.build_max_workers is not None and self.build_max_workers > 1:
+                build_pool_ctx = concurrent.futures.ThreadPoolExecutor(max_workers=self.build_max_workers)
+            else:
+                build_pool_ctx = contextlib.nullcontext(self._state.executor)
+
+            with (
+                build_pool_ctx as build_executor,
+                tqdm(total=len(unique_items), smoothing=0.1, desc="caching") as bar,
+            ):
 
                 def fn(
                     filepath, group_key, in_variation, in_index, group_index, variations, resolution, current_device
@@ -1929,7 +2182,7 @@ class SmartDiskCache(
                         ab._target_override = target
                     try:
                         fs = [
-                            self._state.executor.submit(
+                            build_executor.submit(
                                 fn,
                                 filepath,
                                 group_key,
@@ -1954,7 +2207,7 @@ class SmartDiskCache(
                             try:
                                 filepath, status = f.result()
                             except Exception:
-                                self._state.executor.shutdown(wait=True, cancel_futures=True)
+                                build_executor.shutdown(wait=True, cancel_futures=True)
                                 raise
                             if status == "built" or status == "dedup":
                                 files_built += 1
@@ -1966,8 +2219,9 @@ class SmartDiskCache(
                             self._flush_cache_index()
                             bar.update(1)
                             if self.stop_check_fun():
-                                self._state.executor.shutdown(wait=True, cancel_futures=True)
+                                build_executor.shutdown(wait=True, cancel_futures=True)
                                 self._save_cache_index()
+                                self._save_content_index()
                                 print(
                                     f"SmartDiskCache: Stopped early. Cached {files_built} files this session, {files_skipped} reused from cache."
                                 )
@@ -1989,6 +2243,7 @@ class SmartDiskCache(
         if current_bucket_method is not None:
             self.cache_index["bucket_method"] = current_bucket_method
         self._save_cache_index()
+        self._save_content_index()
 
         # Mark every required filepath that ended up with a valid entry as
         # validated for this process so subsequent epochs can skip outright.
