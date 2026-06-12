@@ -30,6 +30,13 @@ SCHEMA_METHOD = "shape_v1"
 # variant key, but the cache filename collapses to bare ``hash12``.
 NO_RESOLUTION_KEY = "_"
 
+# Placeholder stored in a queued rebuild item's resolution slot during the
+# validation loop. Resolving the real value walks the upstream pipeline and
+# decodes the source image — far too slow to do serially per item — so the
+# loop defers it and a parallel pass fills these in before the build phase
+# groups items by target resolution.
+RESOLUTION_PENDING = object()
+
 # Aggregate names whose value at load time can be reconstructed from cache
 # metadata (variant key + entry filepath) without reading the .pt. When every
 # configured aggregate is in this set, _load_aggregate_cache skips torch.load
@@ -575,8 +582,17 @@ class SmartDiskCache(
                 self.before_cache_fun()
             self._before_cache_called = True
 
+    def _needs_resolution(self) -> bool:
+        """True when this cache keys variants by resolution at all.
+
+        Mirrors the early-out gate in ``_get_resolution_string`` so callers
+        can tell "resolution is None because there isn't one" (text caches)
+        apart from "resolution is expensive to compute" (image caches, where
+        the upstream walk decodes the source file)."""
+        return "crop_resolution" in self.aggregate_names or self.resolution_from_upstream
+
     def _get_resolution_string(self, in_variation: int, in_index: int) -> str | None:
-        if "crop_resolution" not in self.aggregate_names and not self.resolution_from_upstream:
+        if not self._needs_resolution():
             return None
         # Walk upstream at this module's current_variation, not the in-space
         # variation we were called with. crop_resolution is variation-
@@ -2145,11 +2161,18 @@ class SmartDiskCache(
                                 del self.cache_index["entries"][filepath]
                             self._active_key_by_filepath.pop(filepath, None)
 
-                    # Rebuild path: now we DO need the current resolution.
-                    # This opens the image (via CalcAspect) but only for files
-                    # that are missing or stale, not for the whole dataset.
-                    resolution = self._get_resolution_string(out_variation, in_index)
-                    self._active_key_by_filepath[filepath] = self._resolution_key(resolution)
+                    # Rebuild path: now we DO need the current resolution —
+                    # but computing it opens the image through the full
+                    # upstream chain (mask augmentation included), which at
+                    # ~hundreds of ms per file would serialize hours of decode
+                    # into this loop. Queue a placeholder instead; the
+                    # parallel resolve pass below fills it in before the
+                    # build phase needs it.
+                    if self._needs_resolution():
+                        resolution = RESOLUTION_PENDING
+                    else:
+                        resolution = None
+                        self._active_key_by_filepath[filepath] = self._resolution_key(resolution)
                     items_to_build_by_index[in_index] = (
                         filepath,
                         group_key,
@@ -2160,6 +2183,32 @@ class SmartDiskCache(
                         resolution,
                     )
                     bar.update(1)
+
+            # Parallel resolve pass: fill in the resolutions the loop above
+            # deferred. Each resolve repeats exactly the upstream walk the
+            # serial code used to run inline — same variation and index, so
+            # the per-index seeded RNG lands on the same bucket — but the
+            # walk decodes the source image, so it's fanned out across
+            # threads instead of serializing one decode per item. No
+            # ``_target_override`` is held here, matching the old inline
+            # behaviour where each item picks its own epoch-rotated target.
+            pending = [ii for ii, item in items_to_build_by_index.items() if item[6] is RESOLUTION_PENDING]
+            if pending:
+                resolve_workers = max(4, min(16, os.cpu_count() or 8))
+                with (
+                    concurrent.futures.ThreadPoolExecutor(max_workers=resolve_workers) as resolve_pool,
+                    tqdm(total=len(pending), smoothing=0.1, desc="resolving new items") as resolve_bar,
+                ):
+                    future_to_index = {
+                        resolve_pool.submit(self._get_resolution_string, out_variation, ii): ii for ii in pending
+                    }
+                    for future in concurrent.futures.as_completed(future_to_index):
+                        ii = future_to_index[future]
+                        resolution = future.result()
+                        item = items_to_build_by_index[ii]
+                        self._active_key_by_filepath[item[0]] = self._resolution_key(resolution)
+                        items_to_build_by_index[ii] = item[:6] + (resolution,)
+                        resolve_bar.update(1)
 
             items_to_build = list(items_to_build_by_index.values())
 

@@ -1669,13 +1669,13 @@ class TestResolutionShortCircuit:
         return ds, cache_mod, paths
 
     def test_resolution_called_lazily_on_full_validation(self, tmp_path):
-        """First run: per index, _get_resolution_string is called at most twice
-        (once for the cache-hit confirmation, once for the rebuild path; on a
-        cold cache only the rebuild path runs, so exactly N calls)."""
+        """First run: this cache has no resolution dimension (no
+        crop_resolution aggregate, no resolution_from_upstream), so the
+        rebuild path's _needs_resolution() gate skips the upstream walk
+        entirely — zero calls even on a cold cache."""
         ds, cache_mod, paths = self._setup(tmp_path, n=10)
         _drain(ds)
-        # Cold cache => every entry hits the rebuild branch => 1 call per index
-        assert cache_mod.resolution_call_count == 10
+        assert cache_mod.resolution_call_count == 0
 
     def test_resolution_called_once_per_hit_on_revalidation(self, tmp_path):
         """Second run with the SAME pipeline goes through session-skip — zero calls."""
@@ -1685,6 +1685,53 @@ class TestResolutionShortCircuit:
         _drain(ds)
         # Session-skip path returns early without calling resolution at all
         assert cache_mod.resolution_call_count == 0
+
+    def test_resolution_resolved_in_parallel_pass_on_cold_cache(self, tmp_path):
+        """Resolution-keyed cache, cold start: the validation loop defers the
+        per-item resolution (RESOLUTION_PENDING) and the parallel resolve
+        pass fills every one in — exactly one upstream walk per index, and
+        the built variants carry the real resolution keys."""
+        n = 10
+        src_dir = tmp_path / "sources"
+        src_dir.mkdir()
+        paths = [_create_source_file(src_dir, f"i{i}.bin", f"c{i}".encode()) for i in range(n)]
+        tensors = _make_tensors(n, seed=42)
+        cache_dir = str(tmp_path / "cache")
+        dummy = DummyDataModule(
+            data={
+                "latent": tensors,
+                "crop_resolution": [(64, 64)] * n,
+                "image_path": paths,
+            },
+            length=n,
+        )
+        cache_mod = _ResolutionCountingCache(
+            cache_dir=cache_dir,
+            split_names=["latent"],
+            aggregate_names=["crop_resolution"],
+            modeltype="testmodel",
+            source_path_in_name="image_path",
+        )
+        output_mod = OutputPipelineModule(names=["latent"])
+        ds = MGDS(
+            device=torch.device("cpu"),
+            concepts=[{"name": "A", "path": "dummy"}],
+            settings={},
+            definition=[[dummy], [cache_mod], [output_mod]],
+            batch_size=1,
+            state=PipelineState(),
+            seed=7,
+        )
+        _drain(ds)
+        # At least one resolve per index from the parallel pass. (The
+        # aggregate-load synthesis fallback adds more in this stub setup —
+        # no aspect_bucketing to recover aspect from — so don't pin an
+        # exact total.)
+        assert cache_mod.resolution_call_count >= n
+        entries = cache_mod.cache_index["entries"]
+        assert len(entries) == n
+        for entry in entries.values():
+            assert list(entry["variants"].keys()) == ["64x64"]
 
 
 # ---------------------------------------------------------------------------
