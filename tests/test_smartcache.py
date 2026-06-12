@@ -3172,6 +3172,8 @@ class TestSynthesizeAggregateChecksVariantExists:
         sdc._aggregate_cache = {}
         sdc._active_key_by_filepath = {}
         sdc._index_lock = threading.Lock()
+        sdc._index_io_lock = threading.Lock()
+        sdc._index_disk_stat = None
         sdc._last_flush_time = 0.0
         sdc.cache_index = {
             "entries": {
