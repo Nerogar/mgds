@@ -13,8 +13,9 @@ from concurrent.futures import ThreadPoolExecutor
 from mgds.MGDS import MGDS
 from mgds.OutputPipelineModule import OutputPipelineModule
 from mgds.PipelineModule import PipelineModule, PipelineState
-from mgds.pipelineModules.EncodeQwenText import EncodeQwenText, _BatchCollector
+from mgds.pipelineModules.EncodeQwenText import EncodeQwenText
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
+from mgds.TextEncoderBatching import BatchCollector as _BatchCollector
 
 import torch
 
