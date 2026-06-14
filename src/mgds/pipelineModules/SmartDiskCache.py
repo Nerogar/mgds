@@ -231,6 +231,13 @@ class SmartDiskCache(
         # (users use repeats, not changing samples_per_epoch) so the
         # per-epoch revalidation was pure overhead.
         self._session_validated_filepaths: set[str] = set()
+        # Variant-granular counterpart to _session_validated_filepaths, for the
+        # multi-resolution session skip. Under multi-target bucketing a filepath
+        # maps to several resolution variants and the required one rotates per
+        # epoch, so filepath-granularity can't express "this epoch's variant was
+        # already validated". Holds (filepath, resolution_key) pairs. Like the
+        # filepath set, it is session-scoped (never reset per epoch).
+        self._session_validated_variants: set[tuple[str, str]] = set()
 
         # Filled at the start of __refresh_cache by a single os.scandir of the
         # cache dir, then consulted for .pt existence checks instead of one
@@ -685,6 +692,40 @@ class SmartDiskCache(
                 iter(entry.get("variants", {}).keys()),
                 NO_RESOLUTION_KEY,
             )
+
+    def _epoch_required_variants(self, index_to_filepath, out_variation):
+        """The (filepath, resolution_key) pairs this epoch will request.
+
+        Derives each key exactly as the validation loop, get_item and
+        _load_aggregate_cache do: ``_fast_resolution_string(entry, out_variation,
+        in_index)`` recovers aspect from the stamped ``original_resolution`` and
+        replays the per-(out_variation, in_index) RNG bucket choice — no image
+        decode. One key per in_index (``_validate_entry`` is invariant in
+        in_variation), seeded on the epoch variation so it matches precisely what
+        fetch will look up this epoch.
+
+        Returns ``(required, resolvable)``. ``resolvable`` is ``False`` when any
+        required entry is missing or its key can't be recovered without a decode
+        — the session-skip caller must then fall through to full validation.
+        """
+        required: set[tuple[str, str]] = set()
+        resolvable = True
+        entries = self.cache_index.get("entries", {})
+        for group_key in self.group_variations:
+            for in_index in self.group_indices[group_key]:
+                filepath = index_to_filepath.get(in_index)
+                if filepath is None:
+                    continue
+                entry = entries.get(filepath)
+                if entry is None:
+                    resolvable = False
+                    continue
+                resolution = self._fast_resolution_string(entry, out_variation, in_index)
+                if resolution is None:
+                    resolvable = False
+                    continue
+                required.add((filepath, self._resolution_key(resolution)))
+        return required, resolvable
 
     def _drift_recovery_pass(self) -> None:
         """Re-derive variant keys from cached aspects when bucket config drifted.
@@ -1981,6 +2022,36 @@ class SmartDiskCache(
                         f"Delete the cache directory or use a separate cache_dir for this model type."
                     )
 
+        # --- Variant-aware session skip (multi-resolution) ---
+        # The filepath-granular skip above is bypassed under multi-resolution
+        # bucketing because a filepath then maps to several resolution variants
+        # and the required one rotates per epoch, so "filepath validated" can't
+        # tell us "this epoch's variant was validated". Track (filepath, key)
+        # pairs instead: recompute this epoch's required variants (deterministic,
+        # no image decode — same out_variation-seeded roll validation/get_item
+        # use) and skip when every one was already validated earlier this run. A
+        # bucket a file hasn't been rolled into yet isn't in the set, so it falls
+        # through to full validation and lazy-build. Both get_item and
+        # _load_aggregate_cache re-derive the variant key per item under
+        # multi-target, so the skip needs no _active_key_by_filepath priming —
+        # only the guarantee (checked here) that every requested variant exists.
+        if (
+            not skip_validation
+            and multi_target
+            and not bucket_drift
+            and required_filepaths
+            and self.cache_index.get("entries")
+            and self._session_validated_variants
+        ):
+            required_variants, resolvable = self._epoch_required_variants(index_to_filepath, out_variation)
+            if resolvable and required_variants and required_variants.issubset(self._session_validated_variants):
+                self._source_path_cache = dict(index_to_filepath)
+                print(
+                    f"SmartDiskCache: Skipped re-validation ({len(required_variants)} variants already validated this run)"
+                )
+                self._load_aggregate_cache(out_variation)
+                return
+
         # Single os.scandir of the cache dir — used by fast and full paths.
         self._existing_pt_files = self._scan_existing_pt_files()
 
@@ -2388,6 +2459,22 @@ class SmartDiskCache(
         # validated for this process so subsequent epochs can skip outright.
         entries = self.cache_index.get("entries", {})
         self._session_validated_filepaths.update(fp for fp in required_filepaths if fp in entries)
+
+        # Variant-granular counterpart for the multi-resolution skip: record the
+        # (filepath, key) this epoch built or confirmed (one per in_index, the
+        # out_variation-rolled bucket). The `key in variants` guard means a
+        # missing/failed variant can't poison a future skip, and `fp not in
+        # failed_fps` drops files whose rebuild errored. Only under multi_target
+        # — the filepath-level set above already covers single-resolution.
+        if multi_target:
+            required_variants, _ = self._epoch_required_variants(index_to_filepath, out_variation)
+            failed_fps = {fp for fp, _ in files_failed}
+            for fp, key in required_variants:
+                if fp in failed_fps:
+                    continue
+                entry = entries.get(fp)
+                if entry is not None and key in entry.get("variants", {}):
+                    self._session_validated_variants.add((fp, key))
 
         total = files_built + files_skipped + len(files_failed)
         if total > 0:

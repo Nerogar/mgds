@@ -3492,3 +3492,149 @@ class TestSynthesizeAggregateChecksVariantExists:
             f"that get_item will also miss. Got: {agg['crop_resolution']}"
         )
         assert load_paths, "Expected slow-path torch.load to fire for the missing-variant case; got no load events."
+
+
+class _StubAspectBucketing:
+    """Minimal AspectBucketing stand-in. Two bucket_resolutions so
+    ``multi_target`` is True (the filepath-granular session skip is bypassed),
+    plus a caller-supplied ``(variation, index) -> 'HxW'`` key function so the
+    test fully controls which bucket each (epoch, item) rolls. The validation
+    loop, get_item and _load_aggregate_cache all reach this via
+    ``_fast_resolution_string``."""
+
+    def __init__(self, key_fn):
+        self._key_fn = key_fn
+        self.bucket_resolutions = {512: [(256, 256)], 768: [(384, 384)]}
+        self.frame_dim_enabled = False
+        self._target_override = None
+
+    def variant_key_from_aspect(self, variation, index, aspect):
+        return self._key_fn(variation, index)
+
+
+class TestMultiresVariantSessionSkip:
+    """Multi-resolution caches are bypassed by the filepath-granular session
+    skip (a filepath maps to several resolution variants and the required one
+    rotates per epoch). The variant-aware skip tracks (filepath, key) pairs, so
+    once every variant a stable dataset requests has been validated, later
+    epochs skip the full 'validating cache' loop — while a genuinely new variant
+    still forces validation and a lazy build.
+    """
+
+    def _setup(self, tmp_path, key_fn):
+        """Build a multires pipeline and return (ds, cache_dir, cache_mod).
+
+        Built inline (rather than via _build_smart_pipeline) so the test holds
+        the SmartDiskCache reference and can attach the stub bucketing.
+        """
+        src_dir = tmp_path / "src"
+        src_dir.mkdir(exist_ok=True)
+        paths = [_create_source_file(src_dir, f"i{i}.bin", f"c{i}".encode()) for i in range(2)]
+        tensors = _make_tensors(2, seed=7)
+        cache_dir = str(tmp_path / "cache")
+
+        dummy_mod = DummyDataModule(
+            data={
+                "latent": tensors,
+                "image_path": paths,
+                "crop_resolution": [(256, 256), (256, 256)],
+                "original_resolution": [(512, 512), (512, 512)],
+            },
+            length=2,
+        )
+        cache_mod = SmartDiskCache(
+            cache_dir=cache_dir,
+            split_names=["latent"],
+            aggregate_names=["crop_resolution"],
+            modeltype="testmodel",
+            source_path_in_name="image_path",
+        )
+        output_mod = OutputPipelineModule(names=["latent", "crop_resolution"])
+        ds = MGDS(
+            device=torch.device("cpu"),
+            concepts=[{"name": "A", "path": "dummy"}],
+            settings={},
+            definition=[[dummy_mod], [cache_mod], [output_mod]],
+            batch_size=1,
+            state=PipelineState(),
+            seed=42,
+        )
+        cache_mod.aspect_bucketing = _StubAspectBucketing(key_fn)
+        return ds, cache_dir, cache_mod
+
+    @staticmethod
+    def _stable(_variation, _index):
+        # Every (epoch, item) rolls the same bucket: the required variant set is
+        # identical across epochs on a stable dataset.
+        return "256x256"
+
+    def test_first_epoch_does_not_skip(self, tmp_path, capsys):
+        ds, _cache_dir, _cm = self._setup(tmp_path, self._stable)
+        _drain(ds)
+        out = capsys.readouterr().out
+        assert "Skipped re-validation" not in out
+
+    def test_second_epoch_skips_when_no_new_variants(self, tmp_path, capsys):
+        """Epoch 2 of a stable multires dataset must hit the variant-aware skip —
+        no 'validating cache' loop — even though multi_target disables the
+        filepath-granular skip."""
+        ds, _cache_dir, _cm = self._setup(tmp_path, self._stable)
+        _drain(ds)
+        capsys.readouterr()
+
+        batches = _drain(ds)
+
+        out = capsys.readouterr().out
+        assert "Skipped re-validation" in out
+        # Skipping must not starve the loader: data still flows.
+        assert len(batches) > 0
+
+    def test_repeated_epochs_all_skip(self, tmp_path, capsys):
+        ds, _cache_dir, _cm = self._setup(tmp_path, self._stable)
+        _drain(ds)
+        capsys.readouterr()
+
+        for _ in range(4):
+            _drain(ds)
+
+        out = capsys.readouterr().out
+        assert out.count("Skipped re-validation") == 4
+
+    def test_fresh_pipeline_does_not_skip(self, tmp_path, capsys):
+        """A new pipeline instance = new process: the session set is empty, so
+        even a fully-built multires cache validates on its first epoch."""
+        ds1, _cd, _cm = self._setup(tmp_path, self._stable)
+        _drain(ds1)
+        capsys.readouterr()
+
+        ds2, _cd2, _cm2 = self._setup(tmp_path, self._stable)
+        _drain(ds2)
+
+        out = capsys.readouterr().out
+        assert "Skipped re-validation" not in out
+
+    def test_new_variant_at_epoch_2_is_not_skipped(self, tmp_path, capsys):
+        """Variant-granularity proof: if a file rolls a bucket it was never
+        validated for, the skip must NOT fire — the new variant has to be
+        validated and lazily built, not silently served from a stale one."""
+        roll = {"i1": "256x256"}  # file 1's bucket; mutated after epoch 1
+
+        def key_fn(_variation, index):
+            return "256x256" if index == 0 else roll["i1"]
+
+        ds, cache_dir, _cm = self._setup(tmp_path, key_fn)
+        _drain(ds)
+        capsys.readouterr()
+
+        # File 1 now rolls a bucket that was never built/validated.
+        roll["i1"] = "384x384"
+
+        _drain(ds)
+
+        out = capsys.readouterr().out
+        assert "Skipped re-validation" not in out
+        # The new variant was lazily built rather than skipped.
+        built = {fp: sorted(e["variants"].keys()) for fp, e in _read_cache_json(cache_dir)["entries"].items()}
+        assert any("384x384" in keys for keys in built.values()), (
+            f"new variant '384x384' should have been built; got {built}"
+        )
