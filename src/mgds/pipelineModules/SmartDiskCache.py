@@ -1812,9 +1812,6 @@ class SmartDiskCache(
         except Exception:
             original_resolution = None
         key = self._resolution_key(resolution)
-        runtime_values_by_variation = (
-            self._sourceless_runtime_values_by_variation(variations, in_index) if self.source_path_in_name else {}
-        )
         with self._index_lock:
             entry = self.cache_index["entries"].get(filepath)
             if entry is None:
