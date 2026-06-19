@@ -1,5 +1,6 @@
 import concurrent
 import contextlib
+import copy
 import hashlib
 import json
 import math
@@ -409,6 +410,8 @@ class SmartDiskCache(
         outputs = self.split_names + self.aggregate_names
         if self.sourceless:
             outputs.append("concept")
+            if self.source_path_in_name == "sample_prompt_path":
+                outputs.extend(["prompt", "prompt_1", "prompt_2"])
         return outputs
 
     def __string_key(self, data: list[Any]) -> str:
@@ -675,19 +678,7 @@ class SmartDiskCache(
 
         cache_data["__cache_version"] = CACHE_VERSION
         cache_data["__modeltype"] = self.modeltype
-        if self.source_path_in_name:
-            for key in [k for k in cache_data if k.startswith("__concept_")]:
-                del cache_data[key]
-            try:
-                concept = self._get_previous_item(in_variation, "concept", in_index)
-                if concept is not None and isinstance(concept, dict):
-                    cache_data["__concept_loss_weight"] = concept.get("loss_weight", 1.0)
-                    cache_data["__concept_type"] = concept.get("type", "STANDARD")
-                    cache_data["__concept_name"] = concept.get("name", "")
-                    cache_data["__concept_path"] = concept.get("path", "")
-                    cache_data["__concept_seed"] = concept.get("seed", 0)
-            except Exception:
-                pass
+        self._stamp_sourceless_runtime_values(cache_data, in_variation, in_index)
 
         real_pt_path = os.path.join(self._real_cache_dir, pt_name)
         tmp_path = real_pt_path + f".{os.getpid()}.{threading.get_ident()}.tmp"
@@ -1512,6 +1503,9 @@ class SmartDiskCache(
         an additional variant under a different key.
         """
         key = self._resolution_key(resolution)
+        runtime_values_by_variation = (
+            self._sourceless_runtime_values_by_variation(variations, in_index) if self.source_path_in_name else {}
+        )
         with self._index_lock:
             if file_hash not in self.cache_index["hash_index"]:
                 return False
@@ -1544,9 +1538,15 @@ class SmartDiskCache(
                         "sidecar_hashes": sidecar_hashes,
                         "sourceless": self._sourceless_metadata(in_index, variations),
                     }
+                    if runtime_values_by_variation:
+                        target_entry["sourceless_runtime_values"] = runtime_values_by_variation
                     self.cache_index["entries"][filepath] = target_entry
                 else:
                     target_entry["sourceless"] = self._sourceless_metadata(in_index, variations)
+                    if runtime_values_by_variation:
+                        target_entry["sourceless_runtime_values"] = runtime_values_by_variation
+                    else:
+                        target_entry.pop("sourceless_runtime_values", None)
                 dedup_variant = {
                     "cache_file": cache_file,
                     "schema_keys": variant.get("schema_keys"),
@@ -1567,6 +1567,127 @@ class SmartDiskCache(
         if isinstance(x, torch.Tensor):
             return x.clone()
         return x
+
+    def _sourceless_runtime_values(self, in_variation: int, in_index: int) -> dict:
+        values = {}
+
+        concept = self._safe_previous_item(in_variation, "concept", in_index)
+        if isinstance(concept, dict):
+            values["concept"] = copy.deepcopy(concept)
+
+        for name in ("prompt", "prompt_1", "prompt_2"):
+            value = self._safe_previous_item(in_variation, name, in_index)
+            if value is not None:
+                values[name] = copy.deepcopy(value)
+
+        return values
+
+    def _sourceless_runtime_values_by_variation(self, variations: int, in_index: int) -> dict:
+        values_by_variation = {}
+        for v in range(int(variations or 1)):
+            values = self._sourceless_runtime_values(v, in_index)
+            if values:
+                values_by_variation[str(v)] = values
+        return values_by_variation
+
+    def _set_entry_sourceless_runtime_values(self, entry: dict, variations: int, in_index: int) -> bool:
+        if not self.source_path_in_name:
+            return False
+
+        previous_values = repr(entry.get("sourceless_runtime_values"))
+        values_by_variation = self._sourceless_runtime_values_by_variation(variations, in_index)
+        if values_by_variation:
+            entry["sourceless_runtime_values"] = values_by_variation
+        else:
+            entry.pop("sourceless_runtime_values", None)
+        return previous_values != repr(entry.get("sourceless_runtime_values"))
+
+    def _stamp_sourceless_runtime_values(self, cache_data: dict, in_variation: int, in_index: int) -> bool:
+        if not self.source_path_in_name:
+            return False
+
+        previous_values = repr(cache_data.get("__sourceless_values"))
+        previous_legacy = tuple(
+            repr(cache_data.get(key))
+            for key in (
+                "__concept_loss_weight",
+                "__concept_type",
+                "__concept_name",
+                "__concept_path",
+                "__concept_seed",
+            )
+        )
+
+        for key in [k for k in cache_data if k.startswith("__concept_")]:
+            del cache_data[key]
+
+        runtime_values = self._sourceless_runtime_values(in_variation, in_index)
+        if runtime_values:
+            cache_data["__sourceless_values"] = runtime_values
+        else:
+            cache_data.pop("__sourceless_values", None)
+
+        concept = runtime_values.get("concept")
+        if isinstance(concept, dict):
+            cache_data["__concept_loss_weight"] = concept.get("loss_weight", 1.0)
+            cache_data["__concept_type"] = concept.get("type", "STANDARD")
+            cache_data["__concept_name"] = concept.get("name", "")
+            cache_data["__concept_path"] = concept.get("path", "")
+            cache_data["__concept_seed"] = concept.get("seed", 0)
+
+        current_legacy = tuple(
+            repr(cache_data.get(key))
+            for key in (
+                "__concept_loss_weight",
+                "__concept_type",
+                "__concept_name",
+                "__concept_path",
+                "__concept_seed",
+            )
+        )
+        return previous_values != repr(cache_data.get("__sourceless_values")) or previous_legacy != current_legacy
+
+    def _save_pt_atomic(self, cache_data: dict, real_pt_path: str) -> None:
+        real_tmp_path = real_pt_path + f".{os.getpid()}.{threading.get_ident()}.tmp"
+        torch.save(cache_data, real_tmp_path)
+        os.replace(real_tmp_path, real_pt_path)
+
+    def _upgrade_sourceless_runtime_values(self, index_to_filepath: dict[int, str]) -> int:
+        if not self.source_path_in_name:
+            return 0
+
+        upgraded = 0
+        index_changed = False
+        entries = self.cache_index.get("entries", {})
+        for group_key, indices in self.group_indices.items():
+            variations = int(self.group_variations.get(group_key, 1) or 1)
+            for in_index in indices:
+                filepath = index_to_filepath.get(in_index)
+                if filepath is None:
+                    continue
+                entry = entries.get(filepath)
+                if entry is None:
+                    continue
+                if self._set_entry_sourceless_runtime_values(entry, variations, in_index):
+                    index_changed = True
+                for variant in (entry.get("variants") or {}).values():
+                    cache_file = variant.get("cache_file")
+                    if not cache_file:
+                        continue
+                    for v in range(variations):
+                        real_pt = self._real_pt_path(cache_file, v)
+                        if not os.path.isfile(real_pt):
+                            continue
+                        try:
+                            cached = torch.load(real_pt, weights_only=False, map_location="cpu")
+                        except Exception:
+                            continue
+                        if isinstance(cached, dict) and self._stamp_sourceless_runtime_values(cached, v, in_index):
+                            self._save_pt_atomic(cached, real_pt)
+                            upgraded += 1
+        if index_changed:
+            self._save_cache_index()
+        return upgraded
 
     def _build_cache_entry(
         self,
@@ -1624,6 +1745,8 @@ class SmartDiskCache(
                     if required_schema.issubset(existing_keys):
                         if stored_crop_resolution is None:
                             stored_crop_resolution = existing.get("crop_resolution")
+                        if self._stamp_sourceless_runtime_values(existing, v, in_index):
+                            self._save_pt_atomic(existing, real_pt)
                         # Register only the hash stamped at write time — the
                         # freshly computed hash may not describe this .pt if
                         # the seed or pipeline layout changed since it was
@@ -1655,22 +1778,10 @@ class SmartDiskCache(
                 # Write-time stamp: the only trustworthy source for content
                 # index registration on later runs (see the reuse branch).
                 cache_data["__content_hash"] = content_hash
-            if self.source_path_in_name:
-                try:
-                    concept = self._get_previous_item(v, "concept", in_index)
-                    if concept is not None and isinstance(concept, dict):
-                        cache_data["__concept_loss_weight"] = concept.get("loss_weight", 1.0)
-                        cache_data["__concept_type"] = concept.get("type", "STANDARD")
-                        cache_data["__concept_name"] = concept.get("name", "")
-                        cache_data["__concept_path"] = concept.get("path", "")
-                        cache_data["__concept_seed"] = concept.get("seed", 0)
-                except Exception:
-                    pass
+            self._stamp_sourceless_runtime_values(cache_data, v, in_index)
 
             real_pt_path = self._real_pt_path(cache_file, v)
-            real_tmp_path = real_pt_path + f".{os.getpid()}.{threading.get_ident()}.tmp"
-            torch.save(cache_data, real_tmp_path)
-            os.replace(real_tmp_path, real_pt_path)
+            self._save_pt_atomic(cache_data, real_pt_path)
 
             if stored_crop_resolution is None:
                 stored_crop_resolution = cache_data.get("crop_resolution")
@@ -1680,6 +1791,9 @@ class SmartDiskCache(
             self._register_content_pt(content_hash, pt_name)
 
         sidecar_mtimes, sidecar_hashes = self._compute_sidecar_state(self._extra_paths_by_filepath.get(filepath, {}))
+        runtime_values_by_variation = (
+            self._sourceless_runtime_values_by_variation(variations, in_index) if self.source_path_in_name else {}
+        )
         # Stamp the source image's exact resolution onto the entry.
         # Used by _fast_resolution_string to compute the per-epoch
         # variant key with the *real* aspect, not the quantized aspect
@@ -1698,6 +1812,9 @@ class SmartDiskCache(
         except Exception:
             original_resolution = None
         key = self._resolution_key(resolution)
+        runtime_values_by_variation = (
+            self._sourceless_runtime_values_by_variation(variations, in_index) if self.source_path_in_name else {}
+        )
         with self._index_lock:
             entry = self.cache_index["entries"].get(filepath)
             if entry is None:
@@ -1714,6 +1831,8 @@ class SmartDiskCache(
                 if original_resolution is not None:
                     entry["original_resolution"] = original_resolution
                 entry["sourceless"] = self._sourceless_metadata(in_index, variations)
+                if runtime_values_by_variation:
+                    entry["sourceless_runtime_values"] = runtime_values_by_variation
                 self.cache_index["entries"][filepath] = entry
             else:
                 # Refresh metadata; the source content may have changed and
@@ -1727,6 +1846,10 @@ class SmartDiskCache(
                 if original_resolution is not None:
                     entry["original_resolution"] = original_resolution
                 entry["sourceless"] = self._sourceless_metadata(in_index, variations)
+                if runtime_values_by_variation:
+                    entry["sourceless_runtime_values"] = runtime_values_by_variation
+                else:
+                    entry.pop("sourceless_runtime_values", None)
                 if "variants" not in entry:
                     entry["variants"] = {}
             variant_record = {
@@ -2124,6 +2247,10 @@ class SmartDiskCache(
                         self._extra_paths_by_filepath[filepath] = extras
                         required_sidecar_paths.update(extras.values())
 
+        skip_validation = self.trust_cache or os.environ.get("OT_SKIP_CACHE_VALIDATION") == "1"
+        if not skip_validation:
+            self._upgrade_sourceless_runtime_values(index_to_filepath)
+
         # --- Session skip path ---
         # If every required filepath was already validated earlier in this
         # process and is still present in the on-disk index, skip validation
@@ -2156,7 +2283,6 @@ class SmartDiskCache(
         # already in the on-disk index is trusted; only missing filepaths are
         # cached. Modeltype is still verified up-front to fail loud on
         # accidentally reusing another model's cache.
-        skip_validation = self.trust_cache or os.environ.get("OT_SKIP_CACHE_VALIDATION") == "1"
         if skip_validation:
             missing = sum(1 for fp in required_filepaths if fp not in self.cache_index.get("entries", {}))
             print(
@@ -3201,14 +3327,21 @@ class SmartDiskCache(
                                 )
                             else:
                                 item[name] = sval
+                if self.sourceless:
+                    runtime_values = (cache_entry.get("sourceless_runtime_values") or {}).get(str(variation))
+                    if not isinstance(runtime_values, dict):
+                        runtime_values = cached.get("__sourceless_values")
+                    if isinstance(runtime_values, dict):
+                        for name, value in runtime_values.items():
+                            item.setdefault(name, value)
                 if self.sourceless and "__concept_loss_weight" in cached:
-                    item["concept"] = {
+                    item.setdefault("concept", {
                         "loss_weight": cached["__concept_loss_weight"],
                         "type": cached.get("__concept_type", "STANDARD"),
                         "name": cached.get("__concept_name", ""),
                         "path": cached.get("__concept_path", ""),
                         "seed": cached.get("__concept_seed", 0),
-                    }
+                    })
                 return item
 
         sentinel = self._load_blank_sentinel()
