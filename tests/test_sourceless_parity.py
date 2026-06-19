@@ -5,6 +5,8 @@ import shutil
 from mgds.MGDS import MGDS
 from mgds.OutputPipelineModule import OutputPipelineModule
 from mgds.PipelineModule import PipelineModule, PipelineState
+from mgds.pipelineModules.AspectBatchSorting import AspectBatchSorting
+from mgds.pipelineModules.PlaceholderModule import PlaceholderModule
 from mgds.pipelineModules.SmartDiskCache import CACHE_VERSION, NO_RESOLUTION_KEY, SmartDiskCache
 from mgds.pipelineModules.VariationSorting import VariationSorting
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
@@ -32,12 +34,18 @@ class PairedSource(PipelineModule, RandomAccessPipelineModule):
             "latent_mask",
             "latent_conditioning_image",
             "latent_image_rejected",
+            "original_resolution",
+            "crop_resolution",
+            "crop_offset",
             "text_embedding",
             "prompt",
+            "prompt_1",
+            "prompt_2",
             "concept",
         ]
 
     def get_item(self, variation: int, index: int, requested_name: str = None) -> dict:
+        crop_resolutions = [(512, 768), (768, 512)]
         return {
             "image_path": self.image_paths[index],
             "sample_prompt_path": self.text_paths[index],
@@ -45,8 +53,13 @@ class PairedSource(PipelineModule, RandomAccessPipelineModule):
             "latent_mask": torch.tensor([index + 10, variation], dtype=torch.float32),
             "latent_conditioning_image": torch.tensor([index + 20, variation], dtype=torch.float32),
             "latent_image_rejected": torch.tensor([index + 30, variation], dtype=torch.float32),
+            "original_resolution": (600 + index, 800 - index),
+            "crop_resolution": crop_resolutions[(index + variation) % len(crop_resolutions)],
+            "crop_offset": (variation, index),
             "text_embedding": torch.tensor([index + 100, variation], dtype=torch.float32),
             "prompt": f"prompt-{index}-variation-{variation}",
+            "prompt_1": f"clip-l-{index}-variation-{variation}",
+            "prompt_2": f"clip-g-{index}-variation-{variation}",
             "concept": {
                 "name": f"concept-{index}",
                 "path": f"concept-{index}",
@@ -104,8 +117,15 @@ def _cache_modules(cache_root, *, sourceless: bool):
 def _realistic_cache_modules(cache_root, *, sourceless: bool):
     image_cache = SmartDiskCache(
         cache_dir=str(cache_root / "image"),
-        split_names=["latent_image", "latent_mask", "latent_conditioning_image", "latent_image_rejected"],
-        aggregate_names=["image_path"],
+        split_names=[
+            "latent_image",
+            "latent_mask",
+            "latent_conditioning_image",
+            "latent_image_rejected",
+            "original_resolution",
+            "crop_offset",
+        ],
+        aggregate_names=["crop_resolution", "image_path"],
         variations_in_name="concept.image_variations",
         balancing_in_name="concept.balancing",
         balancing_strategy_in_name="concept.balancing_strategy",
@@ -130,7 +150,7 @@ def _realistic_cache_modules(cache_root, *, sourceless: bool):
         content_key_in_name="prompt",
     )
     variation_sorting = VariationSorting(
-        names=["prompt", "concept"],
+        names=["prompt", "prompt_1", "prompt_2", "concept"],
         balancing_in_name="concept.balancing",
         balancing_strategy_in_name="concept.balancing_strategy",
         variations_group_in_name=["concept.path", "concept.seed", "concept.text"],
@@ -143,6 +163,8 @@ def _build_dataset(cache_root, image_paths=None, text_paths=None, *, sourceless=
     modules = []
     if not sourceless:
         modules.append(PairedSource(image_paths, text_paths))
+    elif realistic:
+        modules.append(PlaceholderModule())
     modules.extend(
         _realistic_cache_modules(cache_root, sourceless=sourceless)
         if realistic
@@ -152,12 +174,24 @@ def _build_dataset(cache_root, image_paths=None, text_paths=None, *, sourceless=
     if realistic:
         output_names.extend(
             [
+                "original_resolution",
+                "crop_resolution",
+                "crop_offset",
                 "latent_mask",
                 "latent_conditioning_image",
                 "latent_image_rejected",
                 "prompt",
+                "prompt_1",
+                "prompt_2",
                 "concept",
             ]
+        )
+        modules.append(
+            AspectBatchSorting(
+                resolution_in_name="crop_resolution",
+                names=output_names + ["concept"],
+                batch_size=1,
+            )
         )
     output = OutputPipelineModule(names=output_names)
     return MGDS(
