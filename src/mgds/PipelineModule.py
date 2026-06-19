@@ -24,6 +24,7 @@ class PipelineState:
 
     def __init__(self, max_threads: int|None = None):
         self.executor = futures.ThreadPoolExecutor(max_threads)
+        self.sourceless_cache_state = {}
 
 
 class PipelineModule(metaclass=ABCMeta):

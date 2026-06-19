@@ -254,6 +254,133 @@ class SmartDiskCache(
         # _any_variant_cache_file. Reset at the top of __refresh_cache.
         self._active_key_by_filepath: dict[str, str] = {}
 
+    @staticmethod
+    def _normpath(path: Any) -> str:
+        return os.path.normpath(str(path))
+
+    def _safe_previous_item(self, variation: int, name: str | None, index: int) -> Any:
+        if not name:
+            return None
+        try:
+            return self._get_previous_item(variation, name, index)
+        except Exception:
+            return None
+
+    def _sourceless_metadata(self, in_index: int, variations: int) -> dict:
+        linked_paths = {}
+        for name in ("image_path", "sample_prompt_path", "mask_path", "cond_path"):
+            value = self._safe_previous_item(0, name, in_index)
+            if value:
+                linked_paths[name] = self._normpath(value)
+
+        group_values = []
+        if self.variations_group_in_names:
+            group_values = [self._safe_previous_item(0, name, in_index) for name in self.variations_group_in_names]
+
+        return {
+            "source_path_in_name": self.source_path_in_name,
+            "source_index": int(in_index),
+            "variations": int(variations or 1),
+            "balancing": self._safe_previous_item(0, self.balancing_in_name, in_index),
+            "balancing_strategy": self._safe_previous_item(0, self.balancing_strategy_in_name, in_index),
+            "group_values": group_values,
+            "group_enabled": self._safe_previous_item(0, self.group_enabled_in_name, in_index)
+            if self.group_enabled_in_name
+            else True,
+            "linked_paths": linked_paths,
+        }
+
+    def _entry_variation_count(self, entry: dict) -> int:
+        max_variations = 1
+        for variant in (entry.get("variants") or {}).values():
+            cache_file = variant.get("cache_file")
+            if not cache_file:
+                continue
+            count = 0
+            while os.path.isfile(self._real_pt_path(cache_file, count)):
+                count += 1
+            max_variations = max(max_variations, count or 1)
+        return max_variations
+
+    def _sourceless_counterpart_path(self, anchor_path: str, anchor_entry: dict | None) -> str:
+        if self.source_path_in_name in (None, "image_path"):
+            return self._normpath(anchor_path)
+
+        linked_paths = ((anchor_entry or {}).get("sourceless") or {}).get("linked_paths") or {}
+        linked = linked_paths.get(self.source_path_in_name)
+        if linked:
+            return self._normpath(linked)
+
+        if self.source_path_in_name == "sample_prompt_path":
+            return self._normpath(os.path.splitext(anchor_path)[0] + ".txt")
+
+        raise RuntimeError(
+            f"Sourceless training cannot map image cache entry '{anchor_path}' "
+            f"to required source '{self.source_path_in_name}'. Rebuild the cache with the latest mgds."
+        )
+
+    def _is_sourceless_anchor_cache(self) -> bool:
+        return self.source_path_in_name == "image_path" or "image_path" in self.aggregate_names
+
+    def _init_sourceless_groups_from_entries(self, filepaths: list[str]) -> None:
+        group_variations = {}
+        group_indices = {}
+        group_balancing = {}
+        group_balancing_strategy = {}
+        has_metadata = False
+
+        for in_index, filepath in enumerate(filepaths):
+            entry = self.cache_index["entries"][filepath]
+            meta = entry.get("sourceless") or {}
+            if meta:
+                has_metadata = True
+
+            enabled = meta.get("group_enabled", True)
+            if not enabled:
+                continue
+
+            group_values = meta.get("group_values")
+            if group_values is None:
+                group_values = [""]
+            group_key = self.__string_key(group_values)
+            variations = int(meta.get("variations") or self._entry_variation_count(entry) or 1)
+            balancing = meta.get("balancing")
+            if balancing is None:
+                balancing = 1.0
+            balancing_strategy = meta.get("balancing_strategy") or "REPEATS"
+
+            group_variations.setdefault(group_key, variations)
+            group_indices.setdefault(group_key, []).append(in_index)
+            group_balancing.setdefault(group_key, balancing)
+            group_balancing_strategy.setdefault(group_key, balancing_strategy)
+
+        if not has_metadata:
+            n = len(filepaths)
+            variations = max((self._entry_variation_count(self.cache_index["entries"][fp]) for fp in filepaths), default=1)
+            self.group_variations = {"": variations}
+            self.group_indices = {"": list(range(n))}
+            self.group_full_indices = {"": list(range(n))}
+            self.group_output_samples = {"": n}
+            self.group_balancing_strategy = {}
+            self.group_balancing = {}
+            return
+
+        group_output_samples = {}
+        for group_key, indices in group_indices.items():
+            balancing_strategy = group_balancing_strategy[group_key]
+            balancing = group_balancing[group_key]
+            if balancing_strategy == "SAMPLES":
+                group_output_samples[group_key] = int(balancing)
+            else:
+                group_output_samples[group_key] = int(math.floor(len(indices) * balancing))
+
+        self.group_variations = group_variations
+        self.group_indices = group_indices
+        self.group_full_indices = {k: list(v) for k, v in group_indices.items()}
+        self.group_output_samples = group_output_samples
+        self.group_balancing_strategy = group_balancing_strategy
+        self.group_balancing = group_balancing
+
     def length(self) -> int:
         if not self.variations_initialized:
             name = self.split_names[0] if len(self.split_names) > 0 else self.aggregate_names[0]
@@ -1367,7 +1494,15 @@ class SmartDiskCache(
             if not paths:
                 del self.cache_index["hash_index"][file_hash]
 
-    def _try_dedup(self, filepath: str, file_hash: str, resolution: str | None, mtime: float) -> bool:
+    def _try_dedup(
+        self,
+        filepath: str,
+        file_hash: str,
+        resolution: str | None,
+        mtime: float,
+        in_index: int,
+        variations: int,
+    ) -> bool:
         """Reuse an existing entry's variant when content+resolution match.
 
         Hash-index lookup finds entries built from the same source bytes; we
@@ -1407,8 +1542,11 @@ class SmartDiskCache(
                         "cache_version": CACHE_VERSION,
                         "sidecar_mtimes": sidecar_mtimes,
                         "sidecar_hashes": sidecar_hashes,
+                        "sourceless": self._sourceless_metadata(in_index, variations),
                     }
                     self.cache_index["entries"][filepath] = target_entry
+                else:
+                    target_entry["sourceless"] = self._sourceless_metadata(in_index, variations)
                 dedup_variant = {
                     "cache_file": cache_file,
                     "schema_keys": variant.get("schema_keys"),
@@ -1575,6 +1713,7 @@ class SmartDiskCache(
                 }
                 if original_resolution is not None:
                     entry["original_resolution"] = original_resolution
+                entry["sourceless"] = self._sourceless_metadata(in_index, variations)
                 self.cache_index["entries"][filepath] = entry
             else:
                 # Refresh metadata; the source content may have changed and
@@ -1587,6 +1726,7 @@ class SmartDiskCache(
                 entry["sidecar_hashes"] = sidecar_hashes
                 if original_resolution is not None:
                     entry["original_resolution"] = original_resolution
+                entry["sourceless"] = self._sourceless_metadata(in_index, variations)
                 if "variants" not in entry:
                     entry["variants"] = {}
             variant_record = {
@@ -1833,7 +1973,47 @@ class SmartDiskCache(
                     f"Change your cache directory or rebuild the cache."
                 )
 
-        self._sourceless_filepaths = sorted(self.cache_index["entries"].keys())
+        state = self._state.sourceless_cache_state
+        entries = self.cache_index["entries"]
+
+        if self._is_sourceless_anchor_cache() or "anchor_paths" not in state:
+            has_source_indices = any((entry.get("sourceless") or {}).get("source_index") is not None for entry in entries.values())
+            if has_source_indices:
+                self._sourceless_filepaths = sorted(
+                    entries.keys(),
+                    key=lambda path: ((entries[path].get("sourceless") or {}).get("source_index", 1 << 60), path),
+                )
+            else:
+                self._sourceless_filepaths = sorted(entries.keys())
+            self._init_sourceless_groups_from_entries(self._sourceless_filepaths)
+            state["anchor_paths"] = list(self._sourceless_filepaths)
+            state["anchor_entries"] = {path: entries[path] for path in self._sourceless_filepaths}
+            state["group_variations"] = dict(self.group_variations)
+            state["group_indices"] = {k: list(v) for k, v in self.group_indices.items()}
+            state["group_full_indices"] = {k: list(v) for k, v in self.group_full_indices.items()}
+            state["group_output_samples"] = dict(self.group_output_samples)
+            state["group_balancing_strategy"] = dict(self.group_balancing_strategy)
+            state["group_balancing"] = dict(self.group_balancing)
+        else:
+            anchor_paths = state["anchor_paths"]
+            anchor_entries = state.get("anchor_entries", {})
+            self._sourceless_filepaths = [
+                self._sourceless_counterpart_path(anchor_path, anchor_entries.get(anchor_path))
+                for anchor_path in anchor_paths
+            ]
+            missing = [path for path in self._sourceless_filepaths if path not in entries]
+            if missing:
+                raise RuntimeError(
+                    "Sourceless training cache alignment failed: "
+                    f"{len(missing)} required {self.source_path_in_name or 'source'} entries are missing. "
+                    f"First missing: {missing[0]}"
+                )
+            self.group_variations = dict(state["group_variations"])
+            self.group_indices = {k: list(v) for k, v in state["group_indices"].items()}
+            self.group_full_indices = {k: list(v) for k, v in state["group_full_indices"].items()}
+            self.group_output_samples = dict(state["group_output_samples"])
+            self.group_balancing_strategy = dict(state["group_balancing_strategy"])
+            self.group_balancing = dict(state["group_balancing"])
 
         for fp in self._sourceless_filepaths:
             entry = self.cache_index["entries"][fp]
@@ -1844,47 +2024,20 @@ class SmartDiskCache(
             if not os.path.isfile(pt_path):
                 raise RuntimeError(f"Sourceless training: cache file '{pt_path}' is missing. Rebuild your cache.")
 
-        n = len(self._sourceless_filepaths)
-        self.group_variations = {"": 1}
-        self.group_indices = {"": list(range(n))}
-        self.group_full_indices = {"": list(range(n))}
-        self.group_output_samples = {"": n}
-        self.group_balancing_strategy = {}
-        self.group_balancing = {}
         self.variations_initialized = True
+        self._source_path_cache = dict(enumerate(self._sourceless_filepaths))
 
         self._aggregate_cache = {}
         if self.aggregate_names:
-            with tqdm(total=len(self._sourceless_filepaths), smoothing=0.1, desc="loading aggregate cache") as bar:
-                for group_index, fp in enumerate(self._sourceless_filepaths):
-                    entry = self.cache_index["entries"].get(fp)
-                    if entry is None:
-                        bar.update(1)
-                        continue
-                    cache_file = self._any_variant_cache_file(entry)
-                    if cache_file is None:
-                        bar.update(1)
-                        continue
-                    real_path = self._real_pt_path(cache_file, 0)
-                    try:
-                        cached = torch.load(real_path, weights_only=False, map_location="cpu")
-                        agg_data = {}
-                        for name in self.aggregate_names:
-                            if name in cached:
-                                agg_data[name] = cached[name]
-                        if agg_data:
-                            # Keyed exactly like get_item's lookup
-                            # ((filepath, variation, in_index)): sourceless
-                            # mode has variations=1 and in_index ==
-                            # group_index, so this is (fp, 0, group_index).
-                            self._aggregate_cache[(fp, 0, group_index)] = agg_data
-                    except Exception:
-                        pass
-                    bar.update(1)
+            self._load_aggregate_cache(self.current_variation if self.current_variation >= 0 else 0)
 
     def __refresh_cache_sourceless(self, out_variation: int):
         if not self.variations_initialized:
             self.__init_sourceless()
+        self.__reshuffle_samples(out_variation)
+        self._aggregate_cache = {}
+        if self.aggregate_names:
+            self._load_aggregate_cache(out_variation)
 
     def __refresh_cache(self, out_variation: int):
         if not self.variations_initialized:
@@ -2340,7 +2493,7 @@ class SmartDiskCache(
                         except OSError:
                             return filepath, "hash_failed"
 
-                    if self._try_dedup(filepath, file_hash, resolution, mtime):
+                    if self._try_dedup(filepath, file_hash, resolution, mtime, in_index, variations):
                         entry = self.cache_index["entries"][filepath]
                         key = self._resolution_key(resolution)
                         variant = entry.get("variants", {}).get(key)
@@ -2734,7 +2887,7 @@ class SmartDiskCache(
 
         stamped_any = False
         with tqdm(total=len(load_items), smoothing=0.1, desc="loading aggregate cache") as bar:
-            for filepath, cache_entry, variation, in_variation, in_index in load_items:
+            for filepath, cache_entry, variation, _in_variation, in_index in load_items:
                 cache_file = None
                 variant_for_stamp = None
                 if per_item_key:
@@ -2906,7 +3059,7 @@ class SmartDiskCache(
 
         group_key, in_variation, group_index, in_index = result
 
-        filepath = self._sourceless_filepaths[group_index] if self.sourceless else self._source_path_cache.get(in_index)
+        filepath = self._sourceless_filepaths[in_index] if self.sourceless else self._source_path_cache.get(in_index)
 
         if filepath is not None:
             cache_entry = self.cache_index["entries"].get(filepath)
