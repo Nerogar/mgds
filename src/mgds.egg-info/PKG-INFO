@@ -1,0 +1,26 @@
+Metadata-Version: 2.4
+Name: mgds
+Version: 0.1.dev199+g03984da2c
+Summary: Modular Pytorch DataSet implementation
+Author: Nerogar
+Project-URL: Homepage, https://github.com/Nerogar/mgds
+Project-URL: Issues, https://github.com/Nerogar/mgds/issues
+Classifier: Programming Language :: Python :: 3
+Classifier: Operating System :: OS Independent
+Classifier: License :: OSI Approved :: Apache License
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+License-File: LICENSE.txt
+Requires-Dist: xxhash
+Dynamic: license-file
+
+# MGDS
+
+MGDS is a custom dataset implementation for Pytorch that is built around the idea of a node based graph.
+
+Each node in the graph can take inputs from previous nodes, do various calculations, and return outputs to nodes further
+down the chain. This modular approach enables highly complex data processing pipelines only by plugging together
+pre-built modules.
+
+This project is currently developed for the use in [OneTrainer](https://github.com/Nerogar/OneTrainer), but it can be
+used in all kinds of different applications. 
