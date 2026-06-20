@@ -301,6 +301,13 @@ def _strip_sourceless_runtime_values(cache_root):
             json.dump(index, f, indent=2)
 
 
+def _delete_source_tree(paths: list[str]) -> None:
+    roots = {os.path.dirname(path) for path in paths}
+    for root in roots:
+        shutil.rmtree(root)
+    assert all(not os.path.exists(path) for path in paths)
+
+
 def test_sourceless_matches_sourced_pairing_and_variations_with_stale_text_entries(tmp_path):
     image_paths = [
         _write_file(tmp_path / "src" / "b_image.png", b"image b"),
@@ -373,3 +380,29 @@ def test_sourceless_preserves_row_metadata_when_text_payloads_dedup(tmp_path):
 
     sourceless_restart = _build_dataset(cache_root, sourceless=True, realistic=True)
     assert _drain_full_epoch(sourceless_restart) == expected_epoch0
+
+
+def test_sourceless_runs_when_original_source_files_are_missing(tmp_path):
+    image_paths = [
+        _write_file(tmp_path / "src" / "b_image.png", b"image b"),
+        _write_file(tmp_path / "src" / "a_image.png", b"image a"),
+    ]
+    text_paths = [
+        _write_file(tmp_path / "src" / "b_image.txt", b"text b"),
+        _write_file(tmp_path / "src" / "a_image.txt", b"text a"),
+    ]
+    cache_root = tmp_path / "cache"
+
+    sourced_builder = _build_dataset(cache_root, image_paths, text_paths, realistic=True)
+    _drain_full_epoch(sourced_builder)
+    _drain_full_epoch(sourced_builder)
+
+    sourced_restart = _build_dataset(cache_root, image_paths, text_paths, realistic=True)
+    expected_epoch0 = _drain_full_epoch(sourced_restart)
+    expected_epoch1 = _drain_full_epoch(sourced_restart)
+
+    _delete_source_tree(image_paths + text_paths)
+
+    sourceless_restart = _build_dataset(cache_root, sourceless=True, realistic=True)
+    assert _drain_full_epoch(sourceless_restart) == expected_epoch0
+    assert _drain_full_epoch(sourceless_restart) == expected_epoch1
