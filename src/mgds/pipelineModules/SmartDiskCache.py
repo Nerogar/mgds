@@ -1664,7 +1664,6 @@ class SmartDiskCache(
             return 0
 
         upgraded = 0
-        index_changed = False
         entries = self.cache_index.get("entries", {})
         for group_key, indices in self.group_indices.items():
             variations = int(self.group_variations.get(group_key, 1) or 1)
@@ -1676,23 +1675,8 @@ class SmartDiskCache(
                 if entry is None:
                     continue
                 if self._set_entry_sourceless_runtime_values(entry, variations, in_index):
-                    index_changed = True
-                for variant in (entry.get("variants") or {}).values():
-                    cache_file = variant.get("cache_file")
-                    if not cache_file:
-                        continue
-                    for v in range(variations):
-                        real_pt = self._real_pt_path(cache_file, v)
-                        if not os.path.isfile(real_pt):
-                            continue
-                        try:
-                            cached = torch.load(real_pt, weights_only=False, map_location="cpu")
-                        except Exception:
-                            continue
-                        if isinstance(cached, dict) and self._stamp_sourceless_runtime_values(cached, v, in_index):
-                            self._save_pt_atomic(cached, real_pt)
-                            upgraded += 1
-        if index_changed:
+                    upgraded += 1
+        if upgraded:
             self._save_cache_index()
         return upgraded
 

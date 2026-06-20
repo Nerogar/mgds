@@ -348,6 +348,15 @@ def _strip_sourceless_runtime_values(cache_root):
             json.dump(index, f, indent=2)
 
 
+def _strip_embedded_sourceless_runtime_values(cache_root):
+    for pt_path in cache_root.glob("*/*.pt"):
+        cached = torch.load(pt_path, weights_only=False, map_location="cpu")
+        if not isinstance(cached, dict):
+            continue
+        cached.pop("__sourceless_values", None)
+        torch.save(cached, pt_path)
+
+
 def _delete_source_tree(paths: list[str]) -> None:
     roots = {os.path.dirname(path) for path in paths}
     for root in roots:
@@ -401,6 +410,33 @@ def test_sourceless_matches_sourced_runtime_metadata_and_linked_latents(tmp_path
     sourced_restart = _build_dataset(cache_root, image_paths, text_paths, realistic=True)
     expected_epoch0 = _drain_full_epoch(sourced_restart)
     expected_epoch1 = _drain_full_epoch(sourced_restart)
+
+    sourceless_restart = _build_dataset(cache_root, sourceless=True, realistic=True)
+    assert _drain_full_epoch(sourceless_restart) == expected_epoch0
+    assert _drain_full_epoch(sourceless_restart) == expected_epoch1
+
+
+def test_sourceless_uses_index_runtime_metadata_without_pt_rewrite(tmp_path):
+    image_paths = [
+        _write_file(tmp_path / "src" / "b_image.png", b"image b"),
+        _write_file(tmp_path / "src" / "a_image.png", b"image a"),
+    ]
+    text_paths = [
+        _write_file(tmp_path / "src" / "b_image.txt", b"text b"),
+        _write_file(tmp_path / "src" / "a_image.txt", b"text a"),
+    ]
+    cache_root = tmp_path / "cache"
+
+    sourced_builder = _build_dataset(cache_root, image_paths, text_paths, realistic=True)
+    _drain_full_epoch(sourced_builder)
+    _strip_sourceless_runtime_values(cache_root)
+
+    sourced_restart = _build_dataset(cache_root, image_paths, text_paths, realistic=True)
+    expected_epoch0 = _drain_full_epoch(sourced_restart)
+    expected_epoch1 = _drain_full_epoch(sourced_restart)
+
+    _strip_embedded_sourceless_runtime_values(cache_root)
+    _delete_source_tree(image_paths + text_paths)
 
     sourceless_restart = _build_dataset(cache_root, sourceless=True, realistic=True)
     assert _drain_full_epoch(sourceless_restart) == expected_epoch0
