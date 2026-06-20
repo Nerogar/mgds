@@ -261,6 +261,53 @@ def _drain_full_epoch(ds):
     ]
 
 
+def _training_features(batch) -> torch.Tensor:
+    parts = [
+        batch["latent_image"].to(torch.float32),
+        batch["latent_mask"].to(torch.float32),
+        batch["latent_conditioning_image"].to(torch.float32),
+        batch["latent_image_rejected"].to(torch.float32),
+        batch["text_embedding"].to(torch.float32),
+        torch.tensor(batch["original_resolution"], dtype=torch.float32) / 1000.0,
+        torch.tensor(batch["crop_resolution"], dtype=torch.float32) / 1000.0,
+        torch.tensor(batch["crop_offset"], dtype=torch.float32),
+        torch.tensor([batch["concept"]["loss_weight"]], dtype=torch.float32),
+    ]
+    return torch.cat([part.flatten() for part in parts]).unsqueeze(0)
+
+
+def _new_cpu_dummy_model() -> torch.nn.Module:
+    torch.manual_seed(20240620)
+    return torch.nn.Sequential(
+        torch.nn.Linear(17, 8),
+        torch.nn.Tanh(),
+        torch.nn.Linear(8, 1),
+    )
+
+
+def _run_cpu_dummy_training(cache_root, image_paths=None, text_paths=None, *, sourceless=False):
+    model = _new_cpu_dummy_model()
+    optimizer = torch.optim.SGD(model.parameters(), lr=1.0e-4)
+    ds = _build_dataset(cache_root, image_paths, text_paths, sourceless=sourceless, realistic=True)
+    losses = []
+
+    for _ in range(2):
+        ds.start_next_epoch()
+        for batch in ds:
+            features = _training_features(batch)
+            target = features.sum(dim=1, keepdim=True) * 0.01
+            target = target + torch.tensor([[batch["concept"]["loss_weight"]]], dtype=torch.float32)
+
+            optimizer.zero_grad(set_to_none=True)
+            loss = torch.nn.functional.mse_loss(model(features), target)
+            loss.backward()
+            optimizer.step()
+            losses.append(loss.detach().clone())
+
+    final_state = {key: value.detach().clone() for key, value in model.state_dict().items()}
+    return losses, final_state
+
+
 def _add_stale_text_cache_entry(cache_root, stale_path: str):
     text_cache_dir = cache_root / "text"
     with open(text_cache_dir / "cache.json", "r", encoding="utf-8") as f:
@@ -406,3 +453,41 @@ def test_sourceless_runs_when_original_source_files_are_missing(tmp_path):
     sourceless_restart = _build_dataset(cache_root, sourceless=True, realistic=True)
     assert _drain_full_epoch(sourceless_restart) == expected_epoch0
     assert _drain_full_epoch(sourceless_restart) == expected_epoch1
+
+
+def test_sourceless_cpu_dummy_training_matches_sourced_training(tmp_path):
+    image_paths = [
+        _write_file(tmp_path / "src" / "b_image.png", b"image b"),
+        _write_file(tmp_path / "src" / "a_image.png", b"image a"),
+    ]
+    text_paths = [
+        _write_file(tmp_path / "src" / "b_image.txt", b"text b"),
+        _write_file(tmp_path / "src" / "a_image.txt", b"text a"),
+    ]
+    cache_root = tmp_path / "cache"
+
+    cache_builder = _build_dataset(cache_root, image_paths, text_paths, realistic=True)
+    _drain_full_epoch(cache_builder)
+    _drain_full_epoch(cache_builder)
+
+    sourced_losses, sourced_state = _run_cpu_dummy_training(
+        cache_root,
+        image_paths,
+        text_paths,
+        sourceless=False,
+    )
+
+    _delete_source_tree(image_paths + text_paths)
+
+    sourceless_losses, sourceless_state = _run_cpu_dummy_training(
+        cache_root,
+        sourceless=True,
+    )
+
+    assert len(sourceless_losses) == len(sourced_losses)
+    for sourceless_loss, sourced_loss in zip(sourceless_losses, sourced_losses, strict=True):
+        torch.testing.assert_close(sourceless_loss, sourced_loss, rtol=0.0, atol=0.0)
+
+    assert sourceless_state.keys() == sourced_state.keys()
+    for key in sourced_state:
+        torch.testing.assert_close(sourceless_state[key], sourced_state[key], rtol=0.0, atol=0.0)
