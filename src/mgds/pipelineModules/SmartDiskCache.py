@@ -1582,10 +1582,11 @@ class SmartDiskCache(
         if isinstance(concept, dict):
             values["concept"] = copy.deepcopy(concept)
 
-        for name in ("prompt", "prompt_1", "prompt_2"):
-            value = self._safe_previous_item(in_variation, name, in_index)
-            if value is not None:
-                values[name] = copy.deepcopy(value)
+        if self.source_path_in_name == "sample_prompt_path":
+            for name in ("prompt", "prompt_1", "prompt_2"):
+                value = self._safe_previous_item(in_variation, name, in_index)
+                if value is not None:
+                    values[name] = copy.deepcopy(value)
 
         return values
 

@@ -226,6 +226,39 @@ class TestCacheValidation:
         tensors = _make_tensors(n, seed=77)
         return paths, tensors
 
+    def test_image_cache_runtime_metadata_does_not_resolve_prompts(self):
+        """Image cache sourceless metadata only needs concept values."""
+        cache = SmartDiskCache.__new__(SmartDiskCache)
+        cache.source_path_in_name = "image_path"
+
+        def previous_item(_variation, name, _index):
+            if name == "concept":
+                return {"name": "concept-a"}
+            raise AssertionError(f"unexpected upstream lookup: {name}")
+
+        cache._safe_previous_item = previous_item
+
+        assert cache._sourceless_runtime_values(0, 0) == {"concept": {"name": "concept-a"}}
+
+    def test_text_cache_runtime_metadata_resolves_prompts(self):
+        """Text cache sourceless metadata carries prompt values for parity."""
+        cache = SmartDiskCache.__new__(SmartDiskCache)
+        cache.source_path_in_name = "sample_prompt_path"
+
+        values = {
+            "concept": {"name": "concept-a"},
+            "prompt": "caption-a",
+            "prompt_1": "caption-b",
+            "prompt_2": None,
+        }
+        cache._safe_previous_item = lambda _variation, name, _index: values.get(name)
+
+        assert cache._sourceless_runtime_values(0, 0) == {
+            "concept": {"name": "concept-a"},
+            "prompt": "caption-a",
+            "prompt_1": "caption-b",
+        }
+
     def test_cache_refresh_reports_phase_status(self, tmp_path, capsys):
         """Long cache startup work should announce phases before progress bars."""
         paths, tensors = self._setup_files(tmp_path, n=2)
