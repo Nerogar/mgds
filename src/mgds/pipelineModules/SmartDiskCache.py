@@ -1610,6 +1610,27 @@ class SmartDiskCache(
             entry.pop("sourceless_runtime_values", None)
         return previous_values != repr(entry.get("sourceless_runtime_values"))
 
+    def _set_entry_sourceless_metadata(self, entry: dict, variations: int, in_index: int) -> bool:
+        if not self.source_path_in_name:
+            return False
+
+        previous_values = repr(entry.get("sourceless"))
+        entry["sourceless"] = self._sourceless_metadata(in_index, variations)
+        return previous_values != repr(entry.get("sourceless"))
+
+    def _sourceless_index_metadata_ready(self, index_to_filepath: dict[int, str]) -> bool:
+        if not self.source_path_in_name:
+            return True
+
+        entries = self.cache_index.get("entries", {})
+        for filepath in set(index_to_filepath.values()):
+            entry = entries.get(filepath)
+            if entry is None:
+                continue
+            if not entry.get("sourceless") or not entry.get("sourceless_runtime_values"):
+                return False
+        return True
+
     def _stamp_sourceless_runtime_values(self, cache_data: dict, in_variation: int, in_index: int) -> bool:
         if not self.source_path_in_name:
             return False
@@ -1675,6 +1696,8 @@ class SmartDiskCache(
                 entry = entries.get(filepath)
                 if entry is None:
                     continue
+                if self._set_entry_sourceless_metadata(entry, variations, in_index):
+                    upgraded += 1
                 if self._set_entry_sourceless_runtime_values(entry, variations, in_index):
                     upgraded += 1
         if upgraded:
@@ -2259,10 +2282,11 @@ class SmartDiskCache(
 
         skip_validation = self.trust_cache or os.environ.get("OT_SKIP_CACHE_VALIDATION") == "1"
         if not skip_validation:
-            self._status("checking sourceless runtime metadata")
-            upgraded = self._upgrade_sourceless_runtime_values(index_to_filepath)
-            if upgraded:
-                self._status(f"upgraded sourceless runtime metadata for {upgraded} entries")
+            if not self._sourceless_index_metadata_ready(index_to_filepath):
+                self._status("updating sourceless cache index metadata")
+                upgraded = self._upgrade_sourceless_runtime_values(index_to_filepath)
+                if upgraded:
+                    self._status(f"updated sourceless cache index metadata for {upgraded} fields")
 
         # --- Session skip path ---
         # If every required filepath was already validated earlier in this

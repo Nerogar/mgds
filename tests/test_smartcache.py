@@ -259,6 +259,53 @@ class TestCacheValidation:
             "prompt_1": "caption-b",
         }
 
+    def test_sourceless_index_metadata_ready_requires_current_entries_only(self):
+        cache = SmartDiskCache.__new__(SmartDiskCache)
+        cache.source_path_in_name = "image_path"
+        cache.cache_index = {
+            "entries": {
+                "active.png": {
+                    "sourceless": {"source_index": 0},
+                    "sourceless_runtime_values": {"0": {"concept": {"name": "active"}}},
+                },
+                "stale.png": {},
+            }
+        }
+
+        assert cache._sourceless_index_metadata_ready({0: "active.png", 1: "missing.png"})
+        assert not cache._sourceless_index_metadata_ready({0: "active.png", 1: "stale.png"})
+
+    def test_sourceless_index_upgrade_stamps_metadata_without_pt_rewrite(self, tmp_path):
+        cache = SmartDiskCache.__new__(SmartDiskCache)
+        cache.source_path_in_name = "image_path"
+        cache.cache_index = {"entries": {"active.png": {}}}
+        cache.group_indices = {"group": [0]}
+        cache.group_variations = {"group": 1}
+        cache._save_cache_index = lambda: None
+        cache._safe_previous_item = lambda _variation, name, _index: {
+            "concept": {"name": "concept-a"},
+            "image_path": "active.png",
+            "sample_prompt_path": "active.txt",
+            "concept.path": "dataset",
+            "concept.seed": 123,
+            "concept.include_subdirectories": True,
+            "concept.image": {},
+            "concept.balancing": 1.0,
+            "concept.balancing_strategy": "REPEATS",
+            "concept.enabled": True,
+        }.get(name)
+        cache.variations_group_in_names = ["concept.path", "concept.seed"]
+        cache.balancing_in_name = "concept.balancing"
+        cache.balancing_strategy_in_name = "concept.balancing_strategy"
+        cache.group_enabled_in_name = "concept.enabled"
+
+        changed = cache._upgrade_sourceless_runtime_values({0: "active.png"})
+
+        entry = cache.cache_index["entries"]["active.png"]
+        assert changed == 2
+        assert entry["sourceless"]["linked_paths"]["sample_prompt_path"] == "active.txt"
+        assert entry["sourceless_runtime_values"]["0"]["concept"]["name"] == "concept-a"
+
     def test_cache_refresh_reports_phase_status(self, tmp_path, capsys):
         """Long cache startup work should announce phases before progress bars."""
         paths, tensors = self._setup_files(tmp_path, n=2)
