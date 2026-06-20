@@ -330,16 +330,48 @@ class SmartDiskCache(
     def _is_sourceless_anchor_cache(self) -> bool:
         return self.source_path_in_name == "image_path" or "image_path" in self.aggregate_names
 
-    def _init_sourceless_groups_from_entries(self, filepaths: list[str]) -> None:
+    def _entry_sourceless_row_records(self, filepath: str, entry: dict) -> list[dict]:
+        records = []
+        rows = entry.get("sourceless_rows") or {}
+        if isinstance(rows, dict):
+            for row_key, row in rows.items():
+                if not isinstance(row, dict):
+                    continue
+                metadata = row.get("metadata") or {}
+                if not isinstance(metadata, dict):
+                    metadata = {}
+                source_index = metadata.get("source_index")
+                if source_index is None:
+                    try:
+                        source_index = int(row_key)
+                    except (TypeError, ValueError):
+                        source_index = 1 << 60
+                records.append({
+                    "filepath": filepath,
+                    "source_index": int(source_index),
+                    "metadata": metadata,
+                })
+
+        if records:
+            return records
+
+        metadata = entry.get("sourceless") or {}
+        source_index = metadata.get("source_index", 1 << 60) if isinstance(metadata, dict) else 1 << 60
+        return [{
+            "filepath": filepath,
+            "source_index": int(source_index),
+            "metadata": metadata if isinstance(metadata, dict) else {},
+        }]
+
+    def _init_sourceless_groups_from_records(self, records: list[dict]) -> None:
         group_variations = {}
         group_indices = {}
         group_balancing = {}
         group_balancing_strategy = {}
         has_metadata = False
 
-        for in_index, filepath in enumerate(filepaths):
-            entry = self.cache_index["entries"][filepath]
-            meta = entry.get("sourceless") or {}
+        for in_index, record in enumerate(records):
+            meta = record.get("metadata") or {}
             if meta:
                 has_metadata = True
 
@@ -351,7 +383,11 @@ class SmartDiskCache(
             if group_values is None:
                 group_values = [""]
             group_key = self.__string_key(group_values)
-            variations = int(meta.get("variations") or self._entry_variation_count(entry) or 1)
+            variations = int(
+                meta.get("variations")
+                or self._entry_variation_count(self.cache_index["entries"][record["filepath"]])
+                or 1
+            )
             balancing = meta.get("balancing")
             if balancing is None:
                 balancing = 1.0
@@ -363,8 +399,11 @@ class SmartDiskCache(
             group_balancing_strategy.setdefault(group_key, balancing_strategy)
 
         if not has_metadata:
-            n = len(filepaths)
-            variations = max((self._entry_variation_count(self.cache_index["entries"][fp]) for fp in filepaths), default=1)
+            n = len(records)
+            variations = max(
+                (self._entry_variation_count(self.cache_index["entries"][record["filepath"]]) for record in records),
+                default=1,
+            )
             self.group_variations = {"": variations}
             self.group_indices = {"": list(range(n))}
             self.group_full_indices = {"": list(range(n))}
@@ -1545,15 +1584,22 @@ class SmartDiskCache(
                         "sidecar_hashes": sidecar_hashes,
                         "sourceless": self._sourceless_metadata(in_index, variations),
                     }
+                    row = target_entry.setdefault("sourceless_rows", {}).setdefault(str(in_index), {})
+                    row["metadata"] = target_entry["sourceless"]
                     if runtime_values_by_variation:
                         target_entry["sourceless_runtime_values"] = runtime_values_by_variation
+                        row["runtime_values"] = runtime_values_by_variation
                     self.cache_index["entries"][filepath] = target_entry
                 else:
                     target_entry["sourceless"] = self._sourceless_metadata(in_index, variations)
+                    row = target_entry.setdefault("sourceless_rows", {}).setdefault(str(in_index), {})
+                    row["metadata"] = target_entry["sourceless"]
                     if runtime_values_by_variation:
                         target_entry["sourceless_runtime_values"] = runtime_values_by_variation
+                        row["runtime_values"] = runtime_values_by_variation
                     else:
                         target_entry.pop("sourceless_runtime_values", None)
+                        row.pop("runtime_values", None)
                 dedup_variant = {
                     "cache_file": cache_file,
                     "schema_keys": variant.get("schema_keys"),
@@ -1603,33 +1649,70 @@ class SmartDiskCache(
             return False
 
         previous_values = repr(entry.get("sourceless_runtime_values"))
+        previous_row = repr((entry.get("sourceless_rows") or {}).get(str(in_index)))
         values_by_variation = self._sourceless_runtime_values_by_variation(variations, in_index)
         if values_by_variation:
             entry["sourceless_runtime_values"] = values_by_variation
         else:
             entry.pop("sourceless_runtime_values", None)
-        return previous_values != repr(entry.get("sourceless_runtime_values"))
+        row = entry.setdefault("sourceless_rows", {}).setdefault(str(in_index), {})
+        if values_by_variation:
+            row["runtime_values"] = values_by_variation
+        else:
+            row.pop("runtime_values", None)
+        return (
+            previous_values != repr(entry.get("sourceless_runtime_values"))
+            or previous_row != repr((entry.get("sourceless_rows") or {}).get(str(in_index)))
+        )
 
     def _set_entry_sourceless_metadata(self, entry: dict, variations: int, in_index: int) -> bool:
         if not self.source_path_in_name:
             return False
 
         previous_values = repr(entry.get("sourceless"))
-        entry["sourceless"] = self._sourceless_metadata(in_index, variations)
-        return previous_values != repr(entry.get("sourceless"))
+        previous_row = repr((entry.get("sourceless_rows") or {}).get(str(in_index)))
+        metadata = self._sourceless_metadata(in_index, variations)
+        entry["sourceless"] = metadata
+        row = entry.setdefault("sourceless_rows", {}).setdefault(str(in_index), {})
+        row["metadata"] = metadata
+        return (
+            previous_values != repr(entry.get("sourceless"))
+            or previous_row != repr((entry.get("sourceless_rows") or {}).get(str(in_index)))
+        )
 
     def _sourceless_index_metadata_ready(self, index_to_filepath: dict[int, str]) -> bool:
         if not self.source_path_in_name:
             return True
 
         entries = self.cache_index.get("entries", {})
-        for filepath in set(index_to_filepath.values()):
+        for in_index, filepath in index_to_filepath.items():
             entry = entries.get(filepath)
             if entry is None:
+                continue
+            row = (entry.get("sourceless_rows") or {}).get(str(in_index))
+            if row is not None:
+                if not row.get("metadata") or not row.get("runtime_values"):
+                    return False
                 continue
             if not entry.get("sourceless") or not entry.get("sourceless_runtime_values"):
                 return False
         return True
+
+    def _sourceless_runtime_values_for_row(self, entry: dict, in_index: int, variation: int, cached: dict) -> dict | None:
+        source_indices = getattr(self, "_sourceless_source_indices", None)
+        source_index = source_indices[in_index] if source_indices and in_index < len(source_indices) else in_index
+        row = (entry.get("sourceless_rows") or {}).get(str(source_index))
+        if isinstance(row, dict):
+            runtime_values = (row.get("runtime_values") or {}).get(str(variation))
+            if isinstance(runtime_values, dict):
+                return runtime_values
+
+        runtime_values = (entry.get("sourceless_runtime_values") or {}).get(str(variation))
+        if isinstance(runtime_values, dict):
+            return runtime_values
+
+        runtime_values = cached.get("__sourceless_values")
+        return runtime_values if isinstance(runtime_values, dict) else None
 
     def _stamp_sourceless_runtime_values(self, cache_data: dict, in_variation: int, in_index: int) -> bool:
         if not self.source_path_in_name:
@@ -1843,8 +1926,11 @@ class SmartDiskCache(
                 if original_resolution is not None:
                     entry["original_resolution"] = original_resolution
                 entry["sourceless"] = self._sourceless_metadata(in_index, variations)
+                row = entry.setdefault("sourceless_rows", {}).setdefault(str(in_index), {})
+                row["metadata"] = entry["sourceless"]
                 if runtime_values_by_variation:
                     entry["sourceless_runtime_values"] = runtime_values_by_variation
+                    row["runtime_values"] = runtime_values_by_variation
                 self.cache_index["entries"][filepath] = entry
             else:
                 # Refresh metadata; the source content may have changed and
@@ -1858,10 +1944,14 @@ class SmartDiskCache(
                 if original_resolution is not None:
                     entry["original_resolution"] = original_resolution
                 entry["sourceless"] = self._sourceless_metadata(in_index, variations)
+                row = entry.setdefault("sourceless_rows", {}).setdefault(str(in_index), {})
+                row["metadata"] = entry["sourceless"]
                 if runtime_values_by_variation:
                     entry["sourceless_runtime_values"] = runtime_values_by_variation
+                    row["runtime_values"] = runtime_values_by_variation
                 else:
                     entry.pop("sourceless_runtime_values", None)
+                    row.pop("runtime_values", None)
                 if "variants" not in entry:
                     entry["variants"] = {}
             variant_record = {
@@ -2112,16 +2202,19 @@ class SmartDiskCache(
         entries = self.cache_index["entries"]
 
         if self._is_sourceless_anchor_cache() or "anchor_paths" not in state:
-            has_source_indices = any((entry.get("sourceless") or {}).get("source_index") is not None for entry in entries.values())
+            records = []
+            for filepath, entry in entries.items():
+                records.extend(self._entry_sourceless_row_records(filepath, entry))
+            has_source_indices = any(record.get("source_index") != 1 << 60 for record in records)
             if has_source_indices:
-                self._sourceless_filepaths = sorted(
-                    entries.keys(),
-                    key=lambda path: ((entries[path].get("sourceless") or {}).get("source_index", 1 << 60), path),
-                )
+                records = sorted(records, key=lambda record: (record.get("source_index", 1 << 60), record["filepath"]))
             else:
-                self._sourceless_filepaths = sorted(entries.keys())
-            self._init_sourceless_groups_from_entries(self._sourceless_filepaths)
+                records = sorted(records, key=lambda record: record["filepath"])
+            self._sourceless_filepaths = [record["filepath"] for record in records]
+            self._sourceless_source_indices = [record.get("source_index", index) for index, record in enumerate(records)]
+            self._init_sourceless_groups_from_records(records)
             state["anchor_paths"] = list(self._sourceless_filepaths)
+            state["anchor_source_indices"] = list(self._sourceless_source_indices)
             state["anchor_entries"] = {path: entries[path] for path in self._sourceless_filepaths}
             state["group_variations"] = dict(self.group_variations)
             state["group_indices"] = {k: list(v) for k, v in self.group_indices.items()}
@@ -2131,11 +2224,13 @@ class SmartDiskCache(
             state["group_balancing"] = dict(self.group_balancing)
         else:
             anchor_paths = state["anchor_paths"]
+            anchor_source_indices = state.get("anchor_source_indices") or list(range(len(anchor_paths)))
             anchor_entries = state.get("anchor_entries", {})
             self._sourceless_filepaths = [
                 self._sourceless_counterpart_path(anchor_path, anchor_entries.get(anchor_path))
                 for anchor_path in anchor_paths
             ]
+            self._sourceless_source_indices = list(anchor_source_indices)
             missing = [path for path in self._sourceless_filepaths if path not in entries]
             if missing:
                 raise RuntimeError(
@@ -2764,6 +2859,9 @@ class SmartDiskCache(
                             ab._target_override = prev_override
 
         if not skip_validation:
+            metadata_upgraded = self._upgrade_sourceless_runtime_values(index_to_filepath)
+            if metadata_upgraded:
+                self._status(f"updated sourceless cache index metadata for {metadata_upgraded} fields")
             self.cache_index["last_validated"] = time.time()
             # Per-watched-file fingerprint: ignored if any parent dir is
             # unreachable (returns None); a missing fingerprint just means the
@@ -3376,9 +3474,7 @@ class SmartDiskCache(
                             else:
                                 item[name] = sval
                 if self.sourceless:
-                    runtime_values = (cache_entry.get("sourceless_runtime_values") or {}).get(str(variation))
-                    if not isinstance(runtime_values, dict):
-                        runtime_values = cached.get("__sourceless_values")
+                    runtime_values = self._sourceless_runtime_values_for_row(cache_entry, in_index, variation, cached)
                     if isinstance(runtime_values, dict):
                         for name, value in runtime_values.items():
                             item.setdefault(name, value)

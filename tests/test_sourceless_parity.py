@@ -344,6 +344,7 @@ def _strip_sourceless_runtime_values(cache_root):
             index = json.load(f)
         for entry in index.get("entries", {}).values():
             entry.pop("sourceless_runtime_values", None)
+            entry.pop("sourceless_rows", None)
         with open(cache_index_path, "w", encoding="utf-8") as f:
             json.dump(index, f, indent=2)
 
@@ -362,6 +363,23 @@ def _delete_source_tree(paths: list[str]) -> None:
     for root in roots:
         shutil.rmtree(root)
     assert all(not os.path.exists(path) for path in paths)
+
+
+def _concept_names(rows):
+    names = []
+
+    def visit(value):
+        if isinstance(value, dict) and "name" in value:
+            names.append(value["name"])
+        elif isinstance(value, tuple) and len(value) == 2 and value[0] == "name":
+            names.append(value[1])
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                visit(item)
+
+    for row in rows:
+        visit(row)
+    return names
 
 
 def test_sourceless_matches_sourced_pairing_and_variations_with_stale_text_entries(tmp_path):
@@ -436,6 +454,29 @@ def test_sourceless_uses_index_runtime_metadata_without_pt_rewrite(tmp_path):
     expected_epoch1 = _drain_full_epoch(sourced_restart)
 
     _strip_embedded_sourceless_runtime_values(cache_root)
+    _delete_source_tree(image_paths + text_paths)
+
+    sourceless_restart = _build_dataset(cache_root, sourceless=True, realistic=True)
+    assert _drain_full_epoch(sourceless_restart) == expected_epoch0
+    assert _drain_full_epoch(sourceless_restart) == expected_epoch1
+
+
+def test_sourceless_preserves_duplicate_source_rows(tmp_path):
+    image_path = _write_file(tmp_path / "src" / "duplicate.png", b"same image")
+    text_path = _write_file(tmp_path / "src" / "duplicate.txt", b"same text")
+    image_paths = [image_path, image_path]
+    text_paths = [text_path, text_path]
+    cache_root = tmp_path / "cache"
+
+    sourced_builder = _build_dataset(cache_root, image_paths, text_paths, realistic=True)
+    _drain_full_epoch(sourced_builder)
+
+    sourced_restart = _build_dataset(cache_root, image_paths, text_paths, realistic=True)
+    expected_epoch0 = _drain_full_epoch(sourced_restart)
+    expected_epoch1 = _drain_full_epoch(sourced_restart)
+
+    assert _concept_names(expected_epoch0) == ["concept-0", "concept-1"]
+
     _delete_source_tree(image_paths + text_paths)
 
     sourceless_restart = _build_dataset(cache_root, sourceless=True, realistic=True)
