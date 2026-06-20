@@ -226,6 +226,32 @@ class TestCacheValidation:
         tensors = _make_tensors(n, seed=77)
         return paths, tensors
 
+    def test_cache_refresh_reports_phase_status(self, tmp_path, capsys):
+        """Long cache startup work should announce phases before progress bars."""
+        paths, tensors = self._setup_files(tmp_path, n=2)
+
+        ds, _, _ = _build_smart_pipeline(
+            tmp_path,
+            concepts=[{"name": "A", "path": "dummy"}],
+            dummy_data={
+                "latent": tensors,
+                "image_path": paths,
+            },
+            dummy_length=len(paths),
+            split_names=["latent"],
+            aggregate_names=[],
+            modeltype="testmodel",
+            source_path_in_name="image_path",
+        )
+
+        _drain(ds)
+        out = capsys.readouterr().out
+
+        assert "SmartDiskCache[cache]: initializing cache groups" in out
+        assert "SmartDiskCache[cache]: resolving source paths for cache validation" in out
+        assert "SmartDiskCache[cache]: scanning existing cache tensors" in out
+        assert "SmartDiskCache[cache]: validating cache entries" in out
+
     def test_unchanged_file(self, tmp_path):
         """When mtime has not changed, cache is accepted without rehash."""
         paths, tensors = self._setup_files(tmp_path, n=2)

@@ -259,6 +259,13 @@ class SmartDiskCache(
     def _normpath(path: Any) -> str:
         return os.path.normpath(str(path))
 
+    def _status_label(self) -> str:
+        name = os.path.basename(os.path.normpath(self.cache_dir))
+        return name or self.cache_dir
+
+    def _status(self, message: str) -> None:
+        print(f"SmartDiskCache[{self._status_label()}]: {message}", flush=True)
+
     def _safe_previous_item(self, variation: int, name: str | None, index: int) -> Any:
         if not name:
             return None
@@ -2153,14 +2160,22 @@ class SmartDiskCache(
 
     def __refresh_cache_sourceless(self, out_variation: int):
         if not self.variations_initialized:
+            self._status(f"loading sourceless cache index from {self.cache_dir}")
             self.__init_sourceless()
+            self._status(
+                f"sourceless cache ready "
+                f"({len(self.cache_index.get('entries', {}))} indexed entries, "
+                f"{sum(self.group_output_samples.values())} output samples)"
+            )
         self.__reshuffle_samples(out_variation)
         self._aggregate_cache = {}
         if self.aggregate_names:
+            self._status(f"preloading aggregate values for epoch {out_variation}")
             self._load_aggregate_cache(out_variation)
 
     def __refresh_cache(self, out_variation: int):
         if not self.variations_initialized:
+            self._status("initializing cache groups")
             self.__init_variations()
         self.__reshuffle_samples(out_variation)
 
@@ -2169,6 +2184,7 @@ class SmartDiskCache(
         # This process is otherwise the only writer, so re-parsing a
         # potentially huge cache.json on every epoch start was pure waste.
         if self.cache_index is None or self._cache_index_is_stale():
+            self._status(f"loading cache index from {self.cache_dir}")
             self.cache_index = self._load_cache_index()
             self._index_disk_stat = self._snapshot_index_stat()
         os.makedirs(self.cache_dir, exist_ok=True)
@@ -2180,6 +2196,12 @@ class SmartDiskCache(
         self._content_reuse_memo = {}
         self._blank_sentinel_memo = None
         self._before_cache_called = False
+        indexed_entries = len(self.cache_index.get("entries", {}))
+        sample_rows = sum(len(indices) for indices in self.group_indices.values())
+        self._status(
+            f"preparing epoch {out_variation} "
+            f"({sample_rows} rows, {len(self.group_indices)} groups, {indexed_entries} indexed entries)"
+        )
 
         # Bucket-method drift: the AspectBucketing config may have changed
         # since the cache was last validated (e.g. user edited
@@ -2208,6 +2230,7 @@ class SmartDiskCache(
         stored_schema = self.cache_index.get("schema")
         stored_method = self.cache_index.get("schema_method")
         if self.cache_index.get("entries") and (stored_schema != required_schema or stored_method != SCHEMA_METHOD):
+            self._status("checking cache schema drift")
             targets: set[str] = set()
             if stored_schema is not None and stored_method != SCHEMA_METHOD:
                 # Cache was stamped by an older augment that may have written
@@ -2227,6 +2250,7 @@ class SmartDiskCache(
             self._save_cache_index()
 
         # Resolve the source filepaths this call will deliver.
+        self._status("resolving source paths for cache validation")
         required_filepaths: set[str] = set()
         index_to_filepath: dict[int, str] = {}
         required_sidecar_paths: set[str] = set()
@@ -2243,10 +2267,17 @@ class SmartDiskCache(
                     if extras:
                         self._extra_paths_by_filepath[filepath] = extras
                         required_sidecar_paths.update(extras.values())
+        self._status(
+            f"resolved {len(required_filepaths)} unique source paths "
+            f"({len(required_sidecar_paths)} sidecars)"
+        )
 
         skip_validation = self.trust_cache or os.environ.get("OT_SKIP_CACHE_VALIDATION") == "1"
         if not skip_validation:
-            self._upgrade_sourceless_runtime_values(index_to_filepath)
+            self._status("checking sourceless runtime metadata")
+            upgraded = self._upgrade_sourceless_runtime_values(index_to_filepath)
+            if upgraded:
+                self._status(f"upgraded sourceless runtime metadata for {upgraded} entries")
 
         # --- Session skip path ---
         # If every required filepath was already validated earlier in this
@@ -2329,6 +2360,7 @@ class SmartDiskCache(
                 return
 
         # Single os.scandir of the cache dir — used by fast and full paths.
+        self._status("scanning existing cache tensors")
         self._existing_pt_files = self._scan_existing_pt_files()
 
         # Bucket-method drift recovery: aspect-math derives new variant keys
@@ -2336,6 +2368,7 @@ class SmartDiskCache(
         # arithmetic, no image decode. Runs before validation so the per-index
         # loop sees the new variants registered.
         if bucket_drift:
+            self._status("cache bucket method changed; recovering variant links")
             self._drift_recovery_pass()
 
         # --- Fast validation path ---
@@ -2371,6 +2404,10 @@ class SmartDiskCache(
         # firing one os.path.getmtime syscall per file. Skipped under trust mode
         # since we won't be calling _validate_entry at all.
         if not skip_validation:
+            self._status(
+                f"statting {len(required_filepaths)} source files "
+                f"and {len(required_sidecar_paths)} sidecars"
+            )
             self._source_mtimes = self._bulk_stat_source_files(required_filepaths | required_sidecar_paths)
         else:
             self._source_mtimes = {}
@@ -2386,6 +2423,7 @@ class SmartDiskCache(
         files_built = 0
         files_skipped = 0
         files_failed = []
+        self._status("validating cache entries")
 
         for group_key in self.group_variations:
             variations = self.group_variations[group_key]
@@ -2982,6 +3020,7 @@ class SmartDiskCache(
                         continue
                     variation = in_variation % variations
                     load_items.append((filepath, cache_entry, variation, in_variation, in_index))
+        self._status(f"loading aggregate cache for {len(load_items)} rows")
 
         if fast_path:
             slow_items = []
@@ -3005,8 +3044,10 @@ class SmartDiskCache(
                     self._aggregate_cache[(filepath, variation, in_index)] = agg_data
                     bar.update(1)
             if not slow_items:
+                self._status("aggregate cache ready")
                 return
             load_items = slow_items
+            self._status(f"{len(load_items)} aggregate rows need tensor reads")
 
         stamped_any = False
         with tqdm(total=len(load_items), smoothing=0.1, desc="loading aggregate cache") as bar:
@@ -3082,6 +3123,7 @@ class SmartDiskCache(
             # process / next epoch hits the fast path without re-running
             # torch.load on every entry.
             self._save_cache_index()
+        self._status("aggregate cache ready")
 
     def start(self, out_variation: int):
         if self.sourceless:
