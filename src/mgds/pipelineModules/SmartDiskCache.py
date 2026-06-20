@@ -3449,6 +3449,23 @@ class SmartDiskCache(
                         # update would mutate our entry in _aggregate_cache.
                         return dict(agg_data)
 
+                # Runtime-value-only request (concept / prompt, e.g. from
+                # VariationSorting's grouping pass at epoch start). These live in
+                # the index runtime_values, so serve them WITHOUT torch.load —
+                # the sourced pipeline resolves concept/prompt from a lightweight
+                # upstream module too, never from the cached .pt. Loading the
+                # whole tensor .pt here just to return a concept dict meant
+                # reading the entire cache off disk to group samples.
+                if (
+                    self.sourceless
+                    and requested_name is not None
+                    and requested_name not in self.split_names
+                    and requested_name not in self.aggregate_names
+                ):
+                    runtime_values = self._sourceless_runtime_values_for_row(cache_entry, in_index, variation, {})
+                    if isinstance(runtime_values, dict) and requested_name in runtime_values:
+                        return {requested_name: runtime_values[requested_name]}
+
                 # Per-epoch variant resolve: ask upstream what bucket this
                 # (variation, index) wants right now. AspectBucketing's
                 # rand.choice is seeded on (variation, index), so each epoch

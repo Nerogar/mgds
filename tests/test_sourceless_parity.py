@@ -600,6 +600,50 @@ def test_sourceless_rotates_resolution_buckets_across_epochs(tmp_path):
     assert any(len(resolutions) > 1 for resolutions in res_by_image.values()), res_by_image
 
 
+def test_sourceless_concept_request_avoids_tensor_load(tmp_path, monkeypatch):
+    image_paths = [
+        _write_file(tmp_path / "src" / "a_image.png", b"image a"),
+        _write_file(tmp_path / "src" / "b_image.png", b"image b"),
+    ]
+    text_paths = [
+        _write_file(tmp_path / "src" / "a_image.txt", b"text a"),
+        _write_file(tmp_path / "src" / "b_image.txt", b"text b"),
+    ]
+    cache_root = tmp_path / "cache"
+    builder = _build_dataset(cache_root, image_paths, text_paths, realistic=True)
+    _drain_full_epoch(builder)
+    _delete_source_tree(image_paths + text_paths)
+
+    image_cache, _text_cache, _variation_sorting = _realistic_cache_modules(cache_root, sourceless=True)
+    dataset = MGDS(
+        device=torch.device("cpu"),
+        concepts=[{"name": "concept-a", "path": "concept-a"}],
+        settings={},
+        definition=[[PlaceholderModule(), image_cache], OutputPipelineModule(names=["image_path", "latent_image"])],
+        batch_size=1,
+        state=PipelineState(),
+        seed=42,
+    )
+    dataset.start_next_epoch()
+
+    # Requesting concept (what VariationSorting does for every row at epoch
+    # start) must be served from the index — never a tensor .pt read. Loading
+    # the whole .pt just to return a concept dict is what made sourceless epoch
+    # start read the entire cache off disk.
+    monkeypatch.setattr(torch, "load", lambda *a, **k: pytest_fail_on_load())
+
+    served = 0
+    for in_index in range(len(image_cache._sourceless_filepaths)):
+        item = image_cache.get_item(in_index, "concept")
+        assert isinstance(item.get("concept"), dict)
+        served += 1
+    assert served > 0
+
+
+def pytest_fail_on_load():
+    raise AssertionError("concept request triggered a tensor .pt torch.load (should be served from the index)")
+
+
 def test_sourceless_raises_when_entry_metadata_missing(tmp_path):
     import json
 
