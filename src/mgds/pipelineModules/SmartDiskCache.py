@@ -1256,6 +1256,29 @@ class SmartDiskCache(
                 return variant
         return None
 
+    def _sourceless_variant(self, entry: dict, in_index: int) -> dict | None:
+        """Pick the resolution-bucket variant for a sourceless row.
+
+        AspectBucketing is placeholdered out of the sourceless pipeline (its
+        variant_key_from_aspect can't walk upstream), so instead of freezing
+        every image to one bucket we rotate deterministically among the entry's
+        CACHED variants by (epoch, in_index): each epoch serves a different
+        cached resolution, giving mixed-resolution training. Crucially both
+        _try_synthesize_aggregate and get_item call this with the same
+        current_variation + in_index, so the crop_resolution stamped into the
+        aggregate cache always matches the variant whose latent get_item loads
+        — AspectBatchSorting and collate stay shape-consistent.
+        """
+        variants = entry.get("variants") or {}
+        usable = sorted((k, v) for k, v in variants.items() if v.get("cache_file"))
+        if not usable:
+            return None
+        if len(usable) == 1:
+            return usable[0][1]
+        epoch = self.current_variation if self.current_variation >= 0 else 0
+        pick = (epoch * 0x9E3779B1 + in_index * 0x85EBCA77) % len(usable)
+        return usable[pick][1]
+
     @staticmethod
     def _resize_to_ref_shape(value, ref_shape):
         """Force ``value``'s spatial dims to match ``ref_shape`` via interpolation.
@@ -3064,14 +3087,17 @@ class SmartDiskCache(
         ``_DERIVABLE_AGGREGATES`` and ``frame_dim_enabled`` must be
         False (else the 2D ``HxW`` key can't represent the cached value).
         """
-        if self.aspect_bucketing is None and not self.resolution_from_upstream:
-            # Sourceless / no-aspect-bucketing: there is no per-epoch bucket
-            # key to resolve a variant by, and get_item serves the active
-            # (any-)variant (see the get_item `else` branch). Synthesize from
-            # that SAME variant's stamped crop_resolution — this is what makes
-            # the sourceless aggregate load as fast as the sourced one, instead
-            # of a torch.load per row. Consistency holds because split-fetch
-            # picks the identical variant via the same _active_cache_file.
+        if self.sourceless:
+            # Rotate among cached buckets (see _sourceless_variant). get_item
+            # picks the identical variant, so the synthesized crop_resolution
+            # matches the latent it loads — and we skip the torch.load per row
+            # that made the sourceless aggregate load ~2000x slower than sourced.
+            variant = self._sourceless_variant(entry, in_index)
+            if variant is None:
+                return None
+        elif self.aspect_bucketing is None and not self.resolution_from_upstream:
+            # Non-sourceless caches with no bucketing: get_item serves the
+            # active (any-)variant; synthesize from that same variant.
             variant = self._variant_for_cache_file(entry, self._active_cache_file(filepath, entry))
             if variant is None:
                 return None
@@ -3443,7 +3469,14 @@ class SmartDiskCache(
                 # by aggregate's crop_resolution; collate gets split-fetch's
                 # different-variant latent; torch.stack blows up.
                 cache_file: str | None
-                if self.resolution_from_upstream or self.aspect_bucketing is not None:
+                if self.sourceless:
+                    # Rotate among cached resolution buckets per (epoch,
+                    # in_index). _try_synthesize_aggregate picks the identical
+                    # variant, so the crop_resolution it cached matches the
+                    # latent loaded here (no AspectBatchSorting/collate mismatch).
+                    sl_variant = self._sourceless_variant(cache_entry, in_index)
+                    cache_file = sl_variant.get("cache_file") if sl_variant else None
+                elif self.resolution_from_upstream or self.aspect_bucketing is not None:
                     # Fast resolve via the stamped original_resolution
                     # before falling back to the upstream image-decode walk.
                     # Per-batch this saves the ~250 ms decode that

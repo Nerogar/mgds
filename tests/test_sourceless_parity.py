@@ -570,6 +570,36 @@ def test_sourceless_cpu_dummy_training_matches_sourced_training(tmp_path):
         torch.testing.assert_close(sourceless_state[key], sourced_state[key], rtol=0.0, atol=0.0)
 
 
+def test_sourceless_rotates_resolution_buckets_across_epochs(tmp_path):
+    image_paths = [
+        _write_file(tmp_path / "src" / "a_image.png", b"image a"),
+        _write_file(tmp_path / "src" / "b_image.png", b"image b"),
+    ]
+    text_paths = [
+        _write_file(tmp_path / "src" / "a_image.txt", b"text a"),
+        _write_file(tmp_path / "src" / "b_image.txt", b"text b"),
+    ]
+    cache_root = tmp_path / "cache"
+
+    # Two sourced epochs let each image accumulate both of its rotating
+    # crop_resolution variants in the cache.
+    builder = _build_dataset(cache_root, image_paths, text_paths, realistic=True)
+    _drain_full_epoch(builder)
+    _drain_full_epoch(builder)
+    _delete_source_tree(image_paths + text_paths)
+
+    sourceless = _build_dataset(cache_root, sourceless=True, realistic=True)
+    res_by_image: dict[str, set] = {}
+    for _epoch in range(4):
+        for row in _drain_full_epoch(sourceless):
+            item = dict(row)
+            res_by_image.setdefault(item["image_path"], set()).add(item["crop_resolution"])
+
+    # Sourceless serves more than one cached resolution bucket per image across
+    # epochs (bucket rotation), rather than freezing each image to one variant.
+    assert any(len(resolutions) > 1 for resolutions in res_by_image.values()), res_by_image
+
+
 def test_sourceless_raises_when_entry_metadata_missing(tmp_path):
     import json
 
