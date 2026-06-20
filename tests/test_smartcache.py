@@ -302,12 +302,15 @@ class TestCacheValidation:
         changed = cache._upgrade_sourceless_runtime_values({0: "active.png"})
 
         entry = cache.cache_index["entries"]["active.png"]
-        assert changed == 2
+        assert changed == 1  # one entry upgraded (presence-gated, counts entries not fields)
         assert entry["sourceless"]["linked_paths"]["sample_prompt_path"] == "active.txt"
         assert entry["sourceless_runtime_values"]["0"]["concept"]["name"] == "concept-a"
+        # Re-running must be a no-op now the row is stamped (convergence).
+        assert cache._upgrade_sourceless_runtime_values({0: "active.png"}) == 0
 
-    def test_cache_refresh_reports_phase_status(self, tmp_path, capsys):
-        """Long cache startup work should announce phases before progress bars."""
+    def test_cache_refresh_reports_phase_status(self, tmp_path, capsys, monkeypatch):
+        """Long cache startup work announces phases under OT_SMARTCACHE_VERBOSE."""
+        monkeypatch.setenv("OT_SMARTCACHE_VERBOSE", "1")
         paths, tensors = self._setup_files(tmp_path, n=2)
 
         ds, _, _ = _build_smart_pipeline(

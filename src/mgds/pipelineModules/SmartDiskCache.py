@@ -264,7 +264,10 @@ class SmartDiskCache(
         return name or self.cache_dir
 
     def _status(self, message: str) -> None:
-        print(f"SmartDiskCache[{self._status_label()}]: {message}", flush=True)
+        # Cache phase reporting is opt-in to keep stdout clean during normal
+        # runs. Set OT_SMARTCACHE_VERBOSE=1 to surface the per-phase lines.
+        if os.environ.get("OT_SMARTCACHE_VERBOSE") == "1":
+            print(f"SmartDiskCache[{self._status_label()}]: {message}", flush=True)
 
     def _safe_previous_item(self, variation: int, name: str | None, index: int) -> Any:
         if not name:
@@ -1245,6 +1248,15 @@ class SmartDiskCache(
         return self._any_variant_cache_file(entry)
 
     @staticmethod
+    def _variant_for_cache_file(entry: dict, cache_file: str | None) -> dict | None:
+        if cache_file is None:
+            return None
+        for variant in (entry.get("variants") or {}).values():
+            if variant.get("cache_file") == cache_file:
+                return variant
+        return None
+
+    @staticmethod
     def _resize_to_ref_shape(value, ref_shape):
         """Force ``value``'s spatial dims to match ``ref_shape`` via interpolation.
 
@@ -1586,20 +1598,17 @@ class SmartDiskCache(
                     }
                     row = target_entry.setdefault("sourceless_rows", {}).setdefault(str(in_index), {})
                     row["metadata"] = target_entry["sourceless"]
-                    if runtime_values_by_variation:
-                        target_entry["sourceless_runtime_values"] = runtime_values_by_variation
-                        row["runtime_values"] = runtime_values_by_variation
+                    # Always set runtime_values (even {}); key presence is the
+                    # "row resolved" marker the presence predicate latches on.
+                    target_entry["sourceless_runtime_values"] = runtime_values_by_variation
+                    row["runtime_values"] = runtime_values_by_variation
                     self.cache_index["entries"][filepath] = target_entry
                 else:
                     target_entry["sourceless"] = self._sourceless_metadata(in_index, variations)
                     row = target_entry.setdefault("sourceless_rows", {}).setdefault(str(in_index), {})
                     row["metadata"] = target_entry["sourceless"]
-                    if runtime_values_by_variation:
-                        target_entry["sourceless_runtime_values"] = runtime_values_by_variation
-                        row["runtime_values"] = runtime_values_by_variation
-                    else:
-                        target_entry.pop("sourceless_runtime_values", None)
-                        row.pop("runtime_values", None)
+                    target_entry["sourceless_runtime_values"] = runtime_values_by_variation
+                    row["runtime_values"] = runtime_values_by_variation
                 dedup_variant = {
                     "cache_file": cache_file,
                     "schema_keys": variant.get("schema_keys"),
@@ -1644,41 +1653,63 @@ class SmartDiskCache(
                 values_by_variation[str(v)] = values
         return values_by_variation
 
-    def _set_entry_sourceless_runtime_values(self, entry: dict, variations: int, in_index: int) -> bool:
+    def _set_entry_sourceless_runtime_values(self, entry: dict, variations: int, in_index: int) -> None:
+        # Plain setter. Resolves runtime values (concept / prompts) via the
+        # upstream pipeline, so callers MUST presence-gate before invoking this
+        # (see _upgrade_sourceless_runtime_values) — resolving is the expensive
+        # part. No value-equality check: comparing a JSON-round-tripped stored
+        # value against a freshly-resolved live object is unreliable (type and
+        # key-order coercion) and was the source of the never-converging
+        # re-save loop.
         if not self.source_path_in_name:
-            return False
+            return
 
-        previous_values = repr(entry.get("sourceless_runtime_values"))
-        previous_row = repr((entry.get("sourceless_rows") or {}).get(str(in_index)))
+        # Always write the runtime_values slot, even when empty: its key
+        # presence is the "this row has been resolved" marker the presence
+        # predicate latches on. Popping it (the old behavior) made no-concept
+        # rows look perpetually unstamped, so they were re-resolved every epoch.
         values_by_variation = self._sourceless_runtime_values_by_variation(variations, in_index)
-        if values_by_variation:
-            entry["sourceless_runtime_values"] = values_by_variation
-        else:
-            entry.pop("sourceless_runtime_values", None)
+        entry["sourceless_runtime_values"] = values_by_variation
         row = entry.setdefault("sourceless_rows", {}).setdefault(str(in_index), {})
-        if values_by_variation:
-            row["runtime_values"] = values_by_variation
-        else:
-            row.pop("runtime_values", None)
-        return (
-            previous_values != repr(entry.get("sourceless_runtime_values"))
-            or previous_row != repr((entry.get("sourceless_rows") or {}).get(str(in_index)))
-        )
+        row["runtime_values"] = values_by_variation
 
-    def _set_entry_sourceless_metadata(self, entry: dict, variations: int, in_index: int) -> bool:
+    def _set_entry_sourceless_metadata(self, entry: dict, variations: int, in_index: int) -> None:
+        # Plain setter; see _set_entry_sourceless_runtime_values for why there
+        # is no repr-based change detection here.
         if not self.source_path_in_name:
-            return False
+            return
 
-        previous_values = repr(entry.get("sourceless"))
-        previous_row = repr((entry.get("sourceless_rows") or {}).get(str(in_index)))
         metadata = self._sourceless_metadata(in_index, variations)
         entry["sourceless"] = metadata
         row = entry.setdefault("sourceless_rows", {}).setdefault(str(in_index), {})
         row["metadata"] = metadata
-        return (
-            previous_values != repr(entry.get("sourceless"))
-            or previous_row != repr((entry.get("sourceless_rows") or {}).get(str(in_index)))
-        )
+
+    def _sourceless_metadata_present(self, entry: dict, in_index: int) -> bool:
+        # Per-(entry, in_index) presence predicate used to skip already-stamped
+        # rows before the expensive resolve. A row is "present" when its
+        # metadata is stamped AND its runtime_values slot has been written
+        # (the key exists — its value may be an empty dict for a no-concept row;
+        # we check key PRESENCE, not truthiness, so legitimately-empty runtime
+        # values still latch and the pass converges).
+        #
+        # The entry-level "sourceless" block is only a fallback for truly legacy
+        # single-row caches with no per-row structure: a multi-row entry (e.g.
+        # the same source path duplicated across rows) must be judged per row,
+        # otherwise row 0's entry-level block would mask an unstamped row 1.
+        rows = entry.get("sourceless_rows")
+        if isinstance(rows, dict) and rows:
+            row = rows.get(str(in_index))
+            return isinstance(row, dict) and bool(row.get("metadata")) and "runtime_values" in row
+        return bool(entry.get("sourceless")) and "sourceless_runtime_values" in entry
+
+    def _entry_has_any_sourceless_metadata(self, entry: dict) -> bool:
+        # Index-agnostic presence check used by the sourceless-init guard: the
+        # entry carries usable metadata via either the legacy entry-level block
+        # or any stamped per-row metadata.
+        if entry.get("sourceless"):
+            return True
+        rows = entry.get("sourceless_rows") or {}
+        return any(isinstance(row, dict) and row.get("metadata") for row in rows.values())
 
     def _sourceless_index_metadata_ready(self, index_to_filepath: dict[int, str]) -> bool:
         if not self.source_path_in_name:
@@ -1689,12 +1720,7 @@ class SmartDiskCache(
             entry = entries.get(filepath)
             if entry is None:
                 continue
-            row = (entry.get("sourceless_rows") or {}).get(str(in_index))
-            if row is not None:
-                if not row.get("metadata") or not row.get("runtime_values"):
-                    return False
-                continue
-            if not entry.get("sourceless") or not entry.get("sourceless_runtime_values"):
+            if not self._sourceless_metadata_present(entry, in_index):
                 return False
         return True
 
@@ -1779,10 +1805,17 @@ class SmartDiskCache(
                 entry = entries.get(filepath)
                 if entry is None:
                     continue
-                if self._set_entry_sourceless_metadata(entry, variations, in_index):
-                    upgraded += 1
-                if self._set_entry_sourceless_runtime_values(entry, variations, in_index):
-                    upgraded += 1
+                # Presence-gate BEFORE resolving: _set_entry_* walk the upstream
+                # pipeline, and the per-module memo only caches a single index,
+                # so resolving every index re-runs the whole chain. Skipping
+                # already-stamped entries here is what keeps this pass
+                # O(unstamped entries) for a one-time bake instead of
+                # O(dataset) on every epoch.
+                if self._sourceless_metadata_present(entry, in_index):
+                    continue
+                self._set_entry_sourceless_metadata(entry, variations, in_index)
+                self._set_entry_sourceless_runtime_values(entry, variations, in_index)
+                upgraded += 1
         if upgraded:
             self._save_cache_index()
         return upgraded
@@ -1843,8 +1876,12 @@ class SmartDiskCache(
                     if required_schema.issubset(existing_keys):
                         if stored_crop_resolution is None:
                             stored_crop_resolution = existing.get("crop_resolution")
-                        if self._stamp_sourceless_runtime_values(existing, v, in_index):
-                            self._save_pt_atomic(existing, real_pt)
+                        # Do NOT rewrite the .pt to (re)stamp sourceless runtime
+                        # values: metadata lives in cache.json (the read path is
+                        # index-first), so rewriting tensors here only churned
+                        # the 200GB+ archive every epoch. Sourceless runtime
+                        # values are stamped into the index in the entry
+                        # create/refresh branch below.
                         # Register only the hash stamped at write time — the
                         # freshly computed hash may not describe this .pt if
                         # the seed or pipeline layout changed since it was
@@ -1928,9 +1965,10 @@ class SmartDiskCache(
                 entry["sourceless"] = self._sourceless_metadata(in_index, variations)
                 row = entry.setdefault("sourceless_rows", {}).setdefault(str(in_index), {})
                 row["metadata"] = entry["sourceless"]
-                if runtime_values_by_variation:
-                    entry["sourceless_runtime_values"] = runtime_values_by_variation
-                    row["runtime_values"] = runtime_values_by_variation
+                # Always set runtime_values (even {}): its key presence is the
+                # "row resolved" marker the presence predicate latches on.
+                entry["sourceless_runtime_values"] = runtime_values_by_variation
+                row["runtime_values"] = runtime_values_by_variation
                 self.cache_index["entries"][filepath] = entry
             else:
                 # Refresh metadata; the source content may have changed and
@@ -1946,12 +1984,9 @@ class SmartDiskCache(
                 entry["sourceless"] = self._sourceless_metadata(in_index, variations)
                 row = entry.setdefault("sourceless_rows", {}).setdefault(str(in_index), {})
                 row["metadata"] = entry["sourceless"]
-                if runtime_values_by_variation:
-                    entry["sourceless_runtime_values"] = runtime_values_by_variation
-                    row["runtime_values"] = runtime_values_by_variation
-                else:
-                    entry.pop("sourceless_runtime_values", None)
-                    row.pop("runtime_values", None)
+                # Always set runtime_values (even {}); see the create branch.
+                entry["sourceless_runtime_values"] = runtime_values_by_variation
+                row["runtime_values"] = runtime_values_by_variation
                 if "variants" not in entry:
                     entry["variants"] = {}
             variant_record = {
@@ -2247,6 +2282,20 @@ class SmartDiskCache(
 
         for fp in self._sourceless_filepaths:
             entry = self.cache_index["entries"][fp]
+            # Hard guard: refuse to train sourceless on an entry with no baked
+            # sourceless metadata. _entry_sourceless_row_records silently falls
+            # back to source_index=1<<60 + empty metadata for such entries,
+            # which would misalign/empty the run. This is the safety net for
+            # caches built before the bake, or under trust / skip-validation
+            # mode (which never stamps pre-existing entries).
+            if not self._entry_has_any_sourceless_metadata(entry):
+                raise RuntimeError(
+                    f"Sourceless training: cache entry for '{fp}' is missing sourceless metadata. "
+                    "The cache was built before sourceless metadata was baked, or under "
+                    "trust/skip-validation mode which does not bake it. Run a normal cache pass "
+                    "(only_cache, with source files present and 'skip cache validation' OFF) to bake "
+                    "the metadata into cache.json, then retry sourceless training."
+                )
             cache_file = self._any_variant_cache_file(entry)
             if cache_file is None:
                 raise RuntimeError(f"Sourceless training: cache entry for '{fp}' has no variants. Rebuild your cache.")
@@ -2381,7 +2430,7 @@ class SmartDiskCache(
                 self._status("updating sourceless cache index metadata")
                 upgraded = self._upgrade_sourceless_runtime_values(index_to_filepath)
                 if upgraded:
-                    self._status(f"updated sourceless cache index metadata for {upgraded} fields")
+                    self._status(f"baked sourceless cache index metadata for {upgraded} entries")
 
         # --- Session skip path ---
         # If every required filepath was already validated earlier in this
@@ -2859,9 +2908,10 @@ class SmartDiskCache(
                             ab._target_override = prev_override
 
         if not skip_validation:
-            metadata_upgraded = self._upgrade_sourceless_runtime_values(index_to_filepath)
-            if metadata_upgraded:
-                self._status(f"updated sourceless cache index metadata for {metadata_upgraded} fields")
+            # No unconditional re-stamp here: entries (re)built or deduped this
+            # pass already stamped their index metadata in-context, and the
+            # presence-gated pre-validation pass backfills any stragglers. A
+            # second full sweep every epoch was pure churn.
             self.cache_index["last_validated"] = time.time()
             # Per-watched-file fingerprint: ignored if any parent dir is
             # unreachable (returns None); a missing fingerprint just means the
@@ -3014,25 +3064,36 @@ class SmartDiskCache(
         ``_DERIVABLE_AGGREGATES`` and ``frame_dim_enabled`` must be
         False (else the 2D ``HxW`` key can't represent the cached value).
         """
-        resolution = self._fast_resolution_string(entry, in_variation, in_index)
-        if resolution is None:
-            resolution = self._get_resolution_string(in_variation, in_index)
-        if resolution is None or resolution == NO_RESOLUTION_KEY:
-            return None
+        if self.aspect_bucketing is None and not self.resolution_from_upstream:
+            # Sourceless / no-aspect-bucketing: there is no per-epoch bucket
+            # key to resolve a variant by, and get_item serves the active
+            # (any-)variant (see the get_item `else` branch). Synthesize from
+            # that SAME variant's stamped crop_resolution — this is what makes
+            # the sourceless aggregate load as fast as the sourced one, instead
+            # of a torch.load per row. Consistency holds because split-fetch
+            # picks the identical variant via the same _active_cache_file.
+            variant = self._variant_for_cache_file(entry, self._active_cache_file(filepath, entry))
+            if variant is None:
+                return None
+        else:
+            resolution = self._fast_resolution_string(entry, in_variation, in_index)
+            if resolution is None:
+                resolution = self._get_resolution_string(in_variation, in_index)
+            if resolution is None or resolution == NO_RESOLUTION_KEY:
+                return None
 
-        # Synthesis is only safe when the computed variant key actually
-        # exists on the entry. Otherwise split-fetch's get_item falls back
-        # to _active_cache_file at a different key, and AspectBatchSorting
-        # would bucket by a crop_resolution that no on-disk .pt for this
-        # (filepath, variation, in_index) produces — torch.stack then
-        # blows up in collate on the mismatched latent shapes. Falling
-        # through to None routes the item to the slow path, where the
-        # same _active_cache_file fallback reads the real crop_resolution
-        # off the .pt that split-fetch will load.
-        variants = entry.get("variants") or {}
-        variant = variants.get(self._resolution_key(resolution))
-        if variant is None:
-            return None
+            # Synthesis is only safe when the computed variant key actually
+            # exists on the entry. Otherwise split-fetch's get_item falls back
+            # to _active_cache_file at a different key, and AspectBatchSorting
+            # would bucket by a crop_resolution that no on-disk .pt for this
+            # (filepath, variation, in_index) produces — torch.stack then
+            # blows up in collate on the mismatched latent shapes. Falling
+            # through to None routes the item to the slow path, where the
+            # same _active_cache_file fallback reads the real crop_resolution
+            # off the .pt that split-fetch will load.
+            variant = (entry.get("variants") or {}).get(self._resolution_key(resolution))
+            if variant is None:
+                return None
 
         # Prefer the stamped crop_resolution from the variant entry —
         # that's the value torch.load would return for the .pt this

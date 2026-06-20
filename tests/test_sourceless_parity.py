@@ -568,3 +568,34 @@ def test_sourceless_cpu_dummy_training_matches_sourced_training(tmp_path):
     assert sourceless_state.keys() == sourced_state.keys()
     for key in sourced_state:
         torch.testing.assert_close(sourceless_state[key], sourced_state[key], rtol=0.0, atol=0.0)
+
+
+def test_sourceless_raises_when_entry_metadata_missing(tmp_path):
+    import json
+
+    import pytest
+
+    image_paths = [
+        _write_file(tmp_path / "src" / "a_image.png", b"image a"),
+        _write_file(tmp_path / "src" / "b_image.png", b"image b"),
+    ]
+    text_paths = [
+        _write_file(tmp_path / "src" / "a_image.txt", b"text a"),
+        _write_file(tmp_path / "src" / "b_image.txt", b"text b"),
+    ]
+    cache_root = tmp_path / "cache"
+    _drain_full_epoch(_build_dataset(cache_root, image_paths, text_paths, realistic=True))
+
+    # Simulate a cache built before the metadata bake (or under trust mode):
+    # strip one image entry's sourceless metadata entirely.
+    image_index = cache_root / "image" / "cache.json"
+    index = json.loads(image_index.read_text(encoding="utf-8"))
+    victim = next(iter(index["entries"]))
+    index["entries"][victim].pop("sourceless", None)
+    index["entries"][victim].pop("sourceless_rows", None)
+    image_index.write_text(json.dumps(index), encoding="utf-8")
+
+    _delete_source_tree(image_paths + text_paths)
+
+    with pytest.raises(RuntimeError, match="missing sourceless metadata"):
+        _drain_full_epoch(_build_dataset(cache_root, sourceless=True, realistic=True))
