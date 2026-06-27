@@ -74,6 +74,25 @@ class AspectBatchSorting(
             self.bucket_dict[resolution].append(index)
 
     def start(self, variation: int):
+        # Consistency guard: every batched input must have the same number of
+        # items as the resolution input. A mismatch means the upstream caches
+        # disagree on sample count (e.g. the image cache and text cache were
+        # built to different lengths, or a cache sync completed only partially),
+        # which would otherwise surface as a cryptic index/unpack error deep
+        # inside variation sorting. Fail early with an actionable message.
+        resolution_length = self._get_previous_length(self.resolution_in_name)
+        for name in self.names:
+            name_length = self._get_previous_length(name)
+            if name_length != resolution_length:
+                raise RuntimeError(
+                    f"AspectBatchSorting: input '{name}' has {name_length} items but "
+                    f"resolution input '{self.resolution_in_name}' has {resolution_length}. "
+                    f"The caches feeding this dataset are inconsistent - most often the "
+                    f"image and text caches were built to different counts, or a cache "
+                    f"sync completed only partially. Rebuild the cache (or finish syncing "
+                    f"it) so every input has the same number of samples."
+                )
+
         self.__sort_resolutions(variation)
 
         self.index_list = self.__shuffle()

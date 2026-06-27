@@ -120,6 +120,21 @@ class VariationSorting(
 
             return group_key, in_variation, group_index, in_index
 
+        # out_index lies past the end of every group: a downstream module asked
+        # for more samples than this module produces. This is almost always an
+        # upstream length mismatch (e.g. the text cache feeding the variation
+        # groups has fewer entries than the image cache driving batch sorting,
+        # from an incomplete/inconsistent cache). Fail clearly instead of
+        # returning None and crashing later with an opaque unpack error.
+        total = sum(self.group_output_samples.values())
+        raise RuntimeError(
+            f"VariationSorting: requested output index {out_index} but only {total} "
+            f"output sample(s) exist across {len(self.group_output_samples)} group(s). "
+            f"This usually means the caches feeding the dataset are inconsistent "
+            f"(e.g. image vs text cache built to different counts / partial sync). "
+            f"Rebuild or finish syncing the cache."
+        )
+
     def start(self, variation: int):
         if not self.variations_initialized:
             self.__init_variations()
