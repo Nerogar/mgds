@@ -304,9 +304,57 @@ class TestCacheValidation:
         entry = cache.cache_index["entries"]["active.png"]
         assert changed == 1  # one entry upgraded (presence-gated, counts entries not fields)
         assert entry["sourceless"]["linked_paths"]["sample_prompt_path"] == "active.txt"
-        assert entry["sourceless_runtime_values"]["0"]["concept"]["name"] == "concept-a"
+        # Concept is interned: the row references it by id (not embedded), and
+        # the entry-level duplicate slot is no longer written.
+        assert "sourceless_runtime_values" not in entry
+        row = entry["sourceless_rows"]["0"]
+        assert "concept" not in row["runtime_values"]["0"]
+        assert cache.cache_index["concepts"][row["concept_id"]]["name"] == "concept-a"
+        # The read path reattaches the interned concept transparently.
+        assert cache._sourceless_runtime_values_for_row(entry, 0, 0, {})["concept"]["name"] == "concept-a"
         # Re-running must be a no-op now the row is stamped (convergence).
         assert cache._upgrade_sourceless_runtime_values({0: "active.png"}) == 0
+
+    def test_migrate_intern_sourceless_concepts_collapses_embedded_copies(self):
+        """Old-format caches (concept embedded per row+variation, plus an
+        entry-level duplicate) migrate to one shared concept table with the
+        per-variation prompts preserved and reconstructable byte-for-byte."""
+        concept = {"name": "Solo", "seed": 123, "image": {"a": 1}, "text": {"b": 2}}
+
+        def block():
+            return {str(v): {"concept": dict(concept), "prompt": f"p{v}"} for v in range(3)}
+
+        index = {
+            "version": 3,
+            "entries": {
+                # Two entries sharing one concept; one has two rows.
+                "a.txt": {
+                    "sourceless_rows": {"0": {"runtime_values": block()}, "1": {"runtime_values": block()}},
+                    "sourceless_runtime_values": block(),  # entry-level duplicate
+                },
+                "b.txt": {
+                    "sourceless_rows": {"2": {"runtime_values": block()}},
+                    "sourceless_runtime_values": block(),
+                },
+            },
+        }
+        # 3 rows + 2 entry-level blocks, each 3 variations = 15 embedded copies.
+        removed = SmartDiskCache._migrate_intern_sourceless_concepts(index)
+        assert removed == 15
+        assert len(index["concepts"]) == 1  # all identical -> one interned copy
+
+        cache = SmartDiskCache.__new__(SmartDiskCache)
+        cache.cache_index = index
+        cache._sourceless_source_indices = None
+        for fp, ridx in (("a.txt", 0), ("a.txt", 1), ("b.txt", 2)):
+            entry = index["entries"][fp]
+            assert "sourceless_runtime_values" not in entry
+            for var in range(3):
+                got = cache._sourceless_runtime_values_for_row(entry, ridx, var, {})
+                assert got == {"concept": concept, "prompt": f"p{var}"}
+
+        # Idempotent.
+        assert SmartDiskCache._migrate_intern_sourceless_concepts(index) == 0
 
     def test_cache_refresh_reports_phase_status(self, tmp_path, capsys, monkeypatch):
         """Long cache startup work announces phases under OT_SMARTCACHE_VERBOSE."""

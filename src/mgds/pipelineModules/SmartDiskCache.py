@@ -349,22 +349,26 @@ class SmartDiskCache(
                         source_index = int(row_key)
                     except (TypeError, ValueError):
                         source_index = 1 << 60
-                records.append({
-                    "filepath": filepath,
-                    "source_index": int(source_index),
-                    "metadata": metadata,
-                })
+                records.append(
+                    {
+                        "filepath": filepath,
+                        "source_index": int(source_index),
+                        "metadata": metadata,
+                    }
+                )
 
         if records:
             return records
 
         metadata = entry.get("sourceless") or {}
         source_index = metadata.get("source_index", 1 << 60) if isinstance(metadata, dict) else 1 << 60
-        return [{
-            "filepath": filepath,
-            "source_index": int(source_index),
-            "metadata": metadata if isinstance(metadata, dict) else {},
-        }]
+        return [
+            {
+                "filepath": filepath,
+                "source_index": int(source_index),
+                "metadata": metadata if isinstance(metadata, dict) else {},
+            }
+        ]
 
     def _init_sourceless_groups_from_records(self, records: list[dict]) -> None:
         group_variations = {}
@@ -493,6 +497,7 @@ class SmartDiskCache(
                     with contextlib.suppress(OSError):
                         os.remove(p)
                 self._migrate_legacy_index_in_place(data)
+                self._migrate_intern_sourceless_concepts(data)
                 return data
             except (json.JSONDecodeError, OSError):
                 pass
@@ -503,6 +508,7 @@ class SmartDiskCache(
                     data = json.load(f)
                 os.replace(tmp_path, cache_path)
                 self._migrate_legacy_index_in_place(data)
+                self._migrate_intern_sourceless_concepts(data)
                 return data
             except (json.JSONDecodeError, OSError):
                 pass
@@ -513,6 +519,7 @@ class SmartDiskCache(
                     data = json.load(f)
                 os.replace(bak_path, cache_path)
                 self._migrate_legacy_index_in_place(data)
+                self._migrate_intern_sourceless_concepts(data)
                 return data
             except (json.JSONDecodeError, OSError):
                 pass
@@ -1623,15 +1630,13 @@ class SmartDiskCache(
                     row["metadata"] = target_entry["sourceless"]
                     # Always set runtime_values (even {}); key presence is the
                     # "row resolved" marker the presence predicate latches on.
-                    target_entry["sourceless_runtime_values"] = runtime_values_by_variation
-                    row["runtime_values"] = runtime_values_by_variation
+                    self._store_row_runtime_values(target_entry, in_index, runtime_values_by_variation)
                     self.cache_index["entries"][filepath] = target_entry
                 else:
                     target_entry["sourceless"] = self._sourceless_metadata(in_index, variations)
                     row = target_entry.setdefault("sourceless_rows", {}).setdefault(str(in_index), {})
                     row["metadata"] = target_entry["sourceless"]
-                    target_entry["sourceless_runtime_values"] = runtime_values_by_variation
-                    row["runtime_values"] = runtime_values_by_variation
+                    self._store_row_runtime_values(target_entry, in_index, runtime_values_by_variation)
                 dedup_variant = {
                     "cache_file": cache_file,
                     "schema_keys": variant.get("schema_keys"),
@@ -1676,6 +1681,153 @@ class SmartDiskCache(
                 values_by_variation[str(v)] = values
         return values_by_variation
 
+    # ------------------------------------------------------------------
+    # Concept interning
+    #
+    # The per-variation runtime values embed the *concept* — an ~80-field
+    # config dict that is identical for every sample of a concept and every
+    # variation of a sample. Embedding a deep copy per (entry, row, variation)
+    # exploded cache.json to multiple GB (the concept block dwarfs the few
+    # hundred bytes of prompt it travels with) and made the per-epoch
+    # json.dumps of the index the dominant cost — tens of GB of transient RAM
+    # plus minutes of wall time at every epoch boundary. Instead we keep one
+    # copy per distinct concept in cache_index['concepts'] and reference it by
+    # a content hash; the per-variation block then carries only the prompt(s).
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _concept_identity(concept: dict) -> str:
+        payload = json.dumps(concept, sort_keys=True, default=str)
+        return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:16]
+
+    def _intern_concept(self, concept: dict) -> str | None:
+        if not isinstance(concept, dict):
+            return None
+        concepts = self.cache_index.setdefault("concepts", {})
+        cid = self._concept_identity(concept)
+        if cid not in concepts:
+            concepts[cid] = concept
+        return cid
+
+    def _split_runtime_values_by_variation(self, runtime_values_by_variation: dict) -> tuple[str | None, dict]:
+        """Intern the (variation-invariant) concept out of a runtime block.
+
+        Returns ``(concept_id, prompts_by_variation)`` where the per-variation
+        mapping is the same minus its bulky ``concept`` entry — the concept now
+        lives once in ``cache_index['concepts']`` keyed by ``concept_id``. The
+        concept is determined by the row (index), not the variation, so a single
+        id describes every variation of the row.
+        """
+        concept_id = None
+        prompts_by_variation = {}
+        for var, values in (runtime_values_by_variation or {}).items():
+            if not isinstance(values, dict):
+                prompts_by_variation[var] = values
+                continue
+            concept = values.get("concept")
+            if concept_id is None and isinstance(concept, dict):
+                concept_id = self._intern_concept(concept)
+            prompts_by_variation[var] = {k: v for k, v in values.items() if k != "concept"}
+        return concept_id, prompts_by_variation
+
+    def _store_row_runtime_values(self, entry: dict, in_index: int, runtime_values_by_variation: dict) -> None:
+        """Write a row's runtime values in interned form.
+
+        Replaces the old pattern of stamping the full block into BOTH
+        ``entry['sourceless_runtime_values']`` and the per-row slot (the index
+        then serialized every concept twice). Only the per-row slot is written;
+        the read path treats the entry-level slot as a legacy fallback.
+        """
+        concept_id, prompts_by_variation = self._split_runtime_values_by_variation(runtime_values_by_variation)
+        row = entry.setdefault("sourceless_rows", {}).setdefault(str(in_index), {})
+        row["runtime_values"] = prompts_by_variation
+        if concept_id is not None:
+            row["concept_id"] = concept_id
+        else:
+            row.pop("concept_id", None)
+        # Drop any stale entry-level duplicate left by an older build/migration.
+        entry.pop("sourceless_runtime_values", None)
+
+    def _attach_interned_concept(self, runtime_values: dict, holder: dict) -> dict:
+        """Re-attach the interned concept to a per-variation runtime block.
+
+        ``holder`` is the row (or, for legacy row-less entries, the entry) that
+        carries the ``concept_id``. Returns a shallow copy with a deep-copied
+        concept so downstream mutation can't poison the shared interned object —
+        matching the old per-consumer deepcopy semantics. Legacy blocks that
+        still embed their own concept are returned unchanged.
+        """
+        if "concept" in runtime_values:
+            return runtime_values
+        cid = holder.get("concept_id")
+        if cid is None:
+            return runtime_values
+        concept = (self.cache_index.get("concepts") or {}).get(cid)
+        if not isinstance(concept, dict):
+            return runtime_values
+        merged = dict(runtime_values)
+        merged["concept"] = copy.deepcopy(concept)
+        return merged
+
+    @staticmethod
+    def _migrate_intern_sourceless_concepts(cache_index: dict) -> int:
+        """Collapse embedded per-variation concept dicts into a shared table.
+
+        Idempotent: a cache already in interned form (rows carry ``concept_id``,
+        no embedded ``concept``) yields 0 and is left untouched. Returns the
+        number of embedded concept copies removed, for reporting. Run on load
+        and by the offline migration script so existing multi-GB caches shrink
+        on their next save without a rebuild.
+        """
+        entries = cache_index.get("entries")
+        if not isinstance(entries, dict):
+            return 0
+        concepts = cache_index.setdefault("concepts", {})
+
+        def intern(concept: dict) -> str:
+            payload = json.dumps(concept, sort_keys=True, default=str)
+            cid = hashlib.sha1(payload.encode("utf-8")).hexdigest()[:16]
+            if cid not in concepts:
+                concepts[cid] = concept
+            return cid
+
+        def strip(block: dict, holder: dict) -> int:
+            removed = 0
+            cid = holder.get("concept_id")
+            for values in block.values():
+                if isinstance(values, dict) and "concept" in values:
+                    concept = values.pop("concept")
+                    removed += 1
+                    if cid is None and isinstance(concept, dict):
+                        cid = intern(concept)
+            if cid is not None:
+                holder["concept_id"] = cid
+            return removed
+
+        removed = 0
+        for entry in entries.values():
+            if not isinstance(entry, dict):
+                continue
+            rows = entry.get("sourceless_rows")
+            has_rows = isinstance(rows, dict) and bool(rows)
+            if has_rows:
+                for row in rows.values():
+                    rv = row.get("runtime_values") if isinstance(row, dict) else None
+                    if isinstance(rv, dict):
+                        removed += strip(rv, row)
+                # The entry-level block is a pure duplicate of the rows here.
+                entry_block = entry.get("sourceless_runtime_values")
+                if isinstance(entry_block, dict):
+                    removed += sum(
+                        1 for values in entry_block.values() if isinstance(values, dict) and "concept" in values
+                    )
+                entry.pop("sourceless_runtime_values", None)
+            else:
+                entry_block = entry.get("sourceless_runtime_values")
+                if isinstance(entry_block, dict):
+                    removed += strip(entry_block, entry)
+        return removed
+
     def _set_entry_sourceless_runtime_values(self, entry: dict, variations: int, in_index: int) -> None:
         # Plain setter. Resolves runtime values (concept / prompts) via the
         # upstream pipeline, so callers MUST presence-gate before invoking this
@@ -1692,9 +1844,7 @@ class SmartDiskCache(
         # predicate latches on. Popping it (the old behavior) made no-concept
         # rows look perpetually unstamped, so they were re-resolved every epoch.
         values_by_variation = self._sourceless_runtime_values_by_variation(variations, in_index)
-        entry["sourceless_runtime_values"] = values_by_variation
-        row = entry.setdefault("sourceless_rows", {}).setdefault(str(in_index), {})
-        row["runtime_values"] = values_by_variation
+        self._store_row_runtime_values(entry, in_index, values_by_variation)
 
     def _set_entry_sourceless_metadata(self, entry: dict, variations: int, in_index: int) -> None:
         # Plain setter; see _set_entry_sourceless_runtime_values for why there
@@ -1747,18 +1897,22 @@ class SmartDiskCache(
                 return False
         return True
 
-    def _sourceless_runtime_values_for_row(self, entry: dict, in_index: int, variation: int, cached: dict) -> dict | None:
+    def _sourceless_runtime_values_for_row(
+        self, entry: dict, in_index: int, variation: int, cached: dict
+    ) -> dict | None:
         source_indices = getattr(self, "_sourceless_source_indices", None)
         source_index = source_indices[in_index] if source_indices and in_index < len(source_indices) else in_index
         row = (entry.get("sourceless_rows") or {}).get(str(source_index))
         if isinstance(row, dict):
             runtime_values = (row.get("runtime_values") or {}).get(str(variation))
             if isinstance(runtime_values, dict):
-                return runtime_values
+                # Interned form carries the concept by id on the row; legacy
+                # form embeds it in the block — _attach handles both.
+                return self._attach_interned_concept(runtime_values, row)
 
         runtime_values = (entry.get("sourceless_runtime_values") or {}).get(str(variation))
         if isinstance(runtime_values, dict):
-            return runtime_values
+            return self._attach_interned_concept(runtime_values, entry)
 
         runtime_values = cached.get("__sourceless_values")
         return runtime_values if isinstance(runtime_values, dict) else None
@@ -1990,8 +2144,7 @@ class SmartDiskCache(
                 row["metadata"] = entry["sourceless"]
                 # Always set runtime_values (even {}): its key presence is the
                 # "row resolved" marker the presence predicate latches on.
-                entry["sourceless_runtime_values"] = runtime_values_by_variation
-                row["runtime_values"] = runtime_values_by_variation
+                self._store_row_runtime_values(entry, in_index, runtime_values_by_variation)
                 self.cache_index["entries"][filepath] = entry
             else:
                 # Refresh metadata; the source content may have changed and
@@ -2008,8 +2161,7 @@ class SmartDiskCache(
                 row = entry.setdefault("sourceless_rows", {}).setdefault(str(in_index), {})
                 row["metadata"] = entry["sourceless"]
                 # Always set runtime_values (even {}); see the create branch.
-                entry["sourceless_runtime_values"] = runtime_values_by_variation
-                row["runtime_values"] = runtime_values_by_variation
+                self._store_row_runtime_values(entry, in_index, runtime_values_by_variation)
                 if "variants" not in entry:
                     entry["variants"] = {}
             variant_record = {
@@ -2269,7 +2421,9 @@ class SmartDiskCache(
             else:
                 records = sorted(records, key=lambda record: record["filepath"])
             self._sourceless_filepaths = [record["filepath"] for record in records]
-            self._sourceless_source_indices = [record.get("source_index", index) for index, record in enumerate(records)]
+            self._sourceless_source_indices = [
+                record.get("source_index", index) for index, record in enumerate(records)
+            ]
             self._init_sourceless_groups_from_records(records)
             state["anchor_paths"] = list(self._sourceless_filepaths)
             state["anchor_source_indices"] = list(self._sourceless_source_indices)
@@ -2442,10 +2596,7 @@ class SmartDiskCache(
                     if extras:
                         self._extra_paths_by_filepath[filepath] = extras
                         required_sidecar_paths.update(extras.values())
-        self._status(
-            f"resolved {len(required_filepaths)} unique source paths "
-            f"({len(required_sidecar_paths)} sidecars)"
-        )
+        self._status(f"resolved {len(required_filepaths)} unique source paths ({len(required_sidecar_paths)} sidecars)")
 
         skip_validation = self.trust_cache or os.environ.get("OT_SKIP_CACHE_VALIDATION") == "1"
         if not skip_validation:
@@ -2580,10 +2731,7 @@ class SmartDiskCache(
         # firing one os.path.getmtime syscall per file. Skipped under trust mode
         # since we won't be calling _validate_entry at all.
         if not skip_validation:
-            self._status(
-                f"statting {len(required_filepaths)} source files "
-                f"and {len(required_sidecar_paths)} sidecars"
-            )
+            self._status(f"statting {len(required_filepaths)} source files and {len(required_sidecar_paths)} sidecars")
             self._source_mtimes = self._bulk_stat_source_files(required_filepaths | required_sidecar_paths)
         else:
             self._source_mtimes = {}
@@ -3590,13 +3738,16 @@ class SmartDiskCache(
                         for name, value in runtime_values.items():
                             item.setdefault(name, value)
                 if self.sourceless and "__concept_loss_weight" in cached:
-                    item.setdefault("concept", {
-                        "loss_weight": cached["__concept_loss_weight"],
-                        "type": cached.get("__concept_type", "STANDARD"),
-                        "name": cached.get("__concept_name", ""),
-                        "path": cached.get("__concept_path", ""),
-                        "seed": cached.get("__concept_seed", 0),
-                    })
+                    item.setdefault(
+                        "concept",
+                        {
+                            "loss_weight": cached["__concept_loss_weight"],
+                            "type": cached.get("__concept_type", "STANDARD"),
+                            "name": cached.get("__concept_name", ""),
+                            "path": cached.get("__concept_path", ""),
+                            "seed": cached.get("__concept_seed", 0),
+                        },
+                    )
                 return item
 
         sentinel = self._load_blank_sentinel()
