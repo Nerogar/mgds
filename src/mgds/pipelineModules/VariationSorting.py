@@ -52,7 +52,7 @@ class VariationSorting(
         json_data = json.dumps(data, sort_keys=True, ensure_ascii=True, separators=(',', ':'), indent=None)
         return hashlib.sha256(json_data.encode('utf-8')).hexdigest()
 
-    def __init_variations(self):
+    def __init_variations(self, variation: int):
         """
         Prepares variations before caching starts. Each index is sorted into a group.
 
@@ -67,13 +67,13 @@ class VariationSorting(
             group_balancing_strategy = {}
 
             for in_index in range(self._get_previous_length(self.balancing_in_name)):
-                if self.group_enabled_in_name and not self._get_previous_item(0, self.group_enabled_in_name, in_index):
+                if self.group_enabled_in_name and not self._get_previous_item(variation, self.group_enabled_in_name, in_index):
                     continue
 
-                balancing = self._get_previous_item(0, self.balancing_in_name, in_index)
-                balancing_strategy = self._get_previous_item(0, self.balancing_strategy_in_name, in_index)
+                balancing = self._get_previous_item(variation, self.balancing_in_name, in_index)
+                balancing_strategy = self._get_previous_item(variation, self.balancing_strategy_in_name, in_index)
                 group_key = self.__string_key(
-                    [self._get_previous_item(0, name, in_index) for name in self.variations_group_in_names]
+                    [self._get_previous_item(variation, name, in_index) for name in self.variations_group_in_names]
                 )
 
                 if group_key not in group_indices:
@@ -122,7 +122,7 @@ class VariationSorting(
 
     def start(self, variation: int):
         if not self.variations_initialized:
-            self.__init_variations()
+            self.__init_variations(variation)
 
 
     def get_item(self, variation:int, index: int, requested_name: str = None) -> dict:
