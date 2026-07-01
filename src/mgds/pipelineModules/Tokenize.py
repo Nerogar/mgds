@@ -1,3 +1,4 @@
+import torch
 from transformers import CLIPTokenizer, T5Tokenizer, T5TokenizerFast, GemmaTokenizer, LlamaTokenizer, Qwen2Tokenizer, LlamaTokenizerFast
 
 from mgds.PipelineModule import PipelineModule
@@ -19,6 +20,7 @@ class Tokenize(
             max_token_length: int | None,
             format_text: str | None = None,
             additional_format_text_tokens: int | None = None,
+            suffix_text: str | None = None,
             apply_chat_template: Callable | None = None,
             apply_chat_template_kwargs = {},
             expand_mask: int = 0,
@@ -33,6 +35,9 @@ class Tokenize(
         self.apply_chat_template = apply_chat_template
         self.apply_chat_template_kwargs = apply_chat_template_kwargs
         self.additional_format_text_tokens = additional_format_text_tokens
+        # tokenized unpadded and appended after the padded main block, so the padding sits
+        # before the suffix instead of at the very end (mid-template padding, e.g. Krea 2)
+        self.suffix_text = suffix_text
         self.expand_mask = expand_mask
 
     def length(self) -> int:
@@ -71,6 +76,13 @@ class Tokenize(
 
         tokens = tokenizer_output.input_ids.to(self.pipeline.device)
         mask = tokenizer_output.attention_mask.to(self.pipeline.device)
+
+        if self.suffix_text is not None:
+            suffix_output = self.tokenizer(self.suffix_text, return_tensors="pt")
+            suffix_tokens = suffix_output.input_ids.to(self.pipeline.device)
+            suffix_mask = suffix_output.attention_mask.to(self.pipeline.device)
+            tokens = torch.cat([tokens, suffix_tokens], dim=1)
+            mask = torch.cat([mask, suffix_mask], dim=1)
 
         tokens = tokens.squeeze(dim=0)
         mask = mask.squeeze(dim=0)
