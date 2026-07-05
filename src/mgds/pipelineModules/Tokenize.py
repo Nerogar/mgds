@@ -46,6 +46,7 @@ class Tokenize(
         # call, which isn't safe under concurrent use of the same tokenizer instance from multiple
         # dataloader threads and can raise "RuntimeError: Already borrowed". The lock is stored on
         # the tokenizer itself so it's shared by every Tokenize instance wrapping that tokenizer.
+        # workaround for https://github.com/huggingface/transformers/issues/47085
         if not hasattr(tokenizer, "_mgds_tokenizer_lock"):
             tokenizer._mgds_tokenizer_lock = threading.Lock()
         self.tokenizer_lock = tokenizer._mgds_tokenizer_lock
