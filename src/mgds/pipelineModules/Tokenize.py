@@ -8,8 +8,6 @@ from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipe
 
 from typing import Callable
 
-_tokenizer_lock_registry_lock = threading.Lock()
-
 
 class Tokenize(
     PipelineModule,
@@ -49,13 +47,9 @@ class Tokenize(
         # dataloader threads and can raise "RuntimeError: Already borrowed". The lock is stored on
         # the tokenizer itself so it's shared by every Tokenize instance wrapping that tokenizer.
         # workaround for https://github.com/huggingface/transformers/issues/47085
-        # the check-then-set below is only atomic because of this lock: __init__ isn't
-        # guaranteed to run single-threaded, so a plain hasattr/setattr could let two
-        # Tokenize instances each capture a different Lock for the same tokenizer.
-        with _tokenizer_lock_registry_lock:
-            if not hasattr(tokenizer, "_mgds_tokenizer_lock"):
-                tokenizer._mgds_tokenizer_lock = threading.Lock()
-            self.tokenizer_lock = tokenizer._mgds_tokenizer_lock
+        if not hasattr(tokenizer, "_mgds_tokenizer_lock"):
+            tokenizer._mgds_tokenizer_lock = threading.Lock()
+        self.tokenizer_lock = tokenizer._mgds_tokenizer_lock
 
     def length(self) -> int:
         return self._get_previous_length(self.in_name)
