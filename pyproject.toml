@@ -22,3 +22,39 @@ Homepage = "https://github.com/Nerogar/mgds"
 Issues = "https://github.com/Nerogar/mgds/issues"
 
 [tool.setuptools_scm]
+
+[tool.ruff]
+extend-exclude = [
+    # Exclude all third-party dependencies and environments.
+    # NOTE: Conda installs mgds+diffusers into "src/" in the project directory.
+    ".venv*",
+    "venv*",
+    "conda_env*",
+]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["F", "E", "W", "I", "B", "UP", "YTT", "BLE", "C4", "T10", "ISC", "ICN", "PIE", "PYI", "RSE", "RET", "SIM", "PGH", "FLY", "NPY", "PERF"]
+ignore = ["BLE001", "E402", "E501", "B024", "PGH003", "RET504", "RET505", "SIM102", "UP015", "PYI041"]
+
+[tool.ruff.lint.isort.sections]
+hf = ["diffusers*", "transformers*"]
+mgds = ["mgds"]
+torch = ["torch*"]
+
+[tool.ruff.format]
+quote-style = "double"
+docstring-code-format = true
+
+[tool.ruff.lint.isort]
+known-first-party = ["modules"]
+section-order = [
+    "future",
+    "standard-library",
+    "first-party",
+    "mgds",
+    "torch",
+    "hf",
+    "third-party",
+    "local-folder",
+]
