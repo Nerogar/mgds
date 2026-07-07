@@ -25,6 +25,7 @@ class Tokenize(
             suffix_text: str | None = None,
             apply_chat_template: Callable | None = None,
             apply_chat_template_kwargs = {},
+            apply_chat_template_post_process: Callable[[str], str] | None = None,
             expand_mask: int = 0,
     ):
         super(Tokenize, self).__init__()
@@ -36,6 +37,7 @@ class Tokenize(
         self.format_text = format_text
         self.apply_chat_template = apply_chat_template
         self.apply_chat_template_kwargs = apply_chat_template_kwargs
+        self.apply_chat_template_post_process = apply_chat_template_post_process
         self.additional_format_text_tokens = additional_format_text_tokens
         # tokenized unpadded and appended after the padded main block, so the padding sits
         # before the suffix instead of at the very end (mid-template padding, e.g. Krea 2)
@@ -85,6 +87,8 @@ class Tokenize(
                 max_length=max_length,
                 return_tensors="pt",
             )
+            if self.apply_chat_template_post_process is not None:
+                text = self.apply_chat_template_post_process(text)
 
             tokens = tokenizer_output.input_ids.to(self.pipeline.device)
             mask = tokenizer_output.attention_mask.to(self.pipeline.device)
