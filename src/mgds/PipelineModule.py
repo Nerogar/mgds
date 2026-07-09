@@ -4,12 +4,16 @@ from abc import ABCMeta, abstractmethod
 from concurrent import futures
 from contextlib import ExitStack
 from random import Random
+from typing import TYPE_CHECKING
 
 import torch
 
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
 from mgds.pipelineModuleTypes.SerialPipelineModule import SerialPipelineModule
 from mgds.pipelineModuleTypes.SingleVariationRandomAccessPipelineModule import SingleVariationRandomAccessPipelineModule
+
+if TYPE_CHECKING:
+    from mgds.LoadingPipeline import LoadingPipeline
 
 
 class PipelineState:
@@ -142,7 +146,6 @@ class PipelineModule(metaclass=ABCMeta):
     def _get_previous_length(self, name: str):
         split_name = name.split('.')
         item_name = split_name[0]
-        path_names = split_name[1::]
 
         for previous_module_index in range(self.__module_index - 1, -1, -1):
             module = self.pipeline.modules[previous_module_index]

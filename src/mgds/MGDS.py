@@ -1,7 +1,7 @@
 import random
 
 import torch
-from torch.utils.data import DataLoader, Dataset, IterableDataset
+from torch.utils.data import DataLoader, IterableDataset
 
 from mgds.ConceptPipelineModule import ConceptPipelineModule
 from mgds.LoadingPipeline import LoadingPipeline
@@ -19,7 +19,7 @@ class MGDS(IterableDataset):
             device: torch.device,
             concepts: list[dict],
             settings: dict,
-            definition: [PipelineModule],
+            definition: list[PipelineModule],
             batch_size: int, #local batch size
             state: PipelineState,
             seed: int = 42,
