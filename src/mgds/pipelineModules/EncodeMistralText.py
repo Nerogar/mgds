@@ -51,6 +51,15 @@ class EncodeMistralText(
         else:
             tokens_attention_mask = None
 
+        # Match inputs to the text encoder's device. Upstream pipeline stages
+        # typically land tokens on cuda:0; for model-parallel setups that keep
+        # Mistral-24B on CPU (a single 32 GB consumer card can't fit ~48 GB bf16),
+        # the forward call would otherwise fail with a device-mismatch error.
+        te_device = self.text_encoder.device
+        tokens = tokens.to(te_device)
+        if tokens_attention_mask is not None:
+            tokens_attention_mask = tokens_attention_mask.to(te_device)
+
         with self._all_contexts(self.autocast_contexts):
             text_encoder_output = self.text_encoder(
                 tokens,
