@@ -491,7 +491,7 @@ class SmartDiskCache(
 
         if os.path.exists(cache_path):
             try:
-                with open(cache_path, "r") as f:
+                with open(cache_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 for p in (tmp_path, bak_path):
                     with contextlib.suppress(OSError):
@@ -504,7 +504,7 @@ class SmartDiskCache(
 
         if os.path.exists(tmp_path):
             try:
-                with open(tmp_path, "r") as f:
+                with open(tmp_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 os.replace(tmp_path, cache_path)
                 self._migrate_legacy_index_in_place(data)
@@ -515,7 +515,7 @@ class SmartDiskCache(
 
         if os.path.exists(bak_path):
             try:
-                with open(bak_path, "r") as f:
+                with open(bak_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 os.replace(bak_path, cache_path)
                 self._migrate_legacy_index_in_place(data)
@@ -567,7 +567,7 @@ class SmartDiskCache(
         loaded or saved (external writer, e.g. gc_clean from another run)."""
         return self._snapshot_index_stat() != self._index_disk_stat
 
-    def _save_cache_index(self, compact: bool = False):
+    def _save_cache_index(self, compact: bool = False, backup: bool = True):
         os.makedirs(self.cache_dir, exist_ok=True)
         cache_path = self._get_cache_json_path()
         tmp_path = cache_path + ".tmp"
@@ -581,10 +581,17 @@ class SmartDiskCache(
             payload = json.dumps(self.cache_index, indent=None if compact else 2)
 
         with self._index_io_lock:
-            with open(tmp_path, "w") as f:
-                f.write(payload)
+            # Write bytes directly: a text-mode write on Windows funnels the
+            # multi-MB payload through the locale codec (cp1252 charmap), which
+            # profiled slower than the json serialization itself. The payload
+            # is pure ASCII (ensure_ascii=True), so utf-8 bytes are readable by
+            # any past or future reader regardless of its text encoding.
+            with open(tmp_path, "wb") as f:
+                f.write(payload.encode("utf-8"))
 
-            if os.path.exists(cache_path):
+            # The .bak copy is crash insurance for the final save; copying a
+            # multi-MB file on every periodic flush was pure overhead.
+            if backup and os.path.exists(cache_path):
                 with contextlib.suppress(OSError):
                     shutil.copy2(cache_path, bak_path)
 
@@ -593,8 +600,8 @@ class SmartDiskCache(
 
     def _flush_cache_index(self):
         now = time.monotonic()
-        if now - self._last_flush_time >= 30.0:
-            self._save_cache_index(compact=True)
+        if now - self._last_flush_time >= 120.0:
+            self._save_cache_index(compact=True, backup=False)
             self._save_content_index()
             self._last_flush_time = now
 
@@ -618,7 +625,7 @@ class SmartDiskCache(
         self._content_index = {}
         self._content_index_dirty = False
         try:
-            with open(self._get_content_index_path(), "r") as f:
+            with open(self._get_content_index_path(), "r", encoding="utf-8") as f:
                 raw = json.load(f)
         except (OSError, json.JSONDecodeError):
             return
@@ -637,8 +644,8 @@ class SmartDiskCache(
             payload = {"version": 1, "entries": dict(self._content_index)}
             self._content_index_dirty = False
         try:
-            with open(tmp_path, "w") as f:
-                json.dump(payload, f, indent=None, separators=(",", ":"))
+            with open(tmp_path, "wb") as f:
+                f.write(json.dumps(payload, indent=None, separators=(",", ":")).encode("utf-8"))
             os.replace(tmp_path, path)
         except OSError:
             with contextlib.suppress(OSError):
@@ -3780,7 +3787,7 @@ class SmartDiskCache(
         if not os.path.isfile(cache_path):
             return {"orphan_count": 0, "orphan_bytes": 0}
 
-        with open(cache_path, "r") as f:
+        with open(cache_path, "r", encoding="utf-8") as f:
             index = json.load(f)
 
         SmartDiskCache._migrate_legacy_index_in_place(index)
@@ -3840,7 +3847,7 @@ class SmartDiskCache(
         if not os.path.isfile(cache_path):
             return
 
-        with open(cache_path, "r") as f:
+        with open(cache_path, "r", encoding="utf-8") as f:
             index = json.load(f)
 
         SmartDiskCache._migrate_legacy_index_in_place(index)
