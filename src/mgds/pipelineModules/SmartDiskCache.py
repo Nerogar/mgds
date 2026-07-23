@@ -1974,33 +1974,148 @@ class SmartDiskCache(
         torch.save(cache_data, real_tmp_path)
         os.replace(real_tmp_path, real_pt_path)
 
+    def _sourceless_row_group_key(self, metadata: Any) -> str | None:
+        """Group key recomputed from a stamped row's metadata.
+
+        Mirrors _init_sourceless_groups_from_records' defaulting (missing
+        group_values -> [""]) so a key computed here compares equal to the
+        live group key of an unchanged concept.
+        """
+        if not isinstance(metadata, dict) or not metadata:
+            return None
+        group_values = metadata.get("group_values")
+        if group_values is None:
+            group_values = [""]
+        try:
+            return self.__string_key(group_values)
+        except TypeError:
+            return None
+
+    def _find_remappable_sourceless_row(self, entry: dict, group_key: str, variations: int) -> dict | None:
+        """Find a stamped row whose content is still valid at a shifted index.
+
+        Everything stamped on a row is a function of the (unchanged) source
+        file and its concept, not of the row's global dataset position — the
+        position only seeds RNG draws, and those are frozen at bake time
+        anyway. So a row stamped under an old index is reusable for a new
+        index as long as it belongs to the same group and was baked for the
+        same variation count. Rows without group metadata (legacy stamps)
+        never match and fall through to the slow resolve.
+        """
+        rows = entry.get("sourceless_rows")
+        if not isinstance(rows, dict):
+            return None
+        # Without variations_in_name there is a single "" group whose key is
+        # not derived from group values, so any stamped row of the file fits.
+        match_any_group = self.variations_in_name is None
+        for row in rows.values():
+            if not isinstance(row, dict) or "runtime_values" not in row:
+                continue
+            metadata = row.get("metadata")
+            if not isinstance(metadata, dict) or not metadata:
+                continue
+            if int(metadata.get("variations") or 1) != int(variations or 1):
+                continue
+            if not match_any_group and self._sourceless_row_group_key(metadata) != group_key:
+                continue
+            return row
+        return None
+
+    def _prune_orphaned_sourceless_rows(self, index_to_filepath: dict[int, str]) -> int:
+        """Drop row stamps keyed by indices a file no longer occupies.
+
+        Only entries referenced by the current dataset are touched: an entry
+        for a file that left the dataset keeps its rows, since another config
+        sharing this cache dir may still resolve through them (and a stale
+        row costs only index bytes — it can also seed a future remap).
+        """
+        valid_keys_by_filepath: dict[str, set[str]] = {}
+        for in_index, filepath in index_to_filepath.items():
+            valid_keys_by_filepath.setdefault(filepath, set()).add(str(in_index))
+
+        entries = self.cache_index.get("entries", {})
+        pruned = 0
+        for filepath, valid_keys in valid_keys_by_filepath.items():
+            entry = entries.get(filepath)
+            rows = entry.get("sourceless_rows") if isinstance(entry, dict) else None
+            if not isinstance(rows, dict):
+                continue
+            for key in [k for k in rows if k not in valid_keys]:
+                del rows[key]
+                pruned += 1
+        return pruned
+
     def _upgrade_sourceless_runtime_values(self, index_to_filepath: dict[int, str]) -> int:
         if not self.source_path_in_name:
             return 0
 
         upgraded = 0
+        remapped = 0
+        resolved_since_save = 0
+        last_save = time.monotonic()
         entries = self.cache_index.get("entries", {})
-        for group_key, indices in self.group_indices.items():
-            variations = int(self.group_variations.get(group_key, 1) or 1)
-            for in_index in indices:
-                filepath = index_to_filepath.get(in_index)
-                if filepath is None:
-                    continue
-                entry = entries.get(filepath)
-                if entry is None:
-                    continue
-                # Presence-gate BEFORE resolving: _set_entry_* walk the upstream
-                # pipeline, and the per-module memo only caches a single index,
-                # so resolving every index re-runs the whole chain. Skipping
-                # already-stamped entries here is what keeps this pass
-                # O(unstamped entries) for a one-time bake instead of
-                # O(dataset) on every epoch.
-                if self._sourceless_metadata_present(entry, in_index):
-                    continue
-                self._set_entry_sourceless_metadata(entry, variations, in_index)
-                self._set_entry_sourceless_runtime_values(entry, variations, in_index)
-                upgraded += 1
-        if upgraded:
+        total = sum(len(indices) for indices in self.group_indices.values())
+        with tqdm(total=total, smoothing=0.1, desc="updating sourceless metadata") as bar:
+            for group_key, indices in self.group_indices.items():
+                variations = int(self.group_variations.get(group_key, 1) or 1)
+                for in_index in indices:
+                    bar.update(1)
+                    filepath = index_to_filepath.get(in_index)
+                    if filepath is None:
+                        continue
+                    entry = entries.get(filepath)
+                    if entry is None:
+                        continue
+                    # Presence-gate BEFORE resolving: _set_entry_* walk the
+                    # upstream pipeline, and the per-module memo only caches a
+                    # single index, so resolving every index re-runs the whole
+                    # chain. Skipping already-stamped rows here keeps this
+                    # pass cheap for anything already baked.
+                    if self._sourceless_metadata_present(entry, in_index):
+                        continue
+
+                    # Rekey fast path: rows are stamped under their global
+                    # dataset position, so adding/removing files anywhere
+                    # shifts every later in_index and makes the whole dataset
+                    # look unstamped. Reuse the stamp filed under the old
+                    # index instead of re-walking the pipeline; only genuinely
+                    # new files take the slow resolve below.
+                    candidate = self._find_remappable_sourceless_row(entry, group_key, variations)
+                    if candidate is not None:
+                        metadata = dict(candidate["metadata"])
+                        metadata["source_index"] = int(in_index)
+                        entry["sourceless"] = metadata
+                        row = entry.setdefault("sourceless_rows", {}).setdefault(str(in_index), {})
+                        row["metadata"] = metadata
+                        row["runtime_values"] = copy.deepcopy(candidate.get("runtime_values"))
+                        if "concept_id" in candidate:
+                            row["concept_id"] = candidate["concept_id"]
+                        else:
+                            row.pop("concept_id", None)
+                        upgraded += 1
+                        remapped += 1
+                        continue
+
+                    self._set_entry_sourceless_metadata(entry, variations, in_index)
+                    self._set_entry_sourceless_runtime_values(entry, variations, in_index)
+                    upgraded += 1
+                    resolved_since_save += 1
+                    # Periodic flush so an interrupt doesn't discard a long
+                    # slow-path run. Gated on count AND elapsed time because
+                    # a save serializes the whole multi-MB index.
+                    if resolved_since_save >= 1000 and time.monotonic() - last_save >= 120:
+                        self._save_cache_index()
+                        resolved_since_save = 0
+                        last_save = time.monotonic()
+
+        # Prune AFTER the loop: the rekey fast path reads old-index rows.
+        pruned = self._prune_orphaned_sourceless_rows(index_to_filepath)
+        if remapped or pruned:
+            self._status(
+                f"sourceless metadata: {remapped} rows rekeyed after index shift, "
+                f"{upgraded - remapped} resolved, {pruned} stale rows pruned"
+            )
+        if upgraded or pruned:
             self._save_cache_index()
         return upgraded
 
