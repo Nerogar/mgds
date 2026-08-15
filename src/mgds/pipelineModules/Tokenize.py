@@ -26,6 +26,7 @@ class Tokenize(
             apply_chat_template: Callable | None = None,
             apply_chat_template_kwargs = {},
             expand_mask: int = 0,
+            padding_side: str | None = None,
     ):
         super(Tokenize, self).__init__()
         self.in_name = in_name
@@ -41,6 +42,9 @@ class Tokenize(
         # before the suffix instead of at the very end (mid-template padding, e.g. Krea 2)
         self.suffix_text = suffix_text
         self.expand_mask = expand_mask
+        # None leaves the tokenizer's own setting alone; pass it to override per call rather than mutating
+        # a tokenizer that is shared with the model's own encode path (Gemma wants "left")
+        self.padding_side = padding_side
 
         # fast tokenizers mutate shared Rust-side state (eg set_truncation_and_padding) on every
         # call, which isn't safe under concurrent use of the same tokenizer instance from multiple
@@ -84,6 +88,7 @@ class Tokenize(
                 truncation=True,
                 max_length=max_length,
                 return_tensors="pt",
+                **({} if self.padding_side is None else {'padding_side': self.padding_side}),
             )
 
             tokens = tokenizer_output.input_ids.to(self.pipeline.device)
