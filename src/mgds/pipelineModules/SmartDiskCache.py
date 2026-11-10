@@ -1,6 +1,7 @@
 import concurrent
 import contextlib
 import copy
+import errno
 import gc
 import hashlib
 import json
@@ -127,6 +128,16 @@ def _replace_retrying(src: str, dst: str, attempts: int = 8, delay: float = 0.05
             if attempt == attempts - 1:
                 raise
             time.sleep(delay * (2**attempt))
+
+
+# Windows' ERROR_TOO_MANY_LINKS: the file already has as many hard links as
+# the filesystem allows (1,023 on NTFS).
+_WINERROR_TOO_MANY_LINKS = 1142
+
+# Content reuse stops trying hard links for the rest of a refresh after this
+# many consecutive failures that are not "donor full" (a filesystem without
+# hard links fails every time).
+MAX_CONTENT_LINK_FAILURES = 8
 
 
 # Names Windows resolves to a device whatever the directory holds (with any
@@ -414,6 +425,14 @@ class SmartDiskCache(
         # the same bytes from disk. Cleared at the start and end of every
         # refresh so donor tensors don't outlive the build pass.
         self._content_reuse_memo: dict[str, dict] = {}
+        # What each memoized donor's file held when it was read: (donor .pt
+        # name, key order, repr of every non-tensor value). A recipient whose
+        # payload is exactly that is hard-linked to the donor instead of
+        # written again (see _try_content_reuse). Same lifetime as the memo.
+        self._content_donor_meta: dict[str, tuple[str, tuple, dict[str, str]]] = {}
+        # Consecutive failed link attempts this refresh (see
+        # MAX_CONTENT_LINK_FAILURES).
+        self._content_link_failures = 0
 
         # Memoized blank sentinel dict; _load_blank_sentinel fires on every
         # cache-miss get_item, which is per sample per epoch in the worst
@@ -1280,6 +1299,16 @@ class SmartDiskCache(
         current upstream walk before saving under this entry's name.
         Returns False on any inconsistency; the caller falls through to a
         normal encode.
+
+        When the refresh changes nothing (same concept and stamped values,
+        nothing to scrub), the copy would hold exactly what the donor's file
+        holds, so this entry's name is hard-linked to that file instead of
+        writing the bytes a second time. The link is safe because nothing
+        edits a cache file in place: every writer saves to a temporary name
+        and renames it over the target, which re-points that one name and
+        leaves the file the other names share untouched. Any link failure
+        (no hard-link support, the link limit, a vanished donor) falls back
+        to the copy; ``OT_SMARTCACHE_NO_HARDLINKS=1`` turns linking off.
         """
         if content_hash is None:
             return False
@@ -1309,7 +1338,13 @@ class SmartDiskCache(
             if not required.issubset(present):
                 return False
             self._content_reuse_memo[content_hash] = loaded
+            self.__dict__.setdefault("_content_donor_meta", {})[content_hash] = (
+                donor_name,
+                tuple(loaded),
+                {key: repr(value) for key, value in loaded.items() if not torch.is_tensor(value)},
+            )
             cache_data = loaded
+        donor_data = cache_data
         # Shallow copy per recipient: metadata refresh below must not leak
         # between recipients sharing the memoized donor payload.
         cache_data = dict(cache_data)
@@ -1322,6 +1357,28 @@ class SmartDiskCache(
 
         real_pt_path = os.path.join(self._real_cache_dir, pt_name)
         tmp_path = real_pt_path + f".{os.getpid()}.{threading.get_ident()}.tmp"
+
+        donor_full = False
+        if self._content_links_enabled() and self._is_donor_file_payload(
+            content_hash, donor_name, donor_data, cache_data
+        ):
+            try:
+                os.link(donor_path, tmp_path)
+                _replace_retrying(tmp_path, real_pt_path)
+            except OSError as error:
+                with contextlib.suppress(OSError):
+                    os.remove(tmp_path)
+                donor_full = error.errno == errno.EMLINK or getattr(error, "winerror", None) == _WINERROR_TOO_MANY_LINKS
+                if not donor_full and error.errno not in (errno.ENOENT, errno.EEXIST):
+                    self._content_link_failures = getattr(self, "_content_link_failures", 0) + 1
+            else:
+                # rename() does nothing when both names already are one file
+                # (POSIX) and then leaves the temporary name behind.
+                with contextlib.suppress(OSError):
+                    os.remove(tmp_path)
+                self._content_link_failures = 0
+                return True
+
         try:
             torch.save(cache_data, tmp_path)
             _replace_retrying(tmp_path, real_pt_path)
@@ -1329,6 +1386,59 @@ class SmartDiskCache(
             with contextlib.suppress(OSError):
                 os.remove(tmp_path)
             return False
+        if donor_full:
+            # The donor has as many links as the filesystem allows. This copy
+            # holds the same payload and takes over as the donor, so the next
+            # recipients link to it instead of each being written in full.
+            with self._index_lock:
+                self._existing_pt_files.add(pt_name)
+                self._content_index[content_hash] = pt_name
+                self._content_index_dirty = True
+                meta = self._content_donor_meta.get(content_hash)
+                if meta is not None:
+                    self._content_donor_meta[content_hash] = (pt_name, *meta[1:])
+        return True
+
+    def _content_links_enabled(self) -> bool:
+        if os.environ.get("OT_SMARTCACHE_NO_HARDLINKS") == "1":
+            return False
+        return getattr(self, "_content_link_failures", 0) < MAX_CONTENT_LINK_FAILURES
+
+    def _is_donor_file_payload(self, content_hash: str, donor_name: str, donor: dict, candidate: dict) -> bool:
+        """True when saving ``candidate`` would store exactly what the donor's
+        file holds, so that a hard link to the file is as good as the copy.
+
+        Judged against the snapshot taken when the donor was read (key order
+        and the repr of every non-tensor value, i.e. the version, model type,
+        content hash and every stamped concept / runtime value), not against
+        the memoized dict, whose nested values a refresh may have touched.
+        Tensors must be the donor's own objects; a scrubbed tensor is new and
+        only passes when the donor's was all zeros already. Anything unsure
+        answers False and the recipient is written as a copy.
+        """
+        meta = (getattr(self, "_content_donor_meta", None) or {}).get(content_hash)
+        if meta is None or meta[0] != donor_name:
+            return False
+        _, keys, reprs = meta
+        if tuple(candidate) != keys:
+            return False
+        for key, value in candidate.items():
+            if key in reprs:
+                if torch.is_tensor(value) or repr(value) != reprs[key]:
+                    return False
+                continue
+            other = donor.get(key)
+            if value is other:
+                continue
+            if not (
+                torch.is_tensor(value)
+                and torch.is_tensor(other)
+                and value.dtype == other.dtype
+                and value.shape == other.shape
+                and not bool(other.any())
+                and not bool(value.any())
+            ):
+                return False
         return True
 
     def _ensure_before_cache_called(self):
@@ -4513,6 +4623,8 @@ class SmartDiskCache(
         self._extra_paths_by_filepath = {}
         self._content_index_loaded = False
         self._content_reuse_memo = {}
+        self._content_donor_meta = {}
+        self._content_link_failures = 0
         self._blank_sentinel_memo = None
         self._before_cache_called = False
         indexed_entries = len(self.cache_index.get("entries", {}))
@@ -5352,6 +5464,7 @@ class SmartDiskCache(
         # Free memoized donor payloads — they're only useful within one
         # build pass and would otherwise hold tensors for the whole epoch.
         self._content_reuse_memo = {}
+        self._content_donor_meta = {}
 
         self._load_aggregate_cache(out_variation)
 
@@ -6141,11 +6254,25 @@ class SmartDiskCache(
 
         orphan_count = 0
         orphan_bytes = 0
+        # Names that are hard links of one file (content reuse links a
+        # duplicate caption to its donor) share their bytes: removing orphans
+        # frees them only when every name of the file is an orphan.
+        # (device, inode) -> [orphan names seen, link count, size]
+        linked: dict[tuple[int, int], list[int]] = {}
 
         for name, size in existing_pt_sizes.items():
             if name not in referenced_names:
                 orphan_count += 1
-                orphan_bytes += size
+                try:
+                    st = os.stat(os.path.join(cache_dir, name))
+                except OSError:
+                    st = None
+                if st is None or st.st_nlink <= 1 or not st.st_ino:
+                    orphan_bytes += size
+                else:
+                    linked.setdefault((st.st_dev, st.st_ino), [0, st.st_nlink, size])[0] += 1
+
+        orphan_bytes += sum(size for names, links, size in linked.values() if names >= links)
 
         return {"orphan_count": orphan_count, "orphan_bytes": orphan_bytes}
 
