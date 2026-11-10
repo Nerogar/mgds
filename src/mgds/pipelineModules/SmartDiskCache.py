@@ -782,6 +782,102 @@ class SmartDiskCache(
                 h.update(chunk)
         return h.hexdigest()
 
+    # Parallel pre-hash of files whose mtime changed (_prehash_changed_mtimes).
+    # The reads are large so that both the read and the xxhash update spend
+    # their time with the GIL released.
+    PREHASH_WORKERS = 4
+    PREHASH_CHUNK_BYTES = 1 << 20
+
+    def _validation_hash(self, path: str) -> str:
+        """``_hash_file(path)`` for the validation loop, served from the
+        current group's pre-hash when that covered ``path``."""
+        digest = (getattr(self, "_prehashed", None) or {}).get(path)
+        if digest is not None:
+            return digest
+        return self._hash_file(path)
+
+    def _prehash_changed_mtimes(self, filepaths) -> int:
+        """Hash in a thread pool what validating ``filepaths`` would hash one
+        file at a time on the main thread.
+
+        That is every source whose scanned mtime differs from the stored one
+        and, for entries whose source is unchanged, every recorded sidecar
+        whose mtime differs: a copy or sync that kept the bytes but not the
+        mtimes makes that the whole dataset. The digests equal ``_hash_file``'s
+        (xxh64 does not depend on the read size) and are handed to the loop by
+        ``_validation_hash``, so its decisions are the same. A file the pool
+        could not read is left to the loop, which fails on it as before.
+        Returns the number of digests taken.
+        """
+        self._prehashed: dict[str, str] = {}
+        entries = self.cache_index.get("entries", {})
+        mtimes = self._source_mtimes
+        watch_sidecars = bool(self.extra_watched_paths_in_names)
+
+        def changed_sidecars(entry: dict) -> list[str]:
+            stored = entry.get("sidecar_mtimes")
+            if not watch_sidecars or not isinstance(stored, dict) or entry.get("sidecar_hashes") is None:
+                return []
+            return [
+                path
+                for path, stored_mtime in stored.items()
+                if stored_mtime is not None and mtimes.get(path) not in (None, stored_mtime)
+            ]
+
+        changed_sources: list[str] = []
+        sidecars: set[str] = set()
+        for filepath in dict.fromkeys(filepaths):
+            entry = entries.get(filepath)
+            if not isinstance(entry, dict) or entry.get("modeltype") != self.modeltype:
+                continue
+            if entry.get("shared_file_conflict"):
+                continue
+            current = mtimes.get(filepath)
+            if current is None:
+                # No source to hash; its sidecars are only checked when a
+                # missing source is tolerated.
+                if self.tolerate_missing_source:
+                    sidecars.update(changed_sidecars(entry))
+            elif current == entry.get("mtime"):
+                sidecars.update(changed_sidecars(entry))
+            else:
+                changed_sources.append(filepath)
+
+        def hash_one(path: str) -> tuple[str, str | None]:
+            h = xxhash.xxh64()
+            try:
+                with open(path, "rb") as f:
+                    for chunk in iter(lambda: f.read(self.PREHASH_CHUNK_BYTES), b""):
+                        h.update(chunk)
+            except OSError:
+                return path, None
+            return path, h.hexdigest()
+
+        if len(changed_sources) + len(sidecars) < 2:
+            return 0
+
+        workers = max(1, min(self.PREHASH_WORKERS, os.cpu_count() or 1))
+        with (
+            concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool,
+            tqdm(total=len(changed_sources), smoothing=0.1, desc="hashing changed files") as bar,
+        ):
+            # Sources first: the loop only looks at the sidecars of an entry
+            # whose source still has its recorded content.
+            for path, digest in pool.map(hash_one, changed_sources):
+                if digest is not None:
+                    self._prehashed[path] = digest
+                    if digest == entries[path].get("hash"):
+                        sidecars.update(changed_sidecars(entries[path]))
+                bar.update(1)
+            todo = sorted(sidecars.difference(self._prehashed))
+            bar.total += len(todo)
+            bar.refresh()
+            for path, digest in pool.map(hash_one, todo):
+                if digest is not None:
+                    self._prehashed[path] = digest
+                bar.update(1)
+        return len(self._prehashed)
+
     def _hash_to_filename(self, full_hash: str) -> str:
         return full_hash[:12]
 
@@ -2148,7 +2244,7 @@ class SmartDiskCache(
                 return "incomplete_schema"
             return "valid"
 
-        file_hash = self._hash_file(filepath)
+        file_hash = self._validation_hash(filepath)
         if file_hash != entry["hash"]:
             return "content_changed"
 
@@ -4036,7 +4132,7 @@ class SmartDiskCache(
 
             # mtime drift — fall back to hashing.
             try:
-                current_hash = self._hash_file(path)
+                current_hash = self._validation_hash(path)
             except OSError:
                 return False
             if current_hash != stored_hash:
@@ -4638,6 +4734,16 @@ class SmartDiskCache(
             # variations afterwards.
             items_to_build_by_index: dict[int, tuple] = {}
 
+            # Files this group's loop would hash one at a time (mtime changed,
+            # content probably not) are hashed in parallel first; the loop
+            # then finds their digests in _validation_hash.
+            if not skip_validation:
+                self._prehash_changed_mtimes(
+                    index_to_filepath[in_index]
+                    for in_index in self.group_indices[group_key]
+                    if in_index in index_to_filepath
+                )
+
             with tqdm(total=len(self.group_indices[group_key]), smoothing=0.1, desc="validating cache") as bar:
                 for group_index, in_index in enumerate(self.group_indices[group_key]):
                     # Trust-mode early skip: avoid upstream pipeline calls
@@ -4802,6 +4908,9 @@ class SmartDiskCache(
                         resolution,
                     )
                     bar.update(1)
+
+            # The pre-hashed digests were for this group's loop only.
+            self._prehashed = {}
 
             # Parallel resolve pass: fill in the resolutions the loop above
             # deferred. Where the source headers give the exact decoded size
