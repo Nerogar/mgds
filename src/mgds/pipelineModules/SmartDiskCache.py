@@ -10,6 +10,7 @@ import random
 import shutil
 import threading
 import time
+import unicodedata
 from collections.abc import Callable
 from typing import Any
 
@@ -126,6 +127,57 @@ def _replace_retrying(src: str, dst: str, attempts: int = 8, delay: float = 0.05
             if attempt == attempts - 1:
                 raise
             time.sleep(delay * (2**attempt))
+
+
+# Names Windows resolves to a device whatever the directory holds (with any
+# extension on older versions).
+_DOS_DEVICE_NAMES = frozenset(
+    ["con", "prn", "aux", "nul", "conin$", "conout$", *(f"com{i}" for i in range(1, 10))]
+    + [f"lpt{i}" for i in range(1, 10)]
+)
+
+
+def _listing_key(name: str) -> str:
+    """A directory entry's name, folded so that an ASCII name any supported
+    filesystem would resolve to this entry has the same key.
+
+    ASCII names fold by case. Other names are upper-cased, compatibility-
+    decomposed and case-folded, which is at least as coarse as what NTFS, APFS
+    and HFS+ do when they match a name (dotless i and long s reach ASCII
+    through their upper case, the Kelvin sign through its decomposition).
+    Folding too much is harmless: a key that matches only sends the caller to
+    the filesystem.
+    """
+    if name.isascii():
+        return name.lower()
+    return unicodedata.normalize("NFKD", name.upper()).casefold()
+
+
+def _list_dir_keys(parent: str) -> set[str] | None:
+    """``_listing_key`` of every entry of ``parent``; None if it can't be listed."""
+    try:
+        with os.scandir(parent) as it:
+            return {_listing_key(e.name) for e in it}
+    except OSError:
+        return None
+
+
+def _listing_rules_out(name: str, keys: set[str] | None) -> bool:
+    """True when a listing of a directory proves it holds no file ``name``.
+
+    Only a plain name is ruled out this way: ASCII, not ending in a dot or a
+    space (Windows strips those), without ``~`` (8.3 short names) or ``:``
+    (streams), and not a DOS device name. Anything else, and any name whose
+    key the listing holds, is left to the filesystem, so the only answer that
+    can differ from asking it is for a file created after the listing.
+    """
+    if keys is None or not name or not name.isascii():
+        return False
+    if name[-1] in ". " or "~" in name or ":" in name:
+        return False
+    if name.split(".", 1)[0].rstrip(" ").lower() in _DOS_DEVICE_NAMES:
+        return False
+    return name.lower() not in keys
 
 
 @contextlib.contextmanager
@@ -453,6 +505,11 @@ class SmartDiskCache(
         # source files' parent dirs. Lookup replaces per-file os.path.getmtime
         # in _validate_entry.
         self._source_mtimes: dict[str, float] = {}
+        # parent dir -> listing keys of everything that same scan saw there
+        # (only kept when sidecars are watched). Lets _check_sidecars skip the
+        # failing stat of an optional sidecar that is not on disk. Dropped
+        # once a build starts and at the end of the refresh.
+        self._scanned_dir_keys: dict[str, set[str]] | None = None
         # Resolution variant key in use this session, per source filepath.
         # Set during validation/build; consulted by get_item and
         # _load_aggregate_cache to load the right variant's .pt. Empty for
@@ -1738,6 +1795,8 @@ class SmartDiskCache(
         keys: dict[int, str] = {}
         pairs: set[tuple[str, str]] = set()
         stamps_changed = False
+        # parent dir -> listing keys, taken on the first sidecar looked up there.
+        sidecar_dirs: dict[str, set[str] | None] = {}
         for group_key in self.group_variations:
             variations = self.group_variations[group_key]
             for in_index in self.group_indices[group_key]:
@@ -1763,7 +1822,7 @@ class SmartDiskCache(
                         return None, f"{filepath} has unstamped source resolutions"
                 stored_sidecars = entry.get("sidecar_mtimes") or {}
                 for sidecar in (self._extra_paths_by_filepath.get(filepath) or {}).values():
-                    if sidecar not in stored_sidecars and os.path.exists(sidecar):
+                    if sidecar not in stored_sidecars and self._sidecar_exists(sidecar, sidecar_dirs):
                         return None, f"{filepath} has an unrecorded sidecar"
                 before = self._resolution_stamp_token(entry)
                 resolution = self._fast_resolution_string(entry, out_variation, in_index)
@@ -1916,16 +1975,49 @@ class SmartDiskCache(
             pass
         return found
 
+    @staticmethod
+    def _sidecar_exists(path: str, listings: dict[str, set[str] | None]) -> bool:
+        """``os.path.exists(path)`` for an optional sidecar, without the failing
+        stat when its directory's listing proves it absent.
+
+        ``listings`` caches one listing per parent directory, taken on first
+        use. Whatever the listing can't rule out (see ``_listing_rules_out``)
+        is asked of the filesystem as before.
+        """
+        parent, name = os.path.split(path)
+        if parent not in listings:
+            listings[parent] = _list_dir_keys(parent)
+        if _listing_rules_out(name, listings[parent]):
+            return False
+        return os.path.exists(path)
+
+    def _scan_rules_out(self, path: str) -> bool:
+        """True when this refresh's bulk scan listed ``path``'s directory and
+        that listing proves the file absent (see ``_listing_rules_out``)."""
+        listings = getattr(self, "_scanned_dir_keys", None)
+        if not listings:
+            return False
+        parent, name = os.path.split(path)
+        return _listing_rules_out(name, listings.get(parent))
+
     def _bulk_stat_source_files(self, filepaths) -> dict[str, float]:
         """Parallel os.scandir per parent dir; returns {normpath: mtime}.
 
         Replaces N×os.path.getmtime syscalls with K×os.scandir (K = number of
         distinct parent dirs). Files that don't exist are simply absent from
         the returned dict (so callers must treat a missing key as "rebuild").
+
+        With watched sidecars, every name each fully listed directory holds is
+        also kept (``_scanned_dir_keys``), so ``_check_sidecars`` can tell an
+        optional sidecar is absent without a failing stat per file.
         """
         by_parent: dict[str, set[str]] = {}
         for fp in filepaths:
             by_parent.setdefault(os.path.dirname(fp), set()).add(os.path.basename(fp))
+
+        keep_listings = bool(getattr(self, "extra_watched_paths_in_names", None))
+        listings: dict[str, set[str]] = {}
+        self._scanned_dir_keys = listings
 
         if not by_parent:
             return {}
@@ -1935,17 +2027,23 @@ class SmartDiskCache(
 
         def scan_one(parent: str, names: set[str]):
             local: dict[str, float] = {}
+            seen: set[str] | None = set() if keep_listings else None
             try:
                 with os.scandir(parent) as it:
                     for e in it:
+                        if seen is not None:
+                            seen.add(_listing_key(e.name))
                         if e.name in names:
                             with contextlib.suppress(OSError):
                                 local[os.path.normpath(os.path.join(parent, e.name))] = e.stat().st_mtime
             except OSError:
-                pass
-            if local:
+                # A listing that broke off proves nothing about what it lacks.
+                seen = None
+            if local or seen is not None:
                 with lock:
                     mtimes.update(local)
+                    if seen is not None:
+                        listings[parent] = seen
 
         futures = [self._state.executor.submit(scan_one, p, n) for p, n in by_parent.items()]
         for f in futures:
@@ -3911,7 +4009,9 @@ class SmartDiskCache(
         watched_paths = set(expected_paths.values())
         for path in watched_paths | set(stored_mtimes.keys()):
             current_mtime = self._source_mtimes.get(path)
-            if current_mtime is None:
+            # A sidecar the bulk scan's listing proves absent needs no stat
+            # that would only fail; every other miss is asked as before.
+            if current_mtime is None and not self._scan_rules_out(path):
                 try:
                     current_mtime = os.path.getmtime(path)
                 except OSError:
@@ -4510,6 +4610,7 @@ class SmartDiskCache(
             self._source_mtimes = self._bulk_stat_source_files(required_filepaths | required_sidecar_paths)
         else:
             self._source_mtimes = {}
+            self._scanned_dir_keys = None
 
         # Clear fast-validation token during full validation. Preserved under
         # trust mode: a trust run neither verifies nor invalidates source
@@ -4739,6 +4840,11 @@ class SmartDiskCache(
             if not items_to_build:
                 continue
 
+            # The scan's directory listings are only trusted while they are
+            # fresh: a build can run for hours, so the groups validated after
+            # it stat a missing sidecar themselves again.
+            self._scanned_dir_keys = None
+
             # Builds, dedups and failures all change the index. Claim the
             # role marker before the first periodic flush can persist .pt
             # writes, so other roles re-check schemas even after a crash.
@@ -4944,6 +5050,8 @@ class SmartDiskCache(
                     finally:
                         if ab is not None and target is not None:
                             ab._target_override = prev_override
+
+        self._scanned_dir_keys = None
 
         if header_mismatches:
             # The build keyed these by a header size the decode disagreed with.
