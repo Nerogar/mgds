@@ -192,7 +192,7 @@ def _listing_rules_out(name: str, keys: set[str] | None) -> bool:
 
 
 @contextlib.contextmanager
-def _gc_heap_frozen():
+def _gc_heap_frozen(collect_first: bool = False):
     """Keep everything alive right now out of a build loop's forced collections.
 
     The build loops call ``_torch_gc()`` every 250 items, and each of those
@@ -209,8 +209,15 @@ def _gc_heap_frozen():
     (OneTrainer freezes at every epoch start and thaws at the next one and at
     the end of the run), and thawing here would undo its freeze. The objects
     added here then stay frozen until the host's next ``gc.unfreeze()``.
+
+    ``collect_first`` runs one full collection before freezing, so that
+    garbage which is already dead (left by whatever ran before the loop, a
+    model load for instance) is released instead of being parked along with
+    the live objects for as long as the loop runs.
     """
     host_frozen = gc.get_freeze_count() > 0
+    if collect_first:
+        gc.collect()
     gc.freeze()
     try:
         yield
@@ -3245,7 +3252,7 @@ class SmartDiskCache(
         # Frozen for the same reason as the build loop: the index is loaded
         # and the periodic _torch_gc below would re-walk it every 250 items.
         with (
-            _gc_heap_frozen(),
+            self._frozen_loop_heap(),
             tqdm(total=len(augment_items), smoothing=0.1, desc="augmenting cache") as bar,
         ):
             fs = [self._state.executor.submit(fn, fp, idx, var, current_device) for fp, idx, var in augment_items]
@@ -3288,6 +3295,17 @@ class SmartDiskCache(
                 print(f"  augment failed: {fp}: {reason}")
             if len(failed) > 10:
                 print(f"  ... and {len(failed) - 10} more")
+
+    def _frozen_loop_heap(self):
+        """``_gc_heap_frozen`` for one of this refresh's build or augment loops.
+
+        The first loop of a refresh collects before it freezes; the loops
+        after it (one per group) only freeze, since each full collection
+        walks the whole index again.
+        """
+        collect_first = not getattr(self, "_refresh_heap_collected", False)
+        self._refresh_heap_collected = True
+        return _gc_heap_frozen(collect_first)
 
     def _fast_validate(self, required_filepaths=None, token: dict | None = None) -> bool:
         """Fast validation: per-watched-file directory fingerprint + random spot check.
@@ -4602,6 +4620,7 @@ class SmartDiskCache(
 
         self._index_dirty = False
         self._epoch_keys = None
+        self._refresh_heap_collected = False
 
         # Reload the index from disk only when we don't hold one yet or the
         # file changed under us (external writer, e.g. gc from another run).
@@ -5199,7 +5218,7 @@ class SmartDiskCache(
             # collection every 250 items. Frozen for the duration of this
             # group's build, those collections skip it (see _gc_heap_frozen).
             with (
-                _gc_heap_frozen(),
+                self._frozen_loop_heap(),
                 build_pool_ctx as build_executor,
                 tqdm(total=len(unique_items), smoothing=0.1, desc="caching") as bar,
             ):

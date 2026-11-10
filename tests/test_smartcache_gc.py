@@ -299,3 +299,68 @@ def test_a_corrupt_index_still_falls_back_and_resumes_the_collector(tmp_path, _c
 
     assert gc.isenabled()
     assert recovered["entries"].keys() == good["entries"].keys()
+
+
+# ---------------------------------------------------------------------------
+# One collection before the first freeze of a refresh
+# ---------------------------------------------------------------------------
+
+
+def _dead_cycle() -> weakref.ref:
+    """A reference cycle that is already garbage but not collected yet."""
+    was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        a, b = _Node(), _Node()
+        a.other, b.other = b, a
+        return weakref.ref(a)
+    finally:
+        if was_enabled:
+            gc.enable()
+
+
+def test_collect_first_releases_dead_garbage_instead_of_freezing_it():
+    ref = _dead_cycle()
+    with _gc_heap_frozen(collect_first=True):
+        assert ref() is None
+
+
+def test_without_collect_first_dead_garbage_waits_for_the_thaw():
+    was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        ref = _dead_cycle()
+        with _gc_heap_frozen():
+            gc.collect()
+            assert ref() is not None
+        gc.collect()
+        assert ref() is None
+    finally:
+        if was_enabled:
+            gc.enable()
+
+
+def test_only_the_first_loop_of_a_refresh_collects(tmp_path, monkeypatch):
+    import mgds.pipelineModules.SmartDiskCache as sdc_module
+
+    seen: list[bool] = []
+    real = sdc_module._gc_heap_frozen
+
+    def recording(collect_first: bool = False):
+        seen.append(collect_first)
+        return real(collect_first)
+
+    monkeypatch.setattr(sdc_module, "_gc_heap_frozen", recording)
+
+    cache = SmartDiskCache.__new__(SmartDiskCache)
+    for _ in range(3):
+        with cache._frozen_loop_heap():
+            pass
+    assert seen == [True, False, False]
+
+    # A real refresh starts over: its first build loop collects again.
+    seen.clear()
+    ds, cache = _pipeline(tmp_path, _sources(tmp_path, 3), ["latent"])
+    ds.start_next_epoch()
+    assert seen == [True]
+    assert gc.get_freeze_count() == 0
