@@ -1,7 +1,9 @@
 """Re-hashing after an mtime change: the files the validation loop would hash
 one by one are hashed in a thread pool first, with the same digests and the
-same decisions."""
+same decisions, and a source whose length differs from the recorded one is
+not hashed at all."""
 
+import json
 import os
 import sys
 import threading
@@ -270,3 +272,168 @@ def test_pre_hashed_digests_are_dropped_after_the_group(tmp_path):
     ds.start_next_epoch()
     cache = next(module for module in ds.loading_pipeline.modules if isinstance(module, SmartDiskCache))
     assert cache._prehashed == {}
+
+
+# ---------------------------------------------------------------------------
+# Recorded source size: a different length settles "changed" without a hash
+# ---------------------------------------------------------------------------
+
+
+def _write_cache_json(cache_dir: str, index: dict) -> None:
+    with open(os.path.join(cache_dir, "cache.json"), "w", encoding="utf-8") as f:
+        json.dump(index, f)
+
+
+def _rewrite(path: str, content: bytes, mtime: int = LATER) -> None:
+    with open(path, "wb") as f:
+        f.write(content)
+    os.utime(path, (mtime, mtime))
+
+
+def test_new_entries_record_the_size_of_what_was_hashed(tmp_path):
+    paths, _masks, build = _mask_dataset(tmp_path)
+    ds, cache_dir, _ = build()
+    _drain(ds)
+
+    entries = _read_cache_json(cache_dir)["entries"]
+    for path in paths:
+        entry = entries[os.path.normpath(path)]
+        assert entry["size"] == os.path.getsize(path)
+        assert entry["size_hash"] == entry["hash"]
+
+
+def test_a_different_length_is_changed_without_a_validation_hash(tmp_path, capsys, monkeypatch):
+    paths, _masks, build = _mask_dataset(tmp_path)
+    ds, cache_dir, _ = build()
+    _drain(ds)
+    _rewrite(paths[1], b"a source of another length")
+    _rewrite(paths[2], b"SRC_2")  # same length as before
+    capsys.readouterr()
+
+    ds, _, _ = build()
+    hashed = _count_hash_calls(monkeypatch)
+    statuses = _record_statuses(monkeypatch)
+    _drain(ds)
+
+    assert "Cached 2/6 files. 4 reused from cache." in capsys.readouterr().out
+    assert statuses["i1.bin"] == "content_changed" and statuses["i2.bin"] == "content_changed"
+    # i1: hashed once, by its rebuild. i2: by validation (same length) and by its rebuild.
+    assert hashed.count(os.path.normpath(paths[1])) == 1
+    assert hashed.count(os.path.normpath(paths[2])) == 2
+    entry = _read_cache_json(cache_dir)["entries"][os.path.normpath(paths[1])]
+    assert entry["size"] == len(b"a source of another length")
+    assert entry["size_hash"] == entry["hash"]
+
+
+def test_an_entry_without_a_size_is_hashed_as_before(tmp_path, capsys, monkeypatch):
+    paths, _masks, build = _mask_dataset(tmp_path)
+    ds, cache_dir, _ = build()
+    _drain(ds)
+    index = _read_cache_json(cache_dir)
+    for entry in index["entries"].values():
+        del entry["size"], entry["size_hash"]
+    _write_cache_json(cache_dir, index)
+    _rewrite(paths[1], b"a source of another length")
+    os.utime(paths[4], (LATER, LATER))
+    capsys.readouterr()
+
+    ds, _, _ = build()
+    prehashed = _record_prehashed(monkeypatch)
+    statuses = _record_statuses(monkeypatch)
+    _drain(ds)
+
+    assert statuses["i1.bin"] == "content_changed" and statuses["i4.bin"] == "valid"
+    # No recorded size: the rewritten source is read to find out, as before.
+    assert "i1.bin" in prehashed[0]
+    entries = _read_cache_json(cache_dir)["entries"]
+    # Validated by a pool hash: the touched entry now carries its size.
+    touched = entries[os.path.normpath(paths[4])]
+    assert touched["size"] == os.path.getsize(paths[4]) and touched["size_hash"] == touched["hash"]
+    # Untouched legacy entries stay as they were.
+    assert "size" not in entries[os.path.normpath(paths[0])]
+
+
+def test_a_size_left_behind_by_an_older_writer_is_ignored(tmp_path, capsys, monkeypatch):
+    paths, _masks, build = _mask_dataset(tmp_path)
+    ds, cache_dir, _ = build()
+    _drain(ds)
+    # An older mgds that rebuilt this entry replaced its hash and knew nothing
+    # of the size next to it: the size no longer belongs to the hash.
+    index = _read_cache_json(cache_dir)
+    key = os.path.normpath(paths[3])
+    index["entries"][key]["size"] += 100
+    index["entries"][key]["size_hash"] = "0" * 16
+    _write_cache_json(cache_dir, index)
+    os.utime(paths[3], (LATER, LATER))
+    os.utime(paths[0], (LATER, LATER))
+    capsys.readouterr()
+
+    ds, _, _ = build()
+    statuses = _record_statuses(monkeypatch)
+    _drain(ds)
+
+    assert statuses["i3.bin"] == "valid"
+    assert "Cached 0/6 files. 6 reused from cache." in capsys.readouterr().out
+    entry = _read_cache_json(cache_dir)["entries"][key]
+    assert entry["size"] == os.path.getsize(paths[3]) and entry["size_hash"] == entry["hash"]
+
+
+def test_the_scanned_size_is_only_a_hint(tmp_path, monkeypatch):
+    sdc = _bare_cache(watched=())
+    path = os.path.normpath(_create_source_file(tmp_path, "a.bin", b"twelve bytes"))
+    entry = _entry(sdc, path, mtime=1.0)
+    SmartDiskCache._stamp_hashed_size(entry, entry["hash"], 12)
+
+    stats: list[str] = []
+    real_stat = os.stat
+
+    def stat(target, *args, **kwargs):
+        stats.append(str(target))
+        return real_stat(target, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", stat)
+
+    # No scan, or a scan that agrees: nothing is ruled out and nothing is asked.
+    assert sdc._size_rules_out_recorded_content(path, entry) is False
+    sdc._source_sizes = {path: 12}
+    assert sdc._size_rules_out_recorded_content(path, entry) is False
+    assert stats == []
+
+    # A directory entry lagging behind the file (NTFS hard links): the scan
+    # disagrees, the file itself does not, so the content is still hashed.
+    sdc._source_sizes = {path: 5}
+    assert sdc._size_rules_out_recorded_content(path, entry) is False
+    assert stats == [path]
+
+    # The file itself has another length: ruled out.
+    monkeypatch.undo()
+    with open(path, "wb") as f:
+        f.write(b"short")
+    assert sdc._size_rules_out_recorded_content(path, entry) is True
+    # ... unless it cannot be read at all: then the hash fails on it as before.
+    os.remove(path)
+    assert sdc._size_rules_out_recorded_content(path, entry) is False
+
+
+def test_recorded_size_needs_a_matching_hash_and_a_plain_int():
+    entry = {"hash": "abc", "size": 10, "size_hash": "abc"}
+    assert SmartDiskCache._recorded_size(entry) == 10
+    assert SmartDiskCache._recorded_size({**entry, "size_hash": "other"}) is None
+    assert SmartDiskCache._recorded_size({"hash": "abc", "size": 10}) is None
+    assert SmartDiskCache._recorded_size({**entry, "size": "10"}) is None
+    assert SmartDiskCache._recorded_size({**entry, "size": True}) is None
+    assert SmartDiskCache._recorded_size({**entry, "size": -1}) is None
+    assert SmartDiskCache._recorded_size({"size": 10, "size_hash": None}) is None
+
+    SmartDiskCache._stamp_hashed_size(entry, "def", None)
+    assert "size" not in entry and "size_hash" not in entry
+
+
+def test_a_file_that_changed_while_it_was_hashed_gets_no_size(tmp_path):
+    path = _create_source_file(tmp_path, "a.bin", b"first")
+    before = os.stat(path)
+    assert SmartDiskCache._unchanged_size(path, before) == 5
+    _rewrite(path, b"second version")
+    assert SmartDiskCache._unchanged_size(path, before) is None
+    os.remove(path)
+    assert SmartDiskCache._unchanged_size(path, before) is None

@@ -796,6 +796,68 @@ class SmartDiskCache(
             return digest
         return self._hash_file(path)
 
+    @staticmethod
+    def _stamp_hashed_size(entry: dict, file_hash: str, size: int | None) -> None:
+        """Record on ``entry`` the length of the content ``file_hash`` was
+        taken from (or drop the record when that length is not known).
+
+        ``size_hash`` names the hash the size belongs to. A writer that knows
+        nothing of these fields (an older mgds) replaces ``hash`` and leaves
+        them behind; the mismatch then voids the size instead of letting it
+        speak for content it was not measured on.
+        """
+        if size is None:
+            entry.pop("size", None)
+            entry.pop("size_hash", None)
+        else:
+            entry["size"] = int(size)
+            entry["size_hash"] = file_hash
+
+    @staticmethod
+    def _recorded_size(entry: dict) -> int | None:
+        """Length of the content ``entry['hash']`` was taken from, if recorded."""
+        size = entry.get("size")
+        if type(size) is not int or size < 0:
+            return None
+        file_hash = entry.get("hash")
+        if not file_hash or entry.get("size_hash") != file_hash:
+            return None
+        return size
+
+    @staticmethod
+    def _unchanged_size(filepath: str, before: os.stat_result) -> int | None:
+        """The file's size if it still has the size and mtime of ``before``
+        (a stat taken before it was hashed), else None: only then is that
+        size the length of what was hashed."""
+        try:
+            after = os.stat(filepath)
+        except OSError:
+            return None
+        if (after.st_size, after.st_mtime_ns) != (before.st_size, before.st_mtime_ns):
+            return None
+        return before.st_size
+
+    def _size_rules_out_recorded_content(self, filepath: str, entry: dict) -> bool:
+        """True when ``filepath`` is not as long as the content ``entry`` was
+        hashed from, which settles "content changed" without reading it.
+
+        Entries without a recorded size (every cache built before sizes were
+        recorded) are never ruled out and hash as before. The bulk scan's
+        size is only a hint, since it comes from the directory entry, which
+        NTFS can leave behind the file itself (it is updated per hard link):
+        a stat of the file decides.
+        """
+        size = self._recorded_size(entry)
+        if size is None:
+            return False
+        scanned = (getattr(self, "_source_sizes", None) or {}).get(filepath)
+        if scanned is None or scanned == size:
+            return False
+        try:
+            return os.stat(filepath).st_size != size
+        except OSError:
+            return False
+
     def _prehash_changed_mtimes(self, filepaths) -> int:
         """Hash in a thread pool what validating ``filepaths`` would hash one
         file at a time on the main thread.
@@ -810,8 +872,11 @@ class SmartDiskCache(
         Returns the number of digests taken.
         """
         self._prehashed: dict[str, str] = {}
+        # path -> bytes read for its digest (stamped as the entry's size).
+        self._prehashed_sizes: dict[str, int] = {}
         entries = self.cache_index.get("entries", {})
         mtimes = self._source_mtimes
+        sizes = getattr(self, "_source_sizes", None) or {}
         watch_sidecars = bool(self.extra_watched_paths_in_names)
 
         def changed_sidecars(entry: dict) -> list[str]:
@@ -841,17 +906,25 @@ class SmartDiskCache(
             elif current == entry.get("mtime"):
                 sidecars.update(changed_sidecars(entry))
             else:
+                recorded = self._recorded_size(entry)
+                if recorded is not None and sizes.get(filepath, recorded) != recorded:
+                    # Its length differs from the recorded one: the loop
+                    # settles that without a hash (see
+                    # _size_rules_out_recorded_content).
+                    continue
                 changed_sources.append(filepath)
 
-        def hash_one(path: str) -> tuple[str, str | None]:
+        def hash_one(path: str) -> tuple[str, str | None, int]:
             h = xxhash.xxh64()
+            read = 0
             try:
                 with open(path, "rb") as f:
                     for chunk in iter(lambda: f.read(self.PREHASH_CHUNK_BYTES), b""):
                         h.update(chunk)
+                        read += len(chunk)
             except OSError:
-                return path, None
-            return path, h.hexdigest()
+                return path, None, read
+            return path, h.hexdigest(), read
 
         if len(changed_sources) + len(sidecars) < 2:
             return 0
@@ -863,16 +936,17 @@ class SmartDiskCache(
         ):
             # Sources first: the loop only looks at the sidecars of an entry
             # whose source still has its recorded content.
-            for path, digest in pool.map(hash_one, changed_sources):
+            for path, digest, read in pool.map(hash_one, changed_sources):
                 if digest is not None:
                     self._prehashed[path] = digest
+                    self._prehashed_sizes[path] = read
                     if digest == entries[path].get("hash"):
                         sidecars.update(changed_sidecars(entries[path]))
                 bar.update(1)
             todo = sorted(sidecars.difference(self._prehashed))
             bar.total += len(todo)
             bar.refresh()
-            for path, digest in pool.map(hash_one, todo):
+            for path, digest, _read in pool.map(hash_one, todo):
                 if digest is not None:
                     self._prehashed[path] = digest
                 bar.update(1)
@@ -2114,6 +2188,10 @@ class SmartDiskCache(
         keep_listings = bool(getattr(self, "extra_watched_paths_in_names", None))
         listings: dict[str, set[str]] = {}
         self._scanned_dir_keys = listings
+        # {normpath: size in bytes}, from the same stat as the mtime. Only a
+        # hint (see _size_rules_out_recorded_content).
+        sizes: dict[str, int] = {}
+        self._source_sizes = sizes
 
         if not by_parent:
             return {}
@@ -2123,6 +2201,7 @@ class SmartDiskCache(
 
         def scan_one(parent: str, names: set[str]):
             local: dict[str, float] = {}
+            local_sizes: dict[str, int] = {}
             seen: set[str] | None = set() if keep_listings else None
             try:
                 with os.scandir(parent) as it:
@@ -2131,13 +2210,17 @@ class SmartDiskCache(
                             seen.add(_listing_key(e.name))
                         if e.name in names:
                             with contextlib.suppress(OSError):
-                                local[os.path.normpath(os.path.join(parent, e.name))] = e.stat().st_mtime
+                                stat = e.stat()
+                                path = os.path.normpath(os.path.join(parent, e.name))
+                                local[path] = stat.st_mtime
+                                local_sizes[path] = stat.st_size
             except OSError:
                 # A listing that broke off proves nothing about what it lacks.
                 seen = None
             if local or seen is not None:
                 with lock:
                     mtimes.update(local)
+                    sizes.update(local_sizes)
                     if seen is not None:
                         listings[parent] = seen
 
@@ -2244,11 +2327,19 @@ class SmartDiskCache(
                 return "incomplete_schema"
             return "valid"
 
+        # A file whose length differs from the content the entry was hashed
+        # from cannot hold the same bytes: no need to read it to find out.
+        if self._size_rules_out_recorded_content(filepath, entry):
+            return "content_changed"
+
         file_hash = self._validation_hash(filepath)
         if file_hash != entry["hash"]:
             return "content_changed"
 
         entry["mtime"] = current_mtime
+        hashed_size = (getattr(self, "_prehashed_sizes", None) or {}).get(filepath)
+        if hashed_size is not None:
+            self._stamp_hashed_size(entry, file_hash, hashed_size)
         self._index_dirty = True
 
         if not self._check_sidecars(filepath, entry):
@@ -3201,6 +3292,7 @@ class SmartDiskCache(
         variations: int,
         dedup_key: str | None = None,
         sidecar_state: tuple[dict[str, float], dict[str, str]] | None = None,
+        source_size: int | None = None,
     ) -> bool:
         """Reuse an existing entry's variant when content+resolution match.
 
@@ -3253,6 +3345,7 @@ class SmartDiskCache(
                         "sidecar_hashes": sidecar_hashes,
                         "sourceless": self._sourceless_metadata(in_index, variations),
                     }
+                    self._stamp_hashed_size(target_entry, file_hash, source_size)
                     row = target_entry.setdefault("sourceless_rows", {}).setdefault(str(in_index), {})
                     row["metadata"] = target_entry["sourceless"]
                     # Always set runtime_values (even {}); key presence is the
@@ -3778,6 +3871,7 @@ class SmartDiskCache(
         current_device,
         dedup_key: str | None = None,
         sidecar_state: tuple[dict[str, float], dict[str, str]] | None = None,
+        source_size: int | None = None,
     ):
         # The file is named after what it holds: source bytes plus sidecars
         # (see _dedup_key), so pairs that share a chosen image but not a
@@ -3947,6 +4041,7 @@ class SmartDiskCache(
                     "sidecar_mtimes": sidecar_mtimes,
                     "sidecar_hashes": sidecar_hashes,
                 }
+                self._stamp_hashed_size(entry, file_hash, source_size)
                 if original_resolution is not None:
                     entry["original_resolution"] = original_resolution
                 if source_resolutions:
@@ -3966,6 +4061,7 @@ class SmartDiskCache(
                 # Refresh metadata; the source content may have changed and
                 # been re-hashed since this entry was first created.
                 entry["hash"] = file_hash
+                self._stamp_hashed_size(entry, file_hash, source_size)
                 entry["dedup_key"] = dedup_key
                 entry.pop("shared_file_conflict", None)
                 entry["mtime"] = mtime
@@ -4911,6 +5007,7 @@ class SmartDiskCache(
 
             # The pre-hashed digests were for this group's loop only.
             self._prehashed = {}
+            self._prehashed_sizes = {}
 
             # Parallel resolve pass: fill in the resolutions the loop above
             # deferred. Where the source headers give the exact decoded size
@@ -5009,8 +5106,12 @@ class SmartDiskCache(
                     if torch.cuda.is_available() and current_device is not None:
                         torch.cuda.set_device(current_device)
 
+                    # Length of what gets hashed below, recorded on the entry
+                    # next to the hash; None when it can't be vouched for.
+                    source_size = None
                     try:
-                        mtime = os.path.getmtime(filepath)
+                        source_stat = os.stat(filepath)
+                        mtime = source_stat.st_mtime
                     except OSError:
                         if not self.tolerate_missing_source:
                             return filepath, "missing"
@@ -5026,6 +5127,7 @@ class SmartDiskCache(
                             file_hash = self._hash_file(filepath)
                         except OSError:
                             return filepath, "hash_failed"
+                        source_size = self._unchanged_size(filepath, source_stat)
 
                     # Sidecars (a pair's rejected image, masks) are hashed once
                     # here: they are part of the identity the file is named and
@@ -5042,6 +5144,7 @@ class SmartDiskCache(
                         variations,
                         dedup_key=dedup_key,
                         sidecar_state=sidecar_state,
+                        source_size=source_size,
                     ):
                         entry = self.cache_index["entries"][filepath]
                         key = self._resolution_key(resolution)
@@ -5065,6 +5168,7 @@ class SmartDiskCache(
                             current_device,
                             dedup_key=dedup_key,
                             sidecar_state=sidecar_state,
+                            source_size=source_size,
                         )
                     except Exception as e:
                         return filepath, f"build_failed: {e}"
