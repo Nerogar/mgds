@@ -4154,19 +4154,34 @@ class SmartDiskCache(
         self._source_path_cache = dict(enumerate(self._sourceless_filepaths))
 
         self._aggregate_cache = {}
-        if self.aggregate_names:
-            self._load_aggregate_cache(self.current_variation if self.current_variation >= 0 else 0)
+        if not self.aggregate_names:
+            return None
+        # Reported to __refresh_cache_sourceless: the variation whose aggregate
+        # values this load took from index metadata alone, else None.
+        variation = self.current_variation if self.current_variation >= 0 else 0
+        return variation if self._load_aggregate_cache(variation) else None
 
     def __refresh_cache_sourceless(self, out_variation: int):
+        index_only_variation = None
         if not self.variations_initialized:
             self._status(f"loading sourceless cache index from {self.cache_dir}")
-            self.__init_sourceless()
+            index_only_variation = self.__init_sourceless()
             self._status(
                 f"sourceless cache ready "
                 f"({len(self.cache_index.get('entries', {}))} indexed entries, "
                 f"{sum(self.group_output_samples.values())} output samples)"
             )
+        indices_before = dict(self.group_indices)
         self.__reshuffle_samples(out_variation)
+        if index_only_variation == out_variation and self.group_indices == indices_before:
+            # The init above has just loaded the aggregate values of this very
+            # variation over these very rows, and took all of them from index
+            # metadata: it read no cache file and stamped nothing. A second
+            # load would recompute the same values from the same inputs, so
+            # the first is kept. (Any other case reloads below, as before: a
+            # load that had to read cache files stamps the index, which the
+            # reload then serves from; a SAMPLES group changes the rows.)
+            return
         self._aggregate_cache = {}
         if self.aggregate_names:
             self._status(f"preloading aggregate values for epoch {out_variation}")
@@ -5230,9 +5245,15 @@ class SmartDiskCache(
                 return None
         return agg_data
 
-    def _load_aggregate_cache(self, out_variation: int):
+    def _load_aggregate_cache(self, out_variation: int) -> bool:
+        """Fill ``_aggregate_cache`` for ``out_variation``.
+
+        Returns True when every row was synthesized from index metadata: no
+        cache file was read, so no variant was lazily stamped from one and the
+        index was not saved.
+        """
         if not self.aggregate_names:
-            return
+            return False
 
         # Aggregates that vary per resolution variant (most importantly
         # ``crop_resolution`` — consumed by AspectBatchSorting to form
@@ -5314,7 +5335,7 @@ class SmartDiskCache(
                     bar.update(1)
             if not slow_items:
                 self._status("aggregate cache ready")
-                return
+                return True
             load_items = slow_items
             self._status(f"{len(load_items)} aggregate rows need tensor reads")
 
@@ -5404,6 +5425,7 @@ class SmartDiskCache(
             # torch.load on every entry.
             self._save_cache_index()
         self._status("aggregate cache ready")
+        return False
 
     def start(self, out_variation: int):
         if self.sourceless:
