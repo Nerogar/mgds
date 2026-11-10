@@ -1,15 +1,18 @@
 """SmartDiskCache and the cyclic garbage collector: the heap is frozen for the
 build loops (so their forced collections skip the loaded index) and thawed
-again afterwards."""
+again afterwards, and the collector is paused while cache.json is parsed or
+serialized."""
 
 import gc
+import json
 import os
+import threading
 import weakref
 
 from mgds.MGDS import MGDS
 from mgds.OutputPipelineModule import OutputPipelineModule
 from mgds.PipelineModule import PipelineModule, PipelineState
-from mgds.pipelineModules.SmartDiskCache import SmartDiskCache, _gc_heap_frozen
+from mgds.pipelineModules.SmartDiskCache import SmartDiskCache, _gc_heap_frozen, _gc_paused
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
 
 import torch
@@ -188,3 +191,111 @@ def test_augment_loop_runs_frozen_and_leaves_the_heap_thawed(tmp_path):
     first = next(iter(cache.cache_index["entries"].values()))
     cache_file = next(iter(first["variants"].values()))["cache_file"]
     assert "extra" in torch.load(os.path.join(tmp_path / "cache", f"{cache_file}_1.pt"), weights_only=False)
+
+
+# ---------------------------------------------------------------------------
+# Collector paused around the cache.json parse and dump
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def _collector_enabled():
+    was_enabled = gc.isenabled()
+    gc.enable()
+    yield
+    if was_enabled:
+        gc.enable()
+    else:
+        gc.disable()
+
+
+def test_pause_restores_an_enabled_collector(_collector_enabled):
+    with _gc_paused():
+        assert not gc.isenabled()
+    assert gc.isenabled()
+
+
+def test_pause_restores_after_an_error(_collector_enabled):
+    with pytest.raises(ValueError), _gc_paused():
+        raise ValueError("bad index")
+    assert gc.isenabled()
+
+
+def test_pause_leaves_a_disabled_collector_disabled(_collector_enabled):
+    gc.disable()
+    with _gc_paused():
+        assert not gc.isenabled()
+    assert not gc.isenabled()
+
+
+def test_nested_pauses_resume_only_after_the_outermost(_collector_enabled):
+    with _gc_paused():
+        with _gc_paused():
+            assert not gc.isenabled()
+        assert not gc.isenabled()
+    assert gc.isenabled()
+
+
+def test_overlapping_pauses_in_two_threads_resume_after_the_last(_collector_enabled):
+    inside = threading.Event()
+    release = threading.Event()
+
+    def hold():
+        with _gc_paused():
+            inside.set()
+            release.wait(timeout=10)
+
+    thread = threading.Thread(target=hold)
+    thread.start()
+    assert inside.wait(timeout=10)
+    with _gc_paused():
+        pass
+    # The other thread is still inside its block.
+    assert not gc.isenabled()
+    release.set()
+    thread.join(timeout=10)
+    assert gc.isenabled()
+
+
+def test_index_parse_and_dump_run_with_the_collector_paused(tmp_path, monkeypatch, _collector_enabled):
+    ds, cache = _pipeline(tmp_path, _sources(tmp_path, 3), ["latent"])
+    ds.start_next_epoch()
+
+    states: dict[str, list[bool]] = {"load": [], "dumps": []}
+    real_load, real_dumps = json.load, json.dumps
+
+    def load(*args, **kwargs):
+        states["load"].append(gc.isenabled())
+        return real_load(*args, **kwargs)
+
+    def dumps(*args, **kwargs):
+        states["dumps"].append(gc.isenabled())
+        return real_dumps(*args, **kwargs)
+
+    monkeypatch.setattr(json, "load", load)
+    monkeypatch.setattr(json, "dumps", dumps)
+
+    before = cache._load_cache_index()
+    cache._save_cache_index()
+    after = cache._load_cache_index()
+
+    assert states["load"] == [False, False]
+    assert states["dumps"] == [False]
+    assert gc.isenabled()
+    assert after == before
+    assert len(after["entries"]) == 3
+
+
+def test_a_corrupt_index_still_falls_back_and_resumes_the_collector(tmp_path, _collector_enabled):
+    ds, cache = _pipeline(tmp_path, _sources(tmp_path, 2), ["latent"])
+    ds.start_next_epoch()
+    index_path = os.path.join(tmp_path / "cache", "cache.json")
+    good = cache._load_cache_index()
+    os.replace(index_path, index_path + ".bak")
+    with open(index_path, "w", encoding="utf-8") as f:
+        f.write("{ not json")
+
+    recovered = cache._load_cache_index()
+
+    assert gc.isenabled()
+    assert recovered["entries"].keys() == good["entries"].keys()

@@ -156,6 +156,39 @@ def _gc_heap_frozen():
             gc.unfreeze()
 
 
+# _gc_paused bookkeeping: how many blocks currently hold the collector paused,
+# and whether it was enabled when the first of them started.
+_gc_pause_lock = threading.Lock()
+_gc_pause_depth = 0
+_gc_pause_was_enabled = False
+
+
+@contextlib.contextmanager
+def _gc_paused():
+    """Pause the cyclic garbage collector while plain data is parsed or dumped.
+
+    Parsing cache.json allocates millions of containers and serializing it
+    walks them; neither can create garbage cycles, yet the allocation counts
+    keep triggering full collections that re-walk the half-built index. The
+    collector's previous enabled state is restored on exit. Blocks may nest or
+    overlap across threads (a periodic flush next to build workers): the
+    collector stays paused until the last one leaves.
+    """
+    global _gc_pause_depth, _gc_pause_was_enabled
+    with _gc_pause_lock:
+        if _gc_pause_depth == 0:
+            _gc_pause_was_enabled = gc.isenabled()
+            gc.disable()
+        _gc_pause_depth += 1
+    try:
+        yield
+    finally:
+        with _gc_pause_lock:
+            _gc_pause_depth -= 1
+            if _gc_pause_depth == 0 and _gc_pause_was_enabled:
+                gc.enable()
+
+
 # Caption strings a sample_prompt_path cache stamps as sourceless runtime
 # values. Blanked (keys kept) when store_sourceless_prompts is False.
 SOURCELESS_PROMPT_NAMES = ("prompt", "prompt_1", "prompt_2")
@@ -698,6 +731,12 @@ class SmartDiskCache(
     def _get_cache_json_path(self) -> str:
         return os.path.join(self.cache_dir, "cache.json")
 
+    @staticmethod
+    def _read_index_file(path: str) -> dict:
+        # The collector is paused for the parse (see _gc_paused).
+        with open(path, "r", encoding="utf-8") as f, _gc_paused():
+            return json.load(f)
+
     def _load_cache_index(self) -> dict:
         cache_path = self._get_cache_json_path()
         tmp_path = cache_path + ".tmp"
@@ -705,8 +744,7 @@ class SmartDiskCache(
 
         if os.path.exists(cache_path):
             try:
-                with open(cache_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
+                data = self._read_index_file(cache_path)
                 for p in (tmp_path, bak_path):
                     with contextlib.suppress(OSError):
                         os.remove(p)
@@ -717,8 +755,7 @@ class SmartDiskCache(
 
         if os.path.exists(tmp_path):
             try:
-                with open(tmp_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
+                data = self._read_index_file(tmp_path)
                 os.replace(tmp_path, cache_path)
                 self._migrate_loaded_index(data, recovered=True)
                 return data
@@ -727,8 +764,7 @@ class SmartDiskCache(
 
         if os.path.exists(bak_path):
             try:
-                with open(bak_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
+                data = self._read_index_file(bak_path)
                 os.replace(bak_path, cache_path)
                 self._migrate_loaded_index(data, recovered=True)
                 return data
@@ -853,8 +889,9 @@ class SmartDiskCache(
         # Serialize under the index lock, but write outside it: holding
         # _index_lock across the file write + backup copy stalled every
         # builder thread that needed to register an entry while the periodic
-        # flush was writing a multi-MB index to disk.
-        with self._index_lock:
+        # flush was writing a multi-MB index to disk. The collector is paused
+        # for the dump (see _gc_paused).
+        with self._index_lock, _gc_paused():
             if compact:
                 # cache.json is machine-only (every reader uses json.load).
                 # ``indent`` also forces the pure-Python encoder instead of the
