@@ -1,11 +1,11 @@
-from typing import Iterator
-
-import torch
+from collections.abc import Iterator
 
 from mgds.PipelineModule import PipelineModule, PipelineState
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
 from mgds.pipelineModuleTypes.SerialPipelineModule import SerialPipelineModule
 from mgds.pipelineModuleTypes.SingleVariationRandomAccessPipelineModule import SingleVariationRandomAccessPipelineModule
+
+import torch
 
 
 class LoadingPipeline(Iterator):
@@ -63,6 +63,17 @@ class LoadingPipeline(Iterator):
         The number might not be exact, because the length can change between epochs.
         """
         return max(0, self.__output_module.approximate_length())
+
+    def epoch_start_index(self) -> int:
+        """The sample offset the current epoch's serial modules (re)start from:
+        the resume offset on the epoch the pipeline was created for, else 0."""
+        return self.__initial_index if self.__current_epoch == self.__initial_epoch else 0
+
+    def set_epoch_start_index(self, index: int):
+        """Move the resume offset (in samples) of the initial epoch. Takes effect
+        on the next ``__next__``, i.e. must be called before the epoch's first item."""
+        self.__initial_index = max(0, int(index))
+        self.__mark_reset_serial_modules = True
 
     def reset_serial_modules_before(self, module_index: int):
         with torch.no_grad():
