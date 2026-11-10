@@ -1,5 +1,6 @@
 """Sourceless start-up work: the aggregate values are loaded once when the
-second load could only repeat the first."""
+second load could only repeat the first, and the cache files' existence is
+answered from one directory listing."""
 
 import json
 import os
@@ -12,6 +13,8 @@ from mgds.pipelineModules.SmartDiskCache import SmartDiskCache
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
 
 import torch
+
+import pytest
 
 OUTPUT_NAMES = ["latent_image", "crop_resolution", "image_path"]
 
@@ -225,3 +228,88 @@ def test_no_aggregate_names_means_no_aggregate_load(tmp_path):
 
     assert cache.aggregate_loads == []
     assert len(list(ds)) == 1
+
+
+# ---------------------------------------------------------------------------
+# Cache file existence from one listing
+# ---------------------------------------------------------------------------
+
+
+def _entry_pt_names(cache_dir) -> list[str]:
+    with open(os.path.join(cache_dir, "cache.json"), encoding="utf-8") as f:
+        entries = json.load(f)["entries"]
+    return [f"{next(iter(entry['variants'].values()))['cache_file']}_1.pt" for entry in entries.values()]
+
+
+def _record_isfile(monkeypatch) -> list[str]:
+    asked: list[str] = []
+    real_isfile = os.path.isfile
+
+    def isfile(path):
+        asked.append(os.path.basename(str(path)))
+        return real_isfile(path)
+
+    monkeypatch.setattr(os.path, "isfile", isfile)
+    return asked
+
+
+def test_listed_cache_files_are_not_asked_of_the_filesystem(tmp_path, monkeypatch):
+    cache_dir, paths = _build_cache(tmp_path)
+    pt_names = _entry_pt_names(cache_dir)
+    assert len(pt_names) == len(paths)
+    ds, _ = _sourceless(cache_dir)
+    asked = _record_isfile(monkeypatch)
+
+    ds.start_next_epoch()
+
+    assert not set(asked) & set(pt_names)
+    assert len(_rows(ds)) == len(paths)
+
+
+def test_a_missing_cache_file_is_refused_with_the_same_error(tmp_path, monkeypatch):
+    cache_dir, _ = _build_cache(tmp_path)
+    missing = _entry_pt_names(cache_dir)[1]
+    os.remove(os.path.join(cache_dir, missing))
+    ds, cache = _sourceless(cache_dir)
+    asked = _record_isfile(monkeypatch)
+
+    with pytest.raises(RuntimeError) as error:
+        ds.start_next_epoch()
+
+    expected_path = os.path.join(cache._real_cache_dir, missing)
+    assert str(error.value) == f"Sourceless training: cache file '{expected_path}' is missing. Rebuild your cache."
+    # Only the name the listing lacks falls back to the filesystem.
+    assert missing in asked
+
+
+def test_a_symlinked_cache_file_is_still_accepted(tmp_path):
+    cache_dir, paths = _build_cache(tmp_path)
+    name = _entry_pt_names(cache_dir)[2]
+    link = os.path.join(cache_dir, name)
+    target = link + ".real"
+    os.replace(link, target)
+    try:
+        os.symlink(target, link)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are not available here")
+
+    ds, cache = _sourceless(cache_dir)
+    # The listing holds regular files only, so this one is asked of the
+    # filesystem, which follows the link exactly as before.
+    assert name not in cache._scan_existing_pt_files()
+    ds.start_next_epoch()
+
+    assert len(_rows(ds)) == len(paths)
+
+
+def test_an_unlistable_cache_dir_falls_back_to_the_filesystem(tmp_path, monkeypatch):
+    cache_dir, paths = _build_cache(tmp_path)
+    pt_names = _entry_pt_names(cache_dir)
+    ds, cache = _sourceless(cache_dir)
+    monkeypatch.setattr(cache, "_scan_existing_pt_files", set)
+    asked = _record_isfile(monkeypatch)
+
+    ds.start_next_epoch()
+
+    assert set(pt_names) <= set(asked)
+    assert len(_rows(ds)) == len(paths)

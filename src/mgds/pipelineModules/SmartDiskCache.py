@@ -4127,6 +4127,11 @@ class SmartDiskCache(
             self.group_balancing_strategy = dict(state["group_balancing_strategy"])
             self.group_balancing = dict(state["group_balancing"])
 
+        # One listing of the cache dir answers "is this .pt there?" for every
+        # entry. A name the listing lacks (missing, a symlink, a name whose
+        # case differs on a case-insensitive filesystem) is still asked of the
+        # filesystem, so the outcome is the one the per-entry isfile gave.
+        listed_pt_files = self._scan_existing_pt_files()
         for fp in self._sourceless_filepaths:
             entry = self.cache_index["entries"][fp]
             # Hard guard: refuse to train sourceless on an entry with no baked
@@ -4147,7 +4152,7 @@ class SmartDiskCache(
             if cache_file is None:
                 raise RuntimeError(f"Sourceless training: cache entry for '{fp}' has no variants. Rebuild your cache.")
             pt_path = self._real_pt_path(cache_file, 0)
-            if not os.path.isfile(pt_path):
+            if f"{cache_file}_1.pt" not in listed_pt_files and not os.path.isfile(pt_path):
                 raise RuntimeError(f"Sourceless training: cache file '{pt_path}' is missing. Rebuild your cache.")
 
         self.variations_initialized = True
