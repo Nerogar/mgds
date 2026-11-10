@@ -20,6 +20,7 @@ from mgds.pipelineModules.ResolutionPolicy import (
     parse_adaptive_resolution_ladder,
     scale_resolution_for_crop,
     target_resolutions_for_spec,
+    upscale_tolerance_fraction,
 )
 from mgds.pipelineModuleTypes.SingleVariationRandomAccessPipelineModule import SingleVariationRandomAccessPipelineModule
 
@@ -178,6 +179,7 @@ class SmartDiskCache(
         scrub_split_names: list[str] | None = None,
         header_resolution_path_in_names: dict[str, str] | None = None,
         header_resolution_blocked_in_names: list[str] | None = None,
+        upscale_tolerance: float = 0.0,
     ):
         super().__init__()
         self.cache_dir = cache_dir
@@ -260,6 +262,14 @@ class SmartDiskCache(
         self.additional_resolution_in_names = additional_resolution_in_names or []
         self.adaptive_resolution_max = adaptive_resolution_max
         self.adaptive_resolution_ladder = adaptive_resolution_ladder
+        # Mirrors AspectBucketing.upscale_tolerance for the paths that re-derive
+        # tier eligibility without the (unstarted) bucketing module: sourceless
+        # variant selection and the crop-resolution fallback. 0 = no upscale.
+        self.upscale_tolerance = upscale_tolerance_fraction(upscale_tolerance)
+        # Sourceless entries whose tolerance-preferred tier variant is not
+        # cached and that train at a lower cached tier instead (see
+        # _reconstructed_adaptive_variants); reported once per init.
+        self._tier_fallback_entries: set[int] = set()
 
         # Content-addressed reuse: name of an upstream item (e.g. the final
         # post-augmentation ``prompt`` string) whose value uniquely determines
@@ -2088,12 +2098,15 @@ class SmartDiskCache(
         additional_resolution_provider: Callable[[str, dict], dict[str, list[int]] | None] | None = None,
         adaptive_resolution_ladder: str | list[int] | None = None,
         adaptive_resolution_max: int | None = None,
+        upscale_tolerance: float = 0.0,
     ) -> tuple[dict, dict, dict]:
         """Build a read-only plan for removing cache variants that upscale.
 
         Only index metadata and file headers supplied by the optional caller
-        are consulted; tensor payloads are never loaded.
+        are consulted; tensor payloads are never loaded. ``upscale_tolerance``
+        keeps variants a loader with that tolerance may still train.
         """
+        upscale_tolerance = upscale_tolerance_fraction(upscale_tolerance)
         index_path = os.path.join(cache_dir, "cache.json")
         with open(index_path, "r", encoding="utf-8") as handle:
             original_index = json.load(handle)
@@ -2173,8 +2186,8 @@ class SmartDiskCache(
                     or nominal_resolution_for_crop((crop_h, crop_w)) <= adaptive_floor + 1
                 ):
                     continue
-                scale_h, scale_w = scale_resolution_for_crop(primary, (crop_h, crop_w))
-                if any(int(source[-2]) < scale_h or int(source[-1]) < scale_w for source in all_sources):
+                scale_resolution = scale_resolution_for_crop(primary, (crop_h, crop_w))
+                if not all_resolutions_cover_scale(all_sources, scale_resolution, upscale_tolerance):
                     remove_keys.append(key)
 
             if missing_variant_metadata:
@@ -2244,6 +2257,7 @@ class SmartDiskCache(
         additional_resolution_provider: Callable[[str, dict], dict[str, list[int]] | None] | None = None,
         adaptive_resolution_ladder: str | list[int] | None = None,
         adaptive_resolution_max: int | None = None,
+        upscale_tolerance: float = 0.0,
     ) -> dict:
         _, _, result = cls._adaptive_prune_plan(
             cache_dir,
@@ -2251,6 +2265,7 @@ class SmartDiskCache(
             additional_resolution_provider,
             adaptive_resolution_ladder,
             adaptive_resolution_max,
+            upscale_tolerance,
         )
         return result
 
@@ -2262,6 +2277,7 @@ class SmartDiskCache(
         additional_resolution_provider: Callable[[str, dict], dict[str, list[int]] | None] | None = None,
         adaptive_resolution_ladder: str | list[int] | None = None,
         adaptive_resolution_max: int | None = None,
+        upscale_tolerance: float = 0.0,
     ) -> dict:
         _, updated_index, result = cls._adaptive_prune_plan(
             cache_dir,
@@ -2269,6 +2285,7 @@ class SmartDiskCache(
             additional_resolution_provider,
             adaptive_resolution_ladder,
             adaptive_resolution_max,
+            upscale_tolerance,
         )
         index_path = os.path.join(cache_dir, "cache.json")
 
@@ -2397,6 +2414,7 @@ class SmartDiskCache(
         )
         if not tiers:
             return []
+        tolerance = getattr(self, "upscale_tolerance", 0.0)
         try:
             aspect = source_resolution[0] / source_resolution[1]
             eligible = [
@@ -2405,13 +2423,21 @@ class SmartDiskCache(
                 if all_resolutions_cover_scale(
                     all_source_resolutions,
                     scale_resolution_for_crop(source_resolution, reconstruct(aspect, tier)),
+                    tolerance,
                 )
             ]
             bucket_h, bucket_w = reconstruct(aspect, max(eligible) if eligible else min(tiers))
         except Exception:
             return []
         key = f"{bucket_h}x{bucket_w}"
-        return [(variant_key, value) for variant_key, value in variants if variant_key == key]
+        selected = [(variant_key, value) for variant_key, value in variants if variant_key == key]
+        if not selected and tolerance > 0.0:
+            # The tier the tolerance allows was never cached (the cache was
+            # built under a stricter rule); the caller's crop-resolution path
+            # serves the best cached tier instead. Counted for the init report.
+            fallbacks = self.__dict__.setdefault("_tier_fallback_entries", set())
+            fallbacks.add(id(entry))
+        return selected
 
     def _training_eligible_variants(self, entry: dict) -> list[tuple[str, dict]]:
         """Cached variants this source may train at without an upscale.
@@ -2501,9 +2527,10 @@ class SmartDiskCache(
         if not parsed:
             return variants
         fitting = []
+        tolerance = getattr(self, "upscale_tolerance", 0.0)
         for key, value, crop_h, crop_w in parsed:
-            scale_h, scale_w = scale_resolution_for_crop((source_h, source_w), (crop_h, crop_w))
-            if all(int(source[-2]) >= scale_h and int(source[-1]) >= scale_w for source in all_source_resolutions):
+            scale_resolution = scale_resolution_for_crop((source_h, source_w), (crop_h, crop_w))
+            if all_resolutions_cover_scale(all_source_resolutions, scale_resolution, tolerance):
                 fitting.append((key, value, crop_h, crop_w))
         maximum = entry.get("adaptive_max_resolution", getattr(self, "adaptive_resolution_max", None))
         if maximum is not None:
@@ -3967,6 +3994,7 @@ class SmartDiskCache(
             if self.adaptive_resolution:
                 eligible_records = []
                 dropped_records = 0
+                self._tier_fallback_entries = set()
                 for record in records:
                     entry = entries.get(record["filepath"], {})
                     if self._training_eligible_variants(entry):
@@ -3977,6 +4005,14 @@ class SmartDiskCache(
                 if dropped_records:
                     self._status(
                         f"adaptive sourceless resolution: dropped {dropped_records} rows without a safe cached tier"
+                    )
+                if self._tier_fallback_entries:
+                    print(
+                        f"SmartDiskCache[{self._status_label()}]: upscale tolerance "
+                        f"{self.upscale_tolerance:.1%} would move {len(self._tier_fallback_entries)} entries to a "
+                        "tier that is not cached; they train at their best cached tier until the cache is "
+                        "rebuilt with the sources present.",
+                        flush=True,
                     )
             has_source_indices = any(record.get("source_index") != 1 << 60 for record in records)
             if has_source_indices:

@@ -7,6 +7,7 @@ from mgds.pipelineModules.ResolutionPolicy import (
     all_resolutions_cover_scale,
     scale_resolution_for_crop,
     target_resolutions_for_spec,
+    upscale_tolerance_fraction,
 )
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
 
@@ -27,10 +28,12 @@ class SingleAspectCalculation(
         adaptive_resolution: bool = False,
         additional_resolution_in_names: list[str] | None = None,
         adaptive_resolution_ladder: str | list[int] | None = None,
+        upscale_tolerance: float = 0.0,
     ):
         super().__init__()
 
         self.resolution_in_name = resolution_in_name
+        self.upscale_tolerance = upscale_tolerance_fraction(upscale_tolerance)
 
         self.target_resolutions_in_name = target_resolution_in_name
         self.enable_target_resolutions_override_in_name = enable_target_resolutions_override_in_name
@@ -116,12 +119,19 @@ class SingleAspectCalculation(
         if not target_resolutions:
             return []
         all_resolutions = [resolution, *(additional_resolutions or [])]
+        # Each image covers the square crop on its own aspect (see
+        # AspectBucketing.eligible_target_resolutions), so each is checked
+        # against its own scale size for the crop.
         eligible = [
             target
             for target in target_resolutions
-            if all_resolutions_cover_scale(
-                all_resolutions,
-                scale_resolution_for_crop(resolution, (target, target)),
+            if all(
+                all_resolutions_cover_scale(
+                    [image],
+                    scale_resolution_for_crop(image, (target, target)),
+                    self.upscale_tolerance,
+                )
+                for image in all_resolutions
             )
         ]
         return eligible or [min(target_resolutions)]
@@ -163,6 +173,8 @@ class SingleAspectCalculation(
             "resolutions": self.possible_target_resolutions,
             "fixed_resolutions": self.fixed_target_resolutions,
         }
+        if self.upscale_tolerance > 0.0:
+            payload["upscale_tolerance"] = round(self.upscale_tolerance, 6)
         return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
     def variant_key_from_aspect(self, variation: int, index: int, aspect: float) -> str | None:

@@ -10,6 +10,7 @@ from mgds.pipelineModules.ResolutionPolicy import (
     all_resolutions_cover_scale,
     scale_resolution_for_crop,
     target_resolutions_for_spec,
+    upscale_tolerance_fraction,
 )
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
 
@@ -67,11 +68,17 @@ class AspectBucketing(
         adaptive_resolution: bool = False,
         additional_resolution_in_names: list[str] | None = None,
         adaptive_resolution_ladder: str | list[int] | None = None,
+        upscale_tolerance: float = 0.0,
     ):
         super().__init__()
 
         self.quantization = quantization
         self.resolution_in_name = resolution_in_name
+        # Fraction a source (or any additional constraining image) may fall
+        # short of a tier's crop by and still train there, slightly enlarged.
+        # 0 = the strict no-upscale rule; part of the bucket method hash only
+        # when set, so existing caches keep their stamps.
+        self.upscale_tolerance = upscale_tolerance_fraction(upscale_tolerance)
 
         self.target_resolutions_in_name = target_resolution_in_name
         self.enable_target_resolutions_override_in_name = enable_target_resolutions_override_in_name
@@ -191,9 +198,18 @@ class AspectBucketing(
 
         eligible = []
         for target in target_resolutions:
-            bucket_h, bucket_w = self.bucket_for_aspect(aspect, target)
-            scale_resolution = scale_resolution_for_crop(resolution, (bucket_h, bucket_w))
-            if all_resolutions_cover_scale(all_resolutions, scale_resolution):
+            bucket = self.bucket_for_aspect(aspect, target)
+            # Every image is cover-scaled on its OWN aspect to the source's
+            # crop bucket (an additional image, e.g. a DPO rejected half, by
+            # the loader's cover-scale-crop), so each must reach its own scale
+            # size for that bucket, i.e. cover the bucket without enlarging.
+            # Checking the additional images against the source's scale size
+            # instead dropped an exact-bucket rejected image a tier whenever
+            # the source's aspect slack at that bucket exceeded the tolerance.
+            if all(
+                all_resolutions_cover_scale([image], scale_resolution_for_crop(image, bucket), self.upscale_tolerance)
+                for image in all_resolutions
+            ):
                 eligible.append(target)
 
         return eligible or [min(target_resolutions)]
@@ -291,6 +307,16 @@ class AspectBucketing(
             "targets": sorted(self.bucket_resolutions.keys()),
             "flattened": sorted([list(r) for r in self.flattened_possible_resolutions]),
         }
+        if self.upscale_tolerance > 0.0:
+            # Changing the tolerance moves images between tiers, so the
+            # variants have to be re-derived; the key is absent at 0 so the
+            # hash of every existing cache is unchanged.
+            payload["upscale_tolerance"] = round(self.upscale_tolerance, 6)
+        if self.additional_resolution_in_names:
+            # Additional images are now checked against their own cover-scale
+            # size, which moves pairs between tiers; only pair-bearing
+            # instances carry the marker, so single-image caches keep theirs.
+            payload["additional_cover_rule"] = "own"
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()[:16]
 

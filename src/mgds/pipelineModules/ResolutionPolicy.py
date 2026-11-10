@@ -87,11 +87,33 @@ def scale_resolution_for_crop(
     return crop_h, round(source_w * scale)
 
 
+def upscale_tolerance_fraction(value) -> float:
+    """``value`` as a clean fraction in ``[0, 1)``; anything unset or invalid is 0 (no upscale)."""
+    try:
+        fraction = float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    if fraction != fraction or fraction <= 0.0:  # NaN or non-positive
+        return 0.0
+    return min(fraction, 0.99)
+
+
 def all_resolutions_cover_scale(
     resolutions: Iterable[tuple[int, ...] | list[int]],
     scale_resolution: tuple[int, int],
+    upscale_tolerance: float = 0.0,
 ) -> bool:
+    """Every resolution reaches ``scale_resolution`` in both dimensions.
+
+    ``upscale_tolerance`` (a fraction, e.g. 0.03) lets a source fall short of
+    the scale size by up to that fraction of it -- the image is then enlarged
+    by at most that much to fill the bucket. 0 keeps the exact no-upscale rule.
+    """
     scale_h, scale_w = scale_resolution
+    tolerance = upscale_tolerance_fraction(upscale_tolerance)
+    if tolerance > 0.0:
+        scale_h = scale_h * (1.0 - tolerance)
+        scale_w = scale_w * (1.0 - tolerance)
     return all(int(resolution[-2]) >= scale_h and int(resolution[-1]) >= scale_w for resolution in resolutions)
 
 
