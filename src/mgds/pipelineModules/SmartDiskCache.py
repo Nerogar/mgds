@@ -1,6 +1,7 @@
 import concurrent
 import contextlib
 import copy
+import gc
 import hashlib
 import json
 import math
@@ -125,6 +126,34 @@ def _replace_retrying(src: str, dst: str, attempts: int = 8, delay: float = 0.05
             if attempt == attempts - 1:
                 raise
             time.sleep(delay * (2**attempt))
+
+
+@contextlib.contextmanager
+def _gc_heap_frozen():
+    """Keep everything alive right now out of a build loop's forced collections.
+
+    The build loops call ``_torch_gc()`` every 250 items, and each of those
+    full collections re-walks every GC-tracked container in the process. With
+    a loaded index that is millions of dicts and lists which are not garbage
+    and are not about to become garbage. ``gc.freeze()`` parks all currently
+    tracked objects in the permanent generation, so the collections only visit
+    what the loop itself allocates. Frozen objects are still freed by
+    reference counting; only reference cycles among them wait for a thaw.
+
+    The heap is thawed again on exit, so a standalone mgds leaves the
+    collector as it found it. The exception is a host that had already frozen
+    objects when the loop started: it manages the permanent generation itself
+    (OneTrainer freezes at every epoch start and thaws at the next one and at
+    the end of the run), and thawing here would undo its freeze. The objects
+    added here then stay frozen until the host's next ``gc.unfreeze()``.
+    """
+    host_frozen = gc.get_freeze_count() > 0
+    gc.freeze()
+    try:
+        yield
+    finally:
+        if not host_frozen:
+            gc.unfreeze()
 
 
 # Caption strings a sample_prompt_path cache stamps as sourceless runtime
@@ -2781,7 +2810,12 @@ class SmartDiskCache(
 
         failed: list[tuple[str, str]] = []
         skipped = 0
-        with tqdm(total=len(augment_items), smoothing=0.1, desc="augmenting cache") as bar:
+        # Frozen for the same reason as the build loop: the index is loaded
+        # and the periodic _torch_gc below would re-walk it every 250 items.
+        with (
+            _gc_heap_frozen(),
+            tqdm(total=len(augment_items), smoothing=0.1, desc="augmenting cache") as bar,
+        ):
             fs = [self._state.executor.submit(fn, fp, idx, var, current_device) for fp, idx, var in augment_items]
             for count, f in enumerate(concurrent.futures.as_completed(fs), 1):
                 try:
@@ -4679,7 +4713,12 @@ class SmartDiskCache(
             else:
                 build_pool_ctx = contextlib.nullcontext(self._state.executor)
 
+            # The index loaded above is long-lived and made of millions of
+            # GC-tracked containers, and the loop below forces a full
+            # collection every 250 items. Frozen for the duration of this
+            # group's build, those collections skip it (see _gc_heap_frozen).
             with (
+                _gc_heap_frozen(),
                 build_pool_ctx as build_executor,
                 tqdm(total=len(unique_items), smoothing=0.1, desc="caching") as bar,
             ):
