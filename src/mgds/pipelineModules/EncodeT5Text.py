@@ -1,10 +1,11 @@
 from contextlib import nullcontext
 
-import torch
-from transformers import T5EncoderModel
-
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
+
+import torch
+
+from transformers import T5EncoderModel
 
 
 class EncodeT5Text(
@@ -23,7 +24,7 @@ class EncodeT5Text(
             autocast_contexts: list[torch.autocast | None] = None,
             dtype: torch.dtype | None = None,
     ):
-        super(EncodeT5Text, self).__init__()
+        super().__init__()
         self.tokens_in_name = tokens_in_name
         self.tokens_attention_mask_in_name = tokens_attention_mask_in_name
         self.hidden_state_out_name = hidden_state_out_name
@@ -69,10 +70,7 @@ class EncodeT5Text(
             )
 
         hidden_states = text_encoder_output.hidden_states
-        if self.pooled_out_name:
-            pooled_state = text_encoder_output.text_embeds
-        else:
-            pooled_state = None
+        pooled_state = text_encoder_output.text_embeds if self.pooled_out_name else None
 
         hidden_states = [hidden_state.squeeze(dim=0) for hidden_state in hidden_states]
         pooled_state = None if pooled_state is None else pooled_state.squeeze(dim=0)

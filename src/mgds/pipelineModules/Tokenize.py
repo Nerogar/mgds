@@ -1,12 +1,20 @@
 import threading
-
-import torch
-from transformers import CLIPTokenizer, T5Tokenizer, T5TokenizerFast, GemmaTokenizer, LlamaTokenizer, Qwen2Tokenizer, LlamaTokenizerFast
+from collections.abc import Callable
 
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
 
-from typing import Callable
+import torch
+
+from transformers import (
+    CLIPTokenizer,
+    GemmaTokenizer,
+    LlamaTokenizer,
+    LlamaTokenizerFast,
+    Qwen2Tokenizer,
+    T5Tokenizer,
+    T5TokenizerFast,
+)
 
 
 class Tokenize(
@@ -24,10 +32,10 @@ class Tokenize(
             additional_format_text_tokens: int | None = None,
             suffix_text: str | None = None,
             apply_chat_template: Callable | None = None,
-            apply_chat_template_kwargs = {},
+            apply_chat_template_kwargs: dict | None = None,
             expand_mask: int = 0,
     ):
-        super(Tokenize, self).__init__()
+        super().__init__()
         self.in_name = in_name
         self.tokens_out_name = tokens_out_name
         self.mask_out_name = mask_out_name
@@ -35,7 +43,7 @@ class Tokenize(
         self.max_token_length = max_token_length
         self.format_text = format_text
         self.apply_chat_template = apply_chat_template
-        self.apply_chat_template_kwargs = apply_chat_template_kwargs
+        self.apply_chat_template_kwargs = {} if apply_chat_template_kwargs is None else apply_chat_template_kwargs
         self.additional_format_text_tokens = additional_format_text_tokens
         # tokenized unpadded and appended after the padded main block, so the padding sits
         # before the suffix instead of at the very end (mid-template padding, e.g. Krea 2)

@@ -1,4 +1,3 @@
-from transformers import CLIPTokenizer, T5Tokenizer, T5TokenizerFast, GemmaTokenizer, LlamaTokenizer
 
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
@@ -13,7 +12,7 @@ class ImageToVideo(
             in_name: str,
             out_name: str,
     ):
-        super(ImageToVideo, self).__init__()
+        super().__init__()
         self.in_name = in_name
         self.out_name = out_name
 

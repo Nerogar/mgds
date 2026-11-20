@@ -7,7 +7,7 @@ class SampleVAEDistribution(
     RandomAccessPipelineModule,
 ):
     def __init__(self, in_name: str, out_name: str, mode='mean'):
-        super(SampleVAEDistribution, self).__init__()
+        super().__init__()
         self.in_name = in_name
         self.out_name = out_name
         self.mode = mode

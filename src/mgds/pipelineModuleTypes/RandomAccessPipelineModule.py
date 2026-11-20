@@ -6,7 +6,7 @@ class RandomAccessPipelineModule(
     metaclass=ABCMeta,
 ):
     def __init__(self):
-        super(RandomAccessPipelineModule, self).__init__()
+        super().__init__()
         self.started = False
 
     @abstractmethod
@@ -14,15 +14,13 @@ class RandomAccessPipelineModule(
         """
         Returns the number of items this module can return.
         """
-        pass
 
-    def start(self, variation: int):
+    def start(self, variation: int):  # noqa: B027
         """
         Called once when the pipeline is started.
 
         :param variation: the variation that is started
         """
-        pass
 
     def get_meta(self, variation: int, name: str) -> Any:
         """
@@ -47,4 +45,3 @@ class RandomAccessPipelineModule(
         :param requested_name: the requested item key
         :return: an item or partial item
         """
-        pass

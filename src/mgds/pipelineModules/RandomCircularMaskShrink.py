@@ -1,8 +1,8 @@
-import torch
-from torch import Tensor
-
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
+
+import torch
+from torch import Tensor
 
 
 class RandomCircularMaskShrink(
@@ -17,7 +17,7 @@ class RandomCircularMaskShrink(
             shrink_factor_min: float,
             shrink_factor_max: float = 1
     ):
-        super(RandomCircularMaskShrink, self).__init__()
+        super().__init__()
 
         self.mask_name = mask_name
         self.enabled_in_name = enabled_in_name

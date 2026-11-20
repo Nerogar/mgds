@@ -1,8 +1,8 @@
-import torch
-from torchvision.transforms import functional, InterpolationMode
-
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
+
+import torch
+from torchvision.transforms import InterpolationMode, functional
 
 
 class RandomRotate(
@@ -16,7 +16,7 @@ class RandomRotate(
             fixed_enabled_in_name: str,
             max_angle_in_name: str,
     ):
-        super(RandomRotate, self).__init__()
+        super().__init__()
         self.names = names
         self.enabled_in_name = enabled_in_name
         self.fixed_enabled_in_name = fixed_enabled_in_name

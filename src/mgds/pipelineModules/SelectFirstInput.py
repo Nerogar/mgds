@@ -7,7 +7,7 @@ class SelectFirstInput(
     RandomAccessPipelineModule,
 ):
     def __init__(self, in_names: list[str], out_name: str):
-        super(SelectFirstInput, self).__init__()
+        super().__init__()
         self.in_names = in_names
         self.out_name = out_name
 

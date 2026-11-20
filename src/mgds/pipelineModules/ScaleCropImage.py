@@ -1,8 +1,8 @@
-from torchvision import transforms
-from torchvision.transforms import functional
-
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
+
+from torchvision import transforms
+from torchvision.transforms import functional
 
 
 class ScaleCropImage(
@@ -17,7 +17,7 @@ class ScaleCropImage(
             enable_crop_jitter_in_name: str,
             crop_offset_out_name: str,
     ):
-        super(ScaleCropImage, self).__init__()
+        super().__init__()
         self.names = names
         self.scale_resolution_in_name = scale_resolution_in_name
         self.crop_resolution_in_name = crop_resolution_in_name

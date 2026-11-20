@@ -7,7 +7,7 @@ class LoadText(
     RandomAccessPipelineModule,
 ):
     def __init__(self, path_in_name: str, text_out_name: str):
-        super(LoadText, self).__init__()
+        super().__init__()
         self.path_in_name = path_in_name
         self.text_out_name = text_out_name
 

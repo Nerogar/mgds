@@ -1,11 +1,13 @@
 from contextlib import nullcontext
 
-import torch
-from PIL import Image
-from transformers import DPTImageProcessor, DPTForDepthEstimation
-
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
+
+import torch
+
+from transformers import DPTForDepthEstimation, DPTImageProcessor
+
+from PIL import Image
 
 
 class GenerateDepth(
@@ -21,7 +23,7 @@ class GenerateDepth(
             autocast_contexts: list[torch.autocast | None] = None,
             dtype: torch.dtype | None = None,
     ):
-        super(GenerateDepth, self).__init__()
+        super().__init__()
         self.path_in_name = path_in_name
         self.image_out_name = image_out_name
         self.image_depth_processor = image_depth_processor

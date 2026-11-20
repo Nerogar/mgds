@@ -3,13 +3,15 @@ import hashlib
 import json
 import math
 import os
-from typing import Any, Callable
-
-import torch
-from tqdm import tqdm
+from collections.abc import Callable
+from typing import Any
 
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.SingleVariationRandomAccessPipelineModule import SingleVariationRandomAccessPipelineModule
+
+import torch
+
+from tqdm import tqdm
 
 
 class DiskCache(
@@ -28,7 +30,7 @@ class DiskCache(
             group_enabled_in_name: str | None = None,
             before_cache_fun: Callable[[], None] | None = None,
     ):
-        super(DiskCache, self).__init__()
+        super().__init__()
         self.cache_dir = cache_dir
 
         self.split_names = [] if split_names is None else split_names
@@ -121,7 +123,7 @@ class DiskCache(
             first_previous_name = self.split_names[0] if len(self.split_names) > 0 else self.aggregate_names[0]
 
             group_variations = {'': 1}
-            group_indices = {'': [in_index for in_index in range(self._get_previous_length(first_previous_name))]}
+            group_indices = {'': list(range(self._get_previous_length(first_previous_name)))}
             group_output_samples = {'': len(group_indices[''])}
 
         self.aggregate_cache = {}
@@ -165,7 +167,7 @@ class DiskCache(
             self.aggregate_cache[group_key] = [None for _ in range(variations)]
 
         before_cache_fun_called = False
-        for group_key in self.group_variations.keys():
+        for group_key in self.group_variations:
             start_index = self.group_output_samples[group_key] * out_variation
             end_index = self.group_output_samples[group_key] * (out_variation + 1) - 1
 
@@ -186,7 +188,7 @@ class DiskCache(
                     aggregate_cache = [None]*size
 
                     with tqdm(total=size, smoothing=0.1, desc='caching') as bar:
-                        def fn(group_index, in_index, in_variation, current_device):
+                        def fn(group_index, in_index, in_variation, current_device, cache_dir, aggregate_cache):
                             #preserve current device for multi-GPU, which is thread-local in torch:
                             if torch.cuda.is_available() and current_device is not None:
                                 torch.cuda.set_device(current_device)
@@ -206,7 +208,7 @@ class DiskCache(
                         current_device = torch.cuda.current_device() if torch.cuda.is_available() else None
 
                         fs = (self._state.executor.submit(
-                            fn, group_index, in_index, in_variation, current_device)
+                            fn, group_index, in_index, in_variation, current_device, cache_dir, aggregate_cache)
                               for (group_index, in_index)
                               in enumerate(self.group_indices[group_key]))
                         for i, f in enumerate(concurrent.futures.as_completed(fs)):
@@ -240,6 +242,7 @@ class DiskCache(
             in_index = self.group_indices[group_key][group_index]
 
             return group_key, in_variation, group_index, in_index
+        return None
 
     def start(self, out_variation: int):
         self.__refresh_cache(out_variation)

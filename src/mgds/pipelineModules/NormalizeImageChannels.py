@@ -1,9 +1,8 @@
-from typing import Tuple
-
-import torchvision
 
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
+
+import torchvision
 
 
 class NormalizeImageChannels(
@@ -13,10 +12,10 @@ class NormalizeImageChannels(
     def __init__(
             self,
             image_in_name: str, image_out_name: str,
-            mean: Tuple[float, float, float],
-            std: Tuple[float, float, float],
+            mean: tuple[float, float, float],
+            std: tuple[float, float, float],
     ):
-        super(NormalizeImageChannels, self).__init__()
+        super().__init__()
         self.image_in_name = image_in_name
         self.image_out_name = image_out_name
         self.mean = mean

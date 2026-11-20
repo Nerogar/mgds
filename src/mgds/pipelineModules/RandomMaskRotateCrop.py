@@ -1,12 +1,12 @@
 import math
 from random import Random
 
-import torch
-from torch import Tensor
-from torchvision.transforms import functional, InterpolationMode
-
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
+
+import torch
+from torch import Tensor
+from torchvision.transforms import InterpolationMode, functional
 
 
 class RandomMaskRotateCrop(
@@ -23,7 +23,7 @@ class RandomMaskRotateCrop(
             max_padding_percent: float,
             max_rotate_angle: float = 0
     ):
-        super(RandomMaskRotateCrop, self).__init__()
+        super().__init__()
         self.mask_name = mask_name
         self.additional_names = additional_names
         self.enabled_in_name = enabled_in_name
@@ -117,7 +117,7 @@ class RandomMaskRotateCrop(
         angle = rand.uniform(-self.max_rotate_angle, self.max_rotate_angle)
         mask = self.__rotate(mask, [x_center, y_center], angle)
 
-        for key in item.keys():
+        for key in item:
             item[key] = self.__rotate(item[key], [x_center, y_center], angle)
 
         # get dimensions for cropping
@@ -187,7 +187,7 @@ class RandomMaskRotateCrop(
 
         # apply crop
         mask = self.__crop(mask, y_min, y_max, x_min, x_max)
-        for key in item.keys():
+        for key in item:
             item[key] = self.__crop(item[key], y_min, y_max, x_min, x_max)
 
         # add mask to return value

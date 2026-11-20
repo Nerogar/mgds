@@ -7,7 +7,7 @@ class AspectBatchSorting(
     SingleVariationRandomAccessPipelineModule,
 ):
     def __init__(self, resolution_in_name: str, names: [str], batch_size: int):
-        super(AspectBatchSorting, self).__init__()
+        super().__init__()
         self.resolution_in_name = resolution_in_name
         self.names = names
         self.batch_size = batch_size
@@ -31,28 +31,27 @@ class AspectBatchSorting(
 
         # generate a shuffled list of batches in the format (resolution, batch index within resolution)
         batches = []
-        for bucket_key in bucket_dict.keys():
+        for bucket_key in bucket_dict:
             batch_count = int(len(bucket_dict[bucket_key]) / self.batch_size)
             batches.extend((bucket_key, i) for i in range(batch_count))
         rand.shuffle(batches)
 
         # for each bucket, generate a shuffled list of samples
-        for bucket_key, bucket in bucket_dict.items():
+        for bucket in bucket_dict.values():
             rand.shuffle(bucket)
 
         # drop images for full buckets
-        for bucket_key in bucket_dict.keys():
+        for bucket_key in bucket_dict:
             samples = bucket_dict[bucket_key]
             samples_to_drop = len(samples) % self.batch_size
-            for i in range(samples_to_drop):
+            for _ in range(samples_to_drop):
                 # print('dropping sample from bucket ' + str(bucket_key))
                 samples.pop()
 
         # calculate the order of samples
         index_list = []
         for bucket_key, bucket_index in batches:
-            for i in range(bucket_index * self.batch_size, (bucket_index + 1) * self.batch_size):
-                index_list.append(bucket_dict[bucket_key][i])
+            index_list.extend(bucket_dict[bucket_key][bucket_index * self.batch_size : (bucket_index + 1) * self.batch_size])
 
         # print(bucket_dict)
         # print(index_list)

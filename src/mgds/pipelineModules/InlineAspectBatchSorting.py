@@ -12,7 +12,7 @@ class InlineAspectBatchSorting(
             names: list[str],
             batch_size: int,
     ):
-        super(InlineAspectBatchSorting, self).__init__()
+        super().__init__()
         self.resolution_in_name = resolution_in_name
         self.names = names
         self.batch_size = batch_size

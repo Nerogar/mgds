@@ -1,7 +1,7 @@
-import torch
-
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
+
+import torch
 
 
 class GenerateImageLike(
@@ -16,7 +16,7 @@ class GenerateImageLike(
             range_min: float,
             range_max: float,
     ):
-        super(GenerateImageLike, self).__init__()
+        super().__init__()
         self.image_in_name = image_in_name
         self.image_out_name = image_out_name
         if isinstance(color, int | float):

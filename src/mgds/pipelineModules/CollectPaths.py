@@ -1,9 +1,9 @@
 import os
 
-from tqdm import tqdm
-
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
+
+from tqdm import tqdm
 
 
 class CollectPaths(
@@ -16,7 +16,7 @@ class CollectPaths(
             path_out_name: str, concept_out_name: str,
             extensions: list[str], include_postfix: list[str] | None, exclude_postfix: list[str],
     ):
-        super(CollectPaths, self).__init__()
+        super().__init__()
 
         self.concept_in_name = concept_in_name
         self.path_in_name = path_in_name

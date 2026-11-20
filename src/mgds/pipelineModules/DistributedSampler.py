@@ -7,7 +7,7 @@ class DistributedSampler(
     SingleVariationRandomAccessPipelineModule,
 ):
     def __init__(self, names: [str], world_size: int, rank: int):
-        super(DistributedSampler, self).__init__()
+        super().__init__()
         self.names = names
         self.world_size = world_size
         self.rank = rank

@@ -1,6 +1,8 @@
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.SerialPipelineModule import SerialPipelineModule
+
 import torch
+
 
 class OutputPipelineModule(
     PipelineModule,
@@ -10,7 +12,7 @@ class OutputPipelineModule(
             self,
             names: list[str | tuple[str, str]],
     ):
-        super(OutputPipelineModule, self).__init__()
+        super().__init__()
         self.input_names = []
         self.output_names = []
         for name in names:
@@ -33,7 +35,7 @@ class OutputPipelineModule(
     def get_next_item(self) -> dict:
         item = {}
 
-        for input_name, output_name in zip(self.input_names, self.output_names):
+        for input_name, output_name in zip(self.input_names, self.output_names, strict=True):
             if self._get_previous_length(input_name) <= self.current_index:
                 raise StopIteration
 

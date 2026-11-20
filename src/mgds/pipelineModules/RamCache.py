@@ -1,12 +1,13 @@
 import hashlib
 import json
 import math
-from typing import Any, Callable
-
-from tqdm import tqdm
+from collections.abc import Callable
+from typing import Any
 
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.SingleVariationRandomAccessPipelineModule import SingleVariationRandomAccessPipelineModule
+
+from tqdm import tqdm
 
 
 class RamCache(
@@ -22,7 +23,7 @@ class RamCache(
             group_enabled_in_name: str | None = None,
             before_cache_fun: Callable[[], None] | None = None,
     ):
-        super(RamCache, self).__init__()
+        super().__init__()
 
         self.cache_names = cache_names
 
@@ -102,7 +103,7 @@ class RamCache(
         else:
             first_previous_name = self.cache[0]
 
-            group_indices = {'': [in_index for in_index in range(self._get_previous_length(first_previous_name))]}
+            group_indices = {'': list(range(self._get_previous_length(first_previous_name)))}
             group_output_samples = {'': len(group_indices[''])}
 
         self.aggregate_cache = {}
@@ -125,6 +126,7 @@ class RamCache(
             in_index = self.group_indices[group_key][group_index]
 
             return group_key, in_variation, group_index, in_index
+        return None
 
     def start(self, variation: int):
         if not self.variations_initialized:

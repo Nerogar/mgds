@@ -7,7 +7,7 @@ class ConceptPipelineModule(
     RandomAccessPipelineModule,
 ):
     def __init__(self, concepts: list[dict]):
-        super(ConceptPipelineModule, self).__init__()
+        super().__init__()
         self.concepts = concepts
 
     def length(self) -> int:
