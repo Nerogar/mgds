@@ -1,9 +1,10 @@
+import csv
+import functools
+import os
+import re
+
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
-import csv
-import re
-import os
-import functools
 
 
 class DropTags(
@@ -23,7 +24,7 @@ class DropTags(
             keep_tags_count_in_name: str,
             text_out_name: str,
     ):
-        super(DropTags, self).__init__()
+        super().__init__()
         self.text_in_name = text_in_name
         self.enabled_in_name = enabled_in_name
         self.probability_in_name = probability_in_name
@@ -51,25 +52,23 @@ class DropTags(
 
     def get_outputs(self) -> list[str]:
         return [self.text_out_name]
-    
+
     #convert special_tags to list depending on whether it's a newline-separated csv/txt file
     # or a delimiter-separated string
     #cached to reduce file read operations
+    @staticmethod
     @functools.lru_cache
-    def get_special_tags(self, sptags: str, delim: str) -> list[str]:
+    def get_special_tags(sptags: str, delim: str) -> list[str]:
         if sptags.endswith(".txt") and os.path.isfile(sptags):
             with open(sptags) as special_tags_file:
                 return [line.rstrip('\n') for line in special_tags_file]
         elif sptags.endswith(".csv") and os.path.isfile(sptags):
             with open(sptags, 'r') as special_tags_file:
-                splist = []
-                for row in csv.reader(special_tags_file):
-                    splist.append(row[0])
-                return splist
+                return [row[0] for row in csv.reader(special_tags_file)]
         else:
             return [tag.strip() for tag in sptags.split(delim)]
 
-    #parse regex expressions, create new special list based on matches   
+    #parse regex expressions, create new special list based on matches
     def parse_regex(self, splist_in: list[str], taglist: list[str]) -> list[str]:
         splist_out = []
         regex_spchars = set('.^$*+?{}[]|()\\')
@@ -90,11 +89,11 @@ class DropTags(
                     if regex.fullmatch(tag) or regex.fullmatch(stripped):
                         splist_out.append(tag)
                 else:
-                    if pattern == tag or pattern == stripped:
+                    if pattern in (tag, stripped):
                         splist_out.append(tag)
 
         return splist_out
-    
+
     #change probability evaluated against random() depending on mode
 
     def probability_weighted(self, p: float, mode: str, i: int, input_length: int) -> float:
@@ -123,7 +122,7 @@ class DropTags(
             keep_tags = tags[:keep_tags_count]
             dropout_tags = tags[keep_tags_count:]
             pruned_tags = []
-            
+
             #load special tags from file or string
             special_tags_prelist = self.get_special_tags(special_tags, delimiter)
 
@@ -141,12 +140,12 @@ class DropTags(
 
             if dropout_mode == "FULL" and rand.random() < probability:
                 #keep only whitelist tags if random < probability, or any non-blacklist tags
-                for s in dropout_tags:
-                    if special_tag_mode == "WHITELIST" and s in special_tags_list:
-                        pruned_tags.append(s)
-                    elif special_tag_mode == "BLACKLIST" and not(s in special_tags_list):
-                        pruned_tags.append(s)
-            elif dropout_mode.startswith("RANDOM"):     
+                pruned_tags.extend(
+                    s for s in dropout_tags
+                    if (special_tag_mode == "WHITELIST" and s in special_tags_list)
+                    or (special_tag_mode == "BLACKLIST" and s not in special_tags_list)
+                )
+            elif dropout_mode.startswith("RANDOM"):
                 #iterate through dropout_tags and add to pruned_tags if random > probability
                 if special_tag_mode == "WHITELIST":
                     for i, s in enumerate(dropout_tags):
@@ -156,7 +155,7 @@ class DropTags(
                 elif special_tag_mode == "BLACKLIST":
                     for i, s in enumerate(dropout_tags):
                         if rand.random() > self.probability_weighted(probability, dropout_mode, i, len(dropout_tags)) \
-                        or not(s in special_tags_list):
+                        or s not in special_tags_list:
                             pruned_tags.append(s)
                 else:   #NONE or any other unexpected values
                     for i, s in enumerate(dropout_tags):

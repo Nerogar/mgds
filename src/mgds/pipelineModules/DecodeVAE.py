@@ -1,10 +1,11 @@
 from contextlib import nullcontext
 
-import torch
-from diffusers import AutoencoderKL
-
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
+
+import torch
+
+from diffusers import AutoencoderKL
 
 
 class DecodeVAE(
@@ -19,7 +20,7 @@ class DecodeVAE(
             autocast_contexts: list[torch.autocast | None] = None,
             dtype: torch.dtype | None = None,
     ):
-        super(DecodeVAE, self).__init__()
+        super().__init__()
         self.in_name = in_name
         self.out_name = out_name
         self.vae = vae

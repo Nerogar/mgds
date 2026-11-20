@@ -1,10 +1,10 @@
 import os
-from typing import Callable
-
-from tqdm import tqdm
+from collections.abc import Callable
 
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
+
+from tqdm import tqdm
 
 
 class SaveText(
@@ -18,7 +18,7 @@ class SaveText(
             path: str,
             before_save_fun: Callable[[], None] | None = None,
     ):
-        super(SaveText, self).__init__()
+        super().__init__()
         self.text_in_name = text_in_name
         self.original_path_in_name = original_path_in_name
         self.path = path

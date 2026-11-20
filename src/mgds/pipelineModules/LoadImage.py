@@ -1,12 +1,13 @@
 import os.path
 
+from mgds.PipelineModule import PipelineModule
+from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
+
 import torch
-from PIL import Image, ImageOps
 from torchvision import transforms
 from torchvision.io import ImageReadMode, read_image
 
-from mgds.PipelineModule import PipelineModule
-from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
+from PIL import Image, ImageOps
 
 
 class LoadImage(
@@ -23,7 +24,7 @@ class LoadImage(
             channels: int = 3,
             dtype: torch.dtype | None = None,
     ):
-        super(LoadImage, self).__init__()
+        super().__init__()
         self.path_in_name = path_in_name
         self.image_out_name = image_out_name
 

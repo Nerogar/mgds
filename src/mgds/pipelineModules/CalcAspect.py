@@ -7,7 +7,7 @@ class CalcAspect(
     RandomAccessPipelineModule,
 ):
     def __init__(self, image_in_name: str, resolution_out_name: str):
-        super(CalcAspect, self).__init__()
+        super().__init__()
         self.image_in_name = image_in_name
         self.resolution_out_name = resolution_out_name
 

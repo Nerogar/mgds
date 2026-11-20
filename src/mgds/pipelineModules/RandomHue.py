@@ -1,7 +1,7 @@
-from torchvision.transforms import functional
-
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
+
+from torchvision.transforms import functional
 
 
 class RandomHue(
@@ -15,7 +15,7 @@ class RandomHue(
             fixed_enabled_in_name: str,
             max_strength_in_name: str,
     ):
-        super(RandomHue, self).__init__()
+        super().__init__()
         self.names = names
         self.enabled_in_name = enabled_in_name
         self.fixed_enabled_in_name = fixed_enabled_in_name

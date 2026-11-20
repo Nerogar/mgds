@@ -1,11 +1,12 @@
+from collections.abc import Callable
 from contextlib import nullcontext
-from typing import Callable
-
-import torch
-from diffusers import AutoencoderKL
 
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
+
+import torch
+
+from diffusers import AutoencoderKL
 
 
 class RandomLatentMaskRemove(
@@ -23,7 +24,7 @@ class RandomLatentMaskRemove(
             dtype: torch.dtype | None = None,
             before_cache_fun: Callable[[], None] | None = None,
     ):
-        super(RandomLatentMaskRemove, self).__init__()
+        super().__init__()
         self.latent_mask_name = latent_mask_name
         self.latent_conditioning_image_name = latent_conditioning_image_name
         self.possible_resolutions_in_name = possible_resolutions_in_name

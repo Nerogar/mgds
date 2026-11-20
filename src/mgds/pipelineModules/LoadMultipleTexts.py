@@ -9,7 +9,7 @@ class LoadMultipleTexts(
     RandomAccessPipelineModule,
 ):
     def __init__(self, path_in_name: str, texts_out_name: str):
-        super(LoadMultipleTexts, self).__init__()
+        super().__init__()
         self.path_in_name = path_in_name
         self.texts_out_name = texts_out_name
 

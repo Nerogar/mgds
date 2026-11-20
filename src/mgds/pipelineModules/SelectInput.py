@@ -7,7 +7,7 @@ class SelectInput(
     RandomAccessPipelineModule,
 ):
     def __init__(self, setting_name: str, out_name: str, setting_to_in_name_map: dict[str, str], default_in_name: str):
-        super(SelectInput, self).__init__()
+        super().__init__()
         self.setting_name = setting_name
         self.out_name = out_name
         self.setting_to_in_name_map = setting_to_in_name_map

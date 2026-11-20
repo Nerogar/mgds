@@ -4,12 +4,16 @@ from abc import ABCMeta, abstractmethod
 from concurrent import futures
 from contextlib import ExitStack
 from random import Random
-
-import torch
+from typing import TYPE_CHECKING
 
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
 from mgds.pipelineModuleTypes.SerialPipelineModule import SerialPipelineModule
 from mgds.pipelineModuleTypes.SingleVariationRandomAccessPipelineModule import SingleVariationRandomAccessPipelineModule
+
+import torch
+
+if TYPE_CHECKING:
+    from mgds.LoadingPipeline import LoadingPipeline
 
 
 class PipelineState:
@@ -34,7 +38,7 @@ class PipelineModule(metaclass=ABCMeta):
     _state: PipelineState
 
     def __init__(self):
-        super(PipelineModule, self).__init__()
+        super().__init__()
         self.clear_item_cache()
 
     def init(self, pipeline: 'LoadingPipeline', base_seed: int, module_index: int, state: PipelineState):
@@ -86,7 +90,7 @@ class PipelineModule(metaclass=ABCMeta):
                 # item is cached
                 if module.__local_cache.variation_cache_index == variation \
                         and module.__local_cache.item_cache_index == index \
-                        and item_name in module.__local_cache.item_cache.keys():
+                        and item_name in module.__local_cache.item_cache:
                     item = module.__local_cache.item_cache[item_name]
 
                 # the wrong index is cached, clear cache and recalculate
@@ -115,7 +119,7 @@ class PipelineModule(metaclass=ABCMeta):
 
                 # the item is cached and the index is correct, but the item_name is not part of the cache
                 # recalculate and add to the cache
-                elif item_name not in module.__local_cache.item_cache.keys():
+                elif item_name not in module.__local_cache.item_cache:
                     if isinstance(module, RandomAccessPipelineModule):
                         item = module.get_item(variation, index, item_name)
                     if isinstance(module, SingleVariationRandomAccessPipelineModule):
@@ -142,7 +146,6 @@ class PipelineModule(metaclass=ABCMeta):
     def _get_previous_length(self, name: str):
         split_name = name.split('.')
         item_name = split_name[0]
-        path_names = split_name[1::]
 
         for previous_module_index in range(self.__module_index - 1, -1, -1):
             module = self.pipeline.modules[previous_module_index]
@@ -153,6 +156,7 @@ class PipelineModule(metaclass=ABCMeta):
                     else:
                         module.__local_cache.length_cache = module.length()
                 return module.__local_cache.length_cache
+        return None
 
     def _get_previous_meta(self, variation: int, name: str):
         for previous_module_index in range(self.__module_index - 1, -1, -1):
@@ -168,6 +172,7 @@ class PipelineModule(metaclass=ABCMeta):
                     if variation != module.current_variation:
                         self.__raise_variation_error(module, name, module.current_variation, variation)
                     return module.get_meta(name)
+        return None
 
     def _has_previous_next(self, name: str):
         for previous_module_index in range(self.__module_index - 1, -1, -1):
@@ -177,6 +182,7 @@ class PipelineModule(metaclass=ABCMeta):
                     return module.has_next()
                 else:
                     return True
+        return None
 
 
     def _all_contexts(self, autocast_contexts: list[torch.autocast | None]) -> ExitStack:

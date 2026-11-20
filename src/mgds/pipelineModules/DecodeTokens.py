@@ -1,7 +1,7 @@
-from transformers import CLIPTokenizer
-
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
+
+from transformers import CLIPTokenizer
 
 
 class DecodeTokens(
@@ -9,7 +9,7 @@ class DecodeTokens(
     RandomAccessPipelineModule,
 ):
     def __init__(self, in_name: str, out_name: str, tokenizer: CLIPTokenizer):
-        super(DecodeTokens, self).__init__()
+        super().__init__()
         self.in_name = in_name
         self.out_name = out_name
         self.tokenizer = tokenizer

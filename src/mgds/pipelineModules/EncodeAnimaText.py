@@ -1,11 +1,12 @@
 from contextlib import nullcontext
 
-import torch
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
-from transformers import Qwen3ForCausalLM
+
+import torch
 
 from diffusers import AnimaTextConditioner
+from transformers import Qwen3ForCausalLM
 
 
 class EncodeAnimaText(
@@ -24,7 +25,7 @@ class EncodeAnimaText(
             autocast_contexts: list[torch.autocast | None] = None,
             dtype: torch.dtype | None = None,
     ):
-        super(EncodeAnimaText, self).__init__()
+        super().__init__()
         self.tokens_name = tokens_name
         self.tokens_attention_mask_name = tokens_attention_mask_name
         self.t5_tokens_name = t5_tokens_name

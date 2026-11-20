@@ -19,7 +19,7 @@ class VariationSorting(
             variations_group_in_name: str | list[str] | None = None,
             group_enabled_in_name: str | None = None,
     ):
-        super(VariationSorting, self).__init__()
+        super().__init__()
 
         self.names = names
 
@@ -96,7 +96,7 @@ class VariationSorting(
         else:
             first_previous_name = self.names[0]
 
-            group_indices = {'': [in_index for in_index in range(self._get_previous_length(first_previous_name))]}
+            group_indices = {'': list(range(self._get_previous_length(first_previous_name)))}
             group_output_samples = {'': len(group_indices[''])}
 
         self.aggregate_cache = {}
@@ -119,6 +119,7 @@ class VariationSorting(
             in_index = self.group_indices[group_key][group_index]
 
             return group_key, in_variation, group_index, in_index
+        return None
 
     def start(self, variation: int):
         if not self.variations_initialized:

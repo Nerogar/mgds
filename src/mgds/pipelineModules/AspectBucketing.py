@@ -3,10 +3,10 @@ import math
 from random import Random
 from typing import Any
 
-import numpy as np
-
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
+
+import numpy as np
 
 
 class AspectBucketing(
@@ -40,7 +40,7 @@ class AspectBucketing(
             crop_resolution_out_name: str,
             possible_resolutions_out_name: str,
     ):
-        super(AspectBucketing, self).__init__()
+        super().__init__()
 
         self.quantization = quantization
         self.resolution_in_name = resolution_in_name
@@ -137,7 +137,7 @@ class AspectBucketing(
                     )
                 )
             else:
-                possible_target_resolutions |= set([int(res.strip()) for res in resolutions.split(',')])
+                possible_target_resolutions |= {int(res.strip()) for res in resolutions.split(',')}
 
         if self.target_resolutions_override_in_name is not None:
             for index in range(self._get_previous_length(self.target_resolutions_override_in_name)):
@@ -150,7 +150,7 @@ class AspectBucketing(
                         )
                     )
                 else:
-                    possible_target_resolutions |= set([int(res.strip()) for res in resolutions.split(',')])
+                    possible_target_resolutions |= {int(res.strip()) for res in resolutions.split(',')}
 
         for index in range(self._get_previous_length(self.target_frames_in_name)):
             frames = self._get_previous_item(variation, self.target_frames_in_name, index)
@@ -163,8 +163,9 @@ class AspectBucketing(
             set(sum(self.bucket_resolutions.values(), [])) | possible_fixed_resolutions
         )
         if self.frame_dim_enabled:
-            self.flattened_possible_resolutions = \
-                list((f, *r) for f, r in itertools.product(possible_frames, self.flattened_possible_resolutions))
+            self.flattened_possible_resolutions = [
+                (f, *r) for f, r in itertools.product(possible_frames, self.flattened_possible_resolutions)
+            ]
 
         self.bucket_aspects = {k: np.array(v) for (k, v) in self.bucket_aspects.items()}
 

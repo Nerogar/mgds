@@ -7,7 +7,7 @@ class SettingsPipelineModule(
     RandomAccessPipelineModule,
 ):
     def __init__(self, settings: dict):
-        super(SettingsPipelineModule, self).__init__()
+        super().__init__()
         self.settings = settings
 
     def length(self) -> int:

@@ -7,4 +7,4 @@ down the chain. This modular approach enables highly complex data processing pip
 pre-built modules.
 
 This project is currently developed for the use in [OneTrainer](https://github.com/Nerogar/OneTrainer), but it can be
-used in all kinds of different applications. 
+used in all kinds of different applications.

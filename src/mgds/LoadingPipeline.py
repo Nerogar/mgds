@@ -1,11 +1,11 @@
-from typing import Iterator
-
-import torch
+from collections.abc import Iterator
 
 from mgds.PipelineModule import PipelineModule, PipelineState
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
 from mgds.pipelineModuleTypes.SerialPipelineModule import SerialPipelineModule
 from mgds.pipelineModuleTypes.SingleVariationRandomAccessPipelineModule import SingleVariationRandomAccessPipelineModule
+
+import torch
 
 
 class LoadingPipeline(Iterator):

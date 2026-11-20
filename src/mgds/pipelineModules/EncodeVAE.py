@@ -1,11 +1,12 @@
 from contextlib import nullcontext
 
-import torch
-from diffusers import AutoencoderKL, AutoencoderDC, AutoencoderKLQwenImage, AutoencoderKLFlux2
-from diffusers.models.autoencoders.autoencoder_kl_hunyuan_video import AutoencoderKLHunyuanVideo
-
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
+
+import torch
+
+from diffusers import AutoencoderDC, AutoencoderKL, AutoencoderKLFlux2, AutoencoderKLQwenImage
+from diffusers.models.autoencoders.autoencoder_kl_hunyuan_video import AutoencoderKLHunyuanVideo
 
 
 class EncodeVAE(
@@ -21,7 +22,7 @@ class EncodeVAE(
             dtype: torch.dtype | None = None,
             sample_mode: str = "sample",
     ):
-        super(EncodeVAE, self).__init__()
+        super().__init__()
         self.in_name = in_name
         self.out_name = out_name
         self.vae = vae

@@ -1,10 +1,11 @@
 from contextlib import nullcontext
 
-import torch
-from transformers import Gemma2Model
-
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
+
+import torch
+
+from transformers import Gemma2Model
 
 
 class EncodeGemmaText(
@@ -22,7 +23,7 @@ class EncodeGemmaText(
             autocast_contexts: list[torch.autocast | None] = None,
             dtype: torch.dtype | None = None,
     ):
-        super(EncodeGemmaText, self).__init__()
+        super().__init__()
         self.tokens_in_name = tokens_in_name
         self.tokens_attention_mask_in_name = tokens_attention_mask_in_name
         self.hidden_state_out_name = hidden_state_out_name

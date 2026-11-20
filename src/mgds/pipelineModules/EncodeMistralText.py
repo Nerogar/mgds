@@ -1,8 +1,10 @@
 from contextlib import nullcontext
 
-import torch
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
+
+import torch
+
 from transformers import Mistral3ForConditionalGeneration, Mistral3Model
 
 
@@ -21,7 +23,7 @@ class EncodeMistralText(
             autocast_contexts: list[torch.autocast | None] = None,
             dtype: torch.dtype | None = None,
     ):
-        super(EncodeMistralText, self).__init__()
+        super().__init__()
         self.tokens_name = tokens_name
         self.tokens_attention_mask_in_name = tokens_attention_mask_in_name
         self.hidden_state_out_name = hidden_state_out_name

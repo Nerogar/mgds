@@ -1,4 +1,5 @@
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
@@ -14,7 +15,7 @@ class MapData(
             out_name: str,
             map_fn: Callable[[Any], Any],
     ):
-        super(MapData, self).__init__()
+        super().__init__()
         self.in_name = in_name
         self.out_name = out_name
         self.map_fn = map_fn

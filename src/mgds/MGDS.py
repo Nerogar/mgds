@@ -1,12 +1,12 @@
 import random
 
-import torch
-from torch.utils.data import DataLoader, Dataset, IterableDataset
-
 from mgds.ConceptPipelineModule import ConceptPipelineModule
 from mgds.LoadingPipeline import LoadingPipeline
 from mgds.PipelineModule import PipelineModule, PipelineState
 from mgds.SettingsPipelineModule import SettingsPipelineModule
+
+import torch
+from torch.utils.data import DataLoader, IterableDataset
 
 
 class MGDS(IterableDataset):
@@ -51,4 +51,4 @@ class MGDS(IterableDataset):
 
 class TrainDataLoader(DataLoader):
     def __init__(self, dataset: MGDS, batch_size):
-        super(TrainDataLoader, self).__init__(dataset, batch_size=batch_size, drop_last=True)
+        super().__init__(dataset, batch_size=batch_size, drop_last=True)

@@ -1,6 +1,7 @@
+import string
+
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
-import string
 
 
 class CapitalizeTags(
@@ -17,7 +18,7 @@ class CapitalizeTags(
             convert_lowercase_in_name: str,     #whether to apply lowercase to entire caption before any other caps changes
             text_out_name: str,
     ):
-        super(CapitalizeTags, self).__init__()
+        super().__init__()
         self.text_in_name = text_in_name
         self.enabled_in_name = enabled_in_name
         self.probability_in_name = probability_in_name
@@ -62,14 +63,14 @@ class CapitalizeTags(
                         case "first":     #make First word only caps
                             text_list.append(s.capitalize())
                         case "random":    #make rAnDOm lETTerS CaPs
-                            s2 = ''.join(rand.choice(x) for x in zip(s.upper(), s.lower()))
+                            s2 = ''.join(rand.choice(x) for x in zip(s.upper(), s.lower(), strict=False))
                             text_list.append(s2)
                         case _:           #catch any unexpected values
                             text_list.append(s)
                 else:
                     text_list.append(s)
             text = delimiter.join(text_list)
- 
+
         return {
             self.text_out_name: text
         }

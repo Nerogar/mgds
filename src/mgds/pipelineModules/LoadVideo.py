@@ -1,9 +1,12 @@
 import os
 
-import av
-import torch
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
+
+import torch
+
+import av
+
 
 class LoadVideo(
     PipelineModule,
@@ -110,10 +113,7 @@ class LoadVideo(
                 video_tensor = torch.stack(frames, dim=1)
                 del frames
 
-                if self.dtype:
-                    video_tensor = video_tensor.to(dtype=self.dtype)
-                else:
-                    video_tensor = video_tensor.to(dtype=torch.float32)
+                video_tensor = video_tensor.to(dtype=self.dtype) if self.dtype else video_tensor.to(dtype=torch.float32)
 
                 # Transform 0 - 255 to 0-1
                 video_tensor = video_tensor / 255
@@ -123,7 +123,7 @@ class LoadVideo(
 
             except FileNotFoundError:
                 video_tensor = None
-            except Exception as e:
+            except Exception:
                 print("could not load video, it might be corrupted: " + path)
                 raise
         else:
