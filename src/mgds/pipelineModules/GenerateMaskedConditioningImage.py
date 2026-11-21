@@ -14,7 +14,7 @@ class GenerateMaskedConditioningImage(
             image_range_min: float,
             image_range_max: float,
     ):
-        super(GenerateMaskedConditioningImage, self).__init__()
+        super().__init__()
         self.image_in_name = image_in_name
         self.mask_in_name = mask_in_name
         self.image_out_name = image_out_name

@@ -1,7 +1,7 @@
-from torchvision import transforms
-
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
+
+from torchvision import transforms
 
 
 class ScaleImage(
@@ -9,7 +9,7 @@ class ScaleImage(
     RandomAccessPipelineModule,
 ):
     def __init__(self, in_name: str, out_name: str, factor: float):
-        super(ScaleImage, self).__init__()
+        super().__init__()
         self.in_name = in_name
         self.out_name = out_name
         self.factor = factor

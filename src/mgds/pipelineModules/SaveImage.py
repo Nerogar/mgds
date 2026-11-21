@@ -1,12 +1,13 @@
 import os
-from typing import Callable
-
-import torch
-from torchvision import transforms
-from tqdm import tqdm
+from collections.abc import Callable
 
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
+
+import torch
+from torchvision import transforms
+
+from tqdm import tqdm
 
 
 class SaveImage(
@@ -23,7 +24,7 @@ class SaveImage(
             in_range_max: float,
             before_save_fun: Callable[[], None] | None = None,
     ):
-        super(SaveImage, self).__init__()
+        super().__init__()
         self.image_in_name = image_in_name
         self.original_path_in_name = original_path_in_name
         self.path = path

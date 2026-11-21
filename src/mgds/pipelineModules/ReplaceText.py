@@ -13,7 +13,7 @@ class ReplaceText(
             old_text: str,
             new_text: str
     ):
-        super(ReplaceText, self).__init__()
+        super().__init__()
         self.text_in_name = text_in_name
         self.text_out_name = text_out_name
         self.old_text = old_text

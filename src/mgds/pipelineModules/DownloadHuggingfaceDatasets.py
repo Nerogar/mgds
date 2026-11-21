@@ -1,9 +1,10 @@
 import os
+from contextlib import suppress
 
 from mgds.PipelineModule import PipelineModule
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
+
 import huggingface_hub
-from contextlib import suppress
 
 
 class DownloadHuggingfaceDatasets(
@@ -17,7 +18,7 @@ class DownloadHuggingfaceDatasets(
             enabled_in_name: str,
             concept_out_name: str,
     ):
-        super(DownloadHuggingfaceDatasets, self).__init__()
+        super().__init__()
 
         self.concept_in_name = concept_in_name
         self.enabled_in_name = enabled_in_name

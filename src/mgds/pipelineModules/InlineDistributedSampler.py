@@ -7,7 +7,7 @@ class InlineDistributedSampler(
     SerialPipelineModule,
 ):
     def __init__(self, names: list[str], world_size: int, rank: int):
-        super(InlineDistributedSampler, self).__init__()
+        super().__init__()
         self.names = names
         self.world_size = world_size
         self.rank = rank
@@ -24,7 +24,7 @@ class InlineDistributedSampler(
     def has_next(self) -> bool:
         return self._has_previous_next(self.names[0])
 
-    
+
     def get_next_item(self) -> dict:
         prev_index = self.current_index * self.world_size + self.rank
 

@@ -1,9 +1,6 @@
 import os.path
 
-import torch
-from diffusers import AutoencoderKL
-from tqdm import tqdm
-from transformers import DPTImageProcessor, DPTForDepthEstimation, CLIPTokenizer
+from src.mgds.MGDS import MGDS, TrainDataLoader
 
 from mgds.OutputPipelineModule import OutputPipelineModule
 from mgds.pipelineModules.AspectBatchSorting import AspectBatchSorting
@@ -31,7 +28,13 @@ from mgds.pipelineModules.ScaleImage import ScaleImage
 from mgds.pipelineModules.ShuffleTags import ShuffleTags
 from mgds.pipelineModules.Tokenize import Tokenize
 from mgds.pipelineModules.VariationSorting import VariationSorting
-from src.mgds.MGDS import MGDS, TrainDataLoader
+
+import torch
+
+from diffusers import AutoencoderKL
+from transformers import CLIPTokenizer, DPTForDepthEstimation, DPTImageProcessor
+
+from tqdm import tqdm
 
 DEVICE = 'cuda'
 DTYPE = torch.float32
@@ -144,9 +147,9 @@ def test():
     )
     dl = TrainDataLoader(ds, batch_size=BATCH_SIZE)
 
-    for epoch in range(10):
+    for _epoch in range(10):
         ds.start_next_epoch()
-        for batch in tqdm(dl):
+        for _batch in tqdm(dl):
             pass
 
 

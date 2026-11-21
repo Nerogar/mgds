@@ -14,7 +14,7 @@ class ShuffleTags(
             keep_tags_count_in_name: str,
             text_out_name: str,
     ):
-        super(ShuffleTags, self).__init__()
+        super().__init__()
         self.text_in_name = text_in_name
         self.enabled_in_name = enabled_in_name
         self.delimiter_in_name = delimiter_in_name

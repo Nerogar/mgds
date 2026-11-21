@@ -18,7 +18,7 @@ class SingleAspectCalculation(
             crop_resolution_out_name: str,
             possible_resolutions_out_name: str
     ):
-        super(SingleAspectCalculation, self).__init__()
+        super().__init__()
 
         self.resolution_in_name = resolution_in_name
 
@@ -55,7 +55,7 @@ class SingleAspectCalculation(
             if isinstance(resolutions, int):
                 possible_target_resolutions.add(resolutions)
             elif isinstance(resolutions, str):
-                possible_target_resolutions |= set([int(res.strip()) for res in resolutions.split(',')])
+                possible_target_resolutions |= {int(res.strip()) for res in resolutions.split(',')}
 
         if self.target_resolutions_override_in_name is not None:
             for index in range(self._get_previous_length(self.target_resolutions_override_in_name)):
@@ -63,7 +63,7 @@ class SingleAspectCalculation(
                 if isinstance(resolutions, int):
                     possible_target_resolutions.add(resolutions)
                 elif isinstance(resolutions, str):
-                    possible_target_resolutions |= set([int(res.strip()) for res in resolutions.split(',')])
+                    possible_target_resolutions |= {int(res.strip()) for res in resolutions.split(',')}
 
         self.possible_target_resolutions = list(possible_target_resolutions)
 

@@ -6,7 +6,7 @@ class SingleVariationRandomAccessPipelineModule(
     metaclass=ABCMeta,
 ):
     def __init__(self):
-        super(SingleVariationRandomAccessPipelineModule, self).__init__()
+        super().__init__()
         self.current_variation = -1
 
     @abstractmethod
@@ -14,15 +14,13 @@ class SingleVariationRandomAccessPipelineModule(
         """
         Returns the number of items this module can return.
         """
-        pass
 
-    def start(self, variation: int):
+    def start(self, variation: int):  # noqa: B027
         """
         Called once before each variation, starting with the first variation.
 
         :param variation: the variation that is started
         """
-        pass
 
     def get_meta(self, name: str) -> Any:
         """
@@ -45,4 +43,3 @@ class SingleVariationRandomAccessPipelineModule(
         :param requested_name: the requested item key
         :return: an item or partial item
         """
-        pass
