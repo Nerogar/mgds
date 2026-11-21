@@ -10,7 +10,18 @@ authors = [
 ]
 description = "Modular Pytorch DataSet implementation"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11.1"
+dependencies = [
+    "torch>=2.14.1",
+    "torchvision>=0.29",
+    "numpy>=2.2",
+    "pillow>=13.0",
+    "tqdm>=4.67",
+    "av>=16.0",
+    "huggingface-hub>=1.22",
+    "transformers>=5.5",
+    "diffusers>=0.38",
+]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Operating System :: OS Independent",
@@ -20,6 +31,11 @@ classifiers = [
 [project.urls]
 Homepage = "https://github.com/Nerogar/mgds"
 Issues = "https://github.com/Nerogar/mgds/issues"
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.0.1", #optional for those that dont globally install precommit
+]
 
 [tool.setuptools_scm]
 
