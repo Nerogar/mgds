@@ -19,7 +19,7 @@ class MGDS(IterableDataset):
             device: torch.device,
             concepts: list[dict],
             settings: dict,
-            definition: [PipelineModule],
+            definition: list[PipelineModule],
             batch_size: int, #local batch size
             state: PipelineState,
             seed: int = 42,
