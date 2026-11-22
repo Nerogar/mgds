@@ -1,4 +1,4 @@
-from mgds.PipelineModule import PipelineModule
+from mgds.PipelineModule import PipelineModule, SkipSampleError
 from mgds.pipelineModuleTypes.SerialPipelineModule import SerialPipelineModule
 
 import torch
@@ -33,21 +33,25 @@ class OutputPipelineModule(
         return self.output_names
 
     def get_next_item(self) -> dict:
-        item = {}
+        while True:
+            item = {}
+            try:
+                for input_name, output_name in zip(self.input_names, self.output_names, strict=True):
+                    if self._get_previous_length(input_name) <= self.current_index:
+                        raise StopIteration
 
-        for input_name, output_name in zip(self.input_names, self.output_names, strict=True):
-            if self._get_previous_length(input_name) <= self.current_index:
-                raise StopIteration
+                    new_item = self._get_previous_item(self.current_variation, input_name, self.current_index)
 
-            new_item = self._get_previous_item(self.current_variation, input_name, self.current_index)
+                    if isinstance(new_item, (int, float)):
+                        new_item = torch.tensor(new_item)
 
-            if isinstance(new_item, (int, float)):
-                new_item = torch.tensor(new_item)
+                    if torch.is_tensor(new_item):
+                        new_item = new_item.to(self.pipeline.device)
 
-            if torch.is_tensor(new_item):
-                new_item = new_item.to(self.pipeline.device)
-
-            item[output_name] = new_item
+                    item[output_name] = new_item
+                break
+            except SkipSampleError:
+                self.current_index += 1
 
         # filter out None values
         item = {k: v for k, v in item.items() if v is not None}

@@ -16,6 +16,10 @@ if TYPE_CHECKING:
     from mgds.LoadingPipeline import LoadingPipeline
 
 
+class SkipSampleError(Exception):
+    """Raised by a pipeline module when an individual sample is unreadable/corrupt and should be skipped."""
+
+
 class PipelineState:
     """Container for state shared amongst all pipeline modules in a pipeline.
 

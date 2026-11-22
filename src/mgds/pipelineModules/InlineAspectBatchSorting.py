@@ -1,4 +1,4 @@
-from mgds.PipelineModule import PipelineModule
+from mgds.PipelineModule import PipelineModule, SkipSampleError
 from mgds.pipelineModuleTypes.SerialPipelineModule import SerialPipelineModule
 
 
@@ -55,14 +55,17 @@ class InlineAspectBatchSorting(
             in_index = self.in_index_list[self.next_in_cache_index]
             self.next_in_cache_index += 1
 
-            item = {}
-            for name in self.names:
-                item[name] = self._get_previous_item(self.current_variation, name, in_index)
+            try:
+                item = {}
+                for name in self.names:
+                    item[name] = self._get_previous_item(self.current_variation, name, in_index)
 
-            if self.resolution_in_name in item:
-                resolution = item[self.resolution_in_name]
-            else:
-                resolution = self._get_previous_item(self.current_variation, self.resolution_in_name, in_index)
+                if self.resolution_in_name in item:
+                    resolution = item[self.resolution_in_name]
+                else:
+                    resolution = self._get_previous_item(self.current_variation, self.resolution_in_name, in_index)
+            except SkipSampleError:
+                continue
 
             if resolution not in self.bucket_dict:
                 self.bucket_dict[resolution] = []

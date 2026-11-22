@@ -1,4 +1,4 @@
-from mgds.PipelineModule import PipelineModule
+from mgds.PipelineModule import PipelineModule, SkipSampleError
 from mgds.pipelineModuleTypes.SingleVariationRandomAccessPipelineModule import SingleVariationRandomAccessPipelineModule
 
 
@@ -59,15 +59,14 @@ class AspectBatchSorting(
         return index_list
 
     def __sort_resolutions(self, variation: int):
-        resolutions = []
-        for index in range(self._get_previous_length(self.resolution_in_name)):
-            resolution = self._get_previous_item(self.current_variation, self.resolution_in_name, index)
-
-            resolutions.append(resolution)
-
         # sort samples into dict of lists, with key = resolution
         self.bucket_dict = {}
-        for index, resolution in enumerate(resolutions):
+        for index in range(self._get_previous_length(self.resolution_in_name)):
+            try:
+                resolution = self._get_previous_item(self.current_variation, self.resolution_in_name, index)
+            except SkipSampleError:
+                continue
+
             if resolution not in self.bucket_dict:
                 self.bucket_dict[resolution] = []
             self.bucket_dict[resolution].append(index)

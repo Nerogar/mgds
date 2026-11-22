@@ -6,7 +6,7 @@ import os
 from collections.abc import Callable
 from typing import Any
 
-from mgds.PipelineModule import PipelineModule
+from mgds.PipelineModule import PipelineModule, SkipSampleError
 from mgds.pipelineModuleTypes.SingleVariationRandomAccessPipelineModule import SingleVariationRandomAccessPipelineModule
 
 import torch
@@ -196,11 +196,15 @@ class DiskCache(
                             split_item = {}
                             aggregate_item = {}
 
-                            with torch.no_grad():
-                                for name in self.split_names:
-                                    split_item[name] = self.__clone_for_cache(self._get_previous_item(in_variation, name, in_index))
-                                for name in self.aggregate_names:
-                                    aggregate_item[name] = self.__clone_for_cache(self._get_previous_item(in_variation, name, in_index))
+                            try:
+                                with torch.no_grad():
+                                    for name in self.split_names:
+                                        split_item[name] = self.__clone_for_cache(self._get_previous_item(in_variation, name, in_index))
+                                    for name in self.aggregate_names:
+                                        aggregate_item[name] = self.__clone_for_cache(self._get_previous_item(in_variation, name, in_index))
+                            except SkipSampleError:
+                                aggregate_cache[group_index] = None
+                                return
 
                             torch.save(split_item, os.path.realpath(os.path.join(cache_dir, str(group_index) + '.pt')))
                             aggregate_cache[group_index] = aggregate_item
@@ -253,6 +257,8 @@ class DiskCache(
         group_key, in_variation, group_index, in_index = self.__get_input_index(self.current_variation, index)
 
         aggregate_item = self.aggregate_cache[group_key][in_variation][group_index]
+        if aggregate_item is None:
+            raise SkipSampleError
 
         if requested_name in self.aggregate_names:
             for name in self.aggregate_names:

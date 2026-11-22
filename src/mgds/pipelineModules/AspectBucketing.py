@@ -76,8 +76,8 @@ class AspectBucketing(
 
     def __quantize_resolution(self, resolution: tuple[float, float], quantization: int) -> tuple[int, int]:
         return (
-            round(resolution[0] / quantization) * quantization,
-            round(resolution[1] / quantization) * quantization,
+            max(quantization, round(resolution[0] / quantization) * quantization),
+            max(quantization, round(resolution[1] / quantization) * quantization),
         )
 
     def __create_automatic_buckets(

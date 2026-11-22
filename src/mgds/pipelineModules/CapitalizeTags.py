@@ -63,7 +63,7 @@ class CapitalizeTags(
                         case "first":     #make First word only caps
                             text_list.append(s.capitalize())
                         case "random":    #make rAnDOm lETTerS CaPs
-                            s2 = ''.join(rand.choice(x) for x in zip(s.upper(), s.lower(), strict=False))
+                            s2 = ''.join(ch.upper() if rand.random() < 0.5 else ch.lower() for ch in s)
                             text_list.append(s2)
                         case _:           #catch any unexpected values
                             text_list.append(s)
