@@ -1,6 +1,6 @@
 import os.path
 
-from mgds.PipelineModule import PipelineModule
+from mgds.PipelineModule import PipelineModule, SkipSampleError
 from mgds.pipelineModuleTypes.RandomAccessPipelineModule import RandomAccessPipelineModule
 
 import torch
@@ -23,6 +23,7 @@ class LoadImage(
             supported_extensions: set[str],
             channels: int = 3,
             dtype: torch.dtype | None = None,
+            skip_corrupt: bool = True,
     ):
         super().__init__()
         self.path_in_name = path_in_name
@@ -34,6 +35,7 @@ class LoadImage(
         self.supported_extensions = supported_extensions
 
         self.dtype = dtype
+        self.skip_corrupt = skip_corrupt
 
         if channels == 3:
             self.mode = ImageReadMode.RGB
@@ -74,7 +76,10 @@ class LoadImage(
                 # Torch builtins couldn't load it because not all image formats and
                 # variations there are supported. Fall back to pillow.
                 image_tensor = self._load_pillow(path)
-            except:
+            except Exception as e:
+                if self.skip_corrupt:
+                    print("could not load image, it might be corrupted, skipping: " + path)
+                    raise SkipSampleError(f"could not load image: {path}") from e
                 print("could not load image, it might be corrupted: " + path)
                 raise
         else:
@@ -103,7 +108,10 @@ class LoadImage(
             image_tensor = image_tensor * (self.range_max - self.range_min) + self.range_min
         except FileNotFoundError:
             image_tensor = None
-        except:
+        except Exception as e:
+            if self.skip_corrupt:
+                print("could not load image, it might be corrupted, skipping: " + path)
+                raise SkipSampleError(f"could not load image: {path}") from e
             print("could not load image, it might be corrupted: " + path)
             raise
 

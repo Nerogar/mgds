@@ -4,7 +4,7 @@ import math
 from collections.abc import Callable
 from typing import Any
 
-from mgds.PipelineModule import PipelineModule
+from mgds.PipelineModule import PipelineModule, SkipSampleError
 from mgds.pipelineModuleTypes.SingleVariationRandomAccessPipelineModule import SingleVariationRandomAccessPipelineModule
 
 from tqdm import tqdm
@@ -144,10 +144,17 @@ class RamCache(
 
             item = {}
 
-            for name in self.cache_names:
-                item[name] = self._get_previous_item(in_variation, name, in_index)
+            try:
+                for name in self.cache_names:
+                    item[name] = self._get_previous_item(in_variation, name, in_index)
+            except SkipSampleError:
+                self.cache.append(None)
+                continue
 
             self.cache.append(item)
 
     def get_item(self, index: int, requested_name: str = None) -> dict:
-        return self.cache[index]
+        item = self.cache[index]
+        if item is None:
+            raise SkipSampleError
+        return item
