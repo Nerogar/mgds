@@ -7,6 +7,7 @@ import torch
 from torchvision import transforms
 from torchvision.io import ImageReadMode, read_image
 
+import numpy as np
 from PIL import Image, ImageOps
 
 
@@ -64,6 +65,16 @@ class LoadImage(
                 image_tensor = read_image(path, self.mode, apply_exif_orientation=True) \
                     .to(device=self.pipeline.device)
 
+                # Normalize integer dtypes (e.g. uint8 -> 255, uint16 -> 65535) in float32 before
+                # casting to self.dtype so uint16 max (65535) does not overflow float16 (65504).
+                if image_tensor.is_floating_point():
+                    image_tensor = image_tensor.to(dtype=torch.float32)
+                else:
+                    image_max = torch.iinfo(image_tensor.dtype).max
+                    image_tensor = image_tensor.to(dtype=torch.float32) / image_max
+
+                image_tensor = image_tensor * (self.range_max - self.range_min) + self.range_min
+
                 if self.dtype:
                     image_tensor = image_tensor.to(dtype=self.dtype)
 
@@ -101,6 +112,18 @@ class LoadImage(
 
             t = transforms.ToTensor()
             image_tensor = t(image).to(device=self.pipeline.device)
+            if image.mode.startswith("I;16"):
+                # PIL's convert('L'/'RGB') clamps 16-bit grayscale values >= 255, and ToTensor()
+                # reinterprets I;16 as signed int16 (wrapping >=32768 negative).
+                image_tensor = torch.from_numpy(np.asarray(image, dtype=np.float32)).unsqueeze(0)
+                image_tensor = image_tensor.to(device=self.pipeline.device) / 65535.0
+                if self.pillow_mode == 'RGB':
+                    image_tensor = image_tensor.repeat(3, 1, 1)
+            else:
+                image = image.convert(self.pillow_mode)
+                image_tensor = t(image).to(device=self.pipeline.device, dtype=torch.float32)
+
+            image_tensor = image_tensor * (self.range_max - self.range_min) + self.range_min
 
             if self.dtype:
                 image_tensor = image_tensor.to(dtype=self.dtype)
