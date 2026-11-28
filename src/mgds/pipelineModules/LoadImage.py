@@ -77,10 +77,6 @@ class LoadImage(
 
                 if self.dtype:
                     image_tensor = image_tensor.to(dtype=self.dtype)
-
-                # Transform 0 - 255 to 0-1
-                image_tensor = image_tensor / 255
-                image_tensor = image_tensor * (self.range_max - self.range_min) + self.range_min
             except FileNotFoundError:
                 image_tensor = None
             except RuntimeError:
@@ -108,10 +104,8 @@ class LoadImage(
         try:
             image = Image.open(path)
             image = ImageOps.exif_transpose(image)
-            image = image.convert(self.pillow_mode)
 
             t = transforms.ToTensor()
-            image_tensor = t(image).to(device=self.pipeline.device)
             if image.mode.startswith("I;16"):
                 # PIL's convert('L'/'RGB') clamps 16-bit grayscale values >= 255, and ToTensor()
                 # reinterprets I;16 as signed int16 (wrapping >=32768 negative).
@@ -127,8 +121,6 @@ class LoadImage(
 
             if self.dtype:
                 image_tensor = image_tensor.to(dtype=self.dtype)
-
-            image_tensor = image_tensor * (self.range_max - self.range_min) + self.range_min
         except FileNotFoundError:
             image_tensor = None
         except Exception as e:
